@@ -1,0 +1,32 @@
+# Build output
+build/
+out/
+cmake-build-*/
+CMakeUserPresets.json
+
+# vcpkg
+vcpkg_installed/
+vcpkg/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+config/config.local.json
+
+# Runtime data
+data/
+logs/
+*.log
+
+# Editors / IDEs
+.vs/
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.user
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db

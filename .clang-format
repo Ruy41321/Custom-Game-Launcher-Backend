@@ -1,0 +1,27 @@
+---
+Language: Cpp
+BasedOnStyle: LLVM
+Standard: c++20
+
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 100
+
+AccessModifierOffset: -2
+AllowShortFunctionsOnASingleLine: Inline
+AlwaysBreakTemplateDeclarations: Yes
+BinPackArguments: false
+BinPackParameters: false
+BreakBeforeBraces: Attach
+BreakConstructorInitializers: BeforeColon
+ConstructorInitializerIndentWidth: 4
+FixNamespaceComments: true
+IncludeBlocks: Preserve
+NamespaceIndentation: None
+PackConstructorInitializers: Never
+PointerAlignment: Left
+ReflowComments: true
+SeparateDefinitionBlocks: Always
+SortIncludes: CaseSensitive
+SpaceAfterTemplateKeyword: false
