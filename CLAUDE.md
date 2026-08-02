@@ -3,7 +3,7 @@
 Context file for AI-assisted development sessions. **Read this before writing any code, and
 update it at the end of every session** (see [Session protocol](#session-protocol)).
 
-Companion repository: `Custom-Game-Launcher` (Avalonia desktop client). Cross-cutting
+Companion repository: `Custom-Game-Launcher-Frontend` (Avalonia desktop client). Cross-cutting
 contracts — API shapes, manifest format, error envelope — must stay in sync with it.
 
 ---

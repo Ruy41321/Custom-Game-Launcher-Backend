@@ -1,7 +1,7 @@
 # Custom Game Launcher — Backend
 
 REST API, PostgreSQL schema and build file server for the
-[Custom Game Launcher](https://github.com/Ruy41321/Custom-Game-Launcher), an open-source,
+[Custom Game Launcher](https://github.com/Ruy41321/Custom-Game-Launcher-Frontend), an open-source,
 self-hostable game launcher for indie and hobbyist developers who need to get demos and
 in-development builds to a handful of testers without zip files on Discord.
 
