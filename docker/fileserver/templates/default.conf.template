@@ -1,0 +1,51 @@
+# Read-only delivery of content-addressed build blobs.
+#
+# Download URLs are signed by the API and validated here with nginx's secure_link module:
+# no callback to the API per chunk, and HTTP Range works natively so an interrupted
+# download resumes instead of restarting. See CLAUDE.md section 3.
+#
+# The signature is  base64url( md5( "<expires><uri> <secret>" ) )  and is passed as
+#   ?token=<signature>&expires=<unix timestamp>
+
+server {
+    listen      80;
+    server_name _;
+
+    server_tokens off;
+    access_log  /var/log/nginx/access.log;
+
+    location = /healthz {
+        access_log off;
+        add_header Content-Type text/plain;
+        return 200 "ok\n";
+    }
+
+    location /files/ {
+        secure_link     $arg_token,$arg_expires;
+        secure_link_md5 "$secure_link_expires$uri ${FILE_SECURE_LINK_SECRET}";
+
+        # Empty means the signature did not verify; "0" means it verified but has expired.
+        if ($secure_link = "") {
+            return 403;
+        }
+        if ($secure_link = "0") {
+            return 410;
+        }
+
+        alias /data/blobs/;
+
+        # A blob is named after the hash of its own contents, so it can never change.
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+        add_header X-Content-Type-Options "nosniff" always;
+
+        default_type application/octet-stream;
+        sendfile           on;
+        tcp_nopush         on;
+        max_ranges         64;
+        autoindex          off;
+    }
+
+    location / {
+        return 404;
+    }
+}

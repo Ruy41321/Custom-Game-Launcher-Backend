@@ -1,0 +1,43 @@
+# Development overrides. Applied automatically by `docker compose up`.
+#
+# Adds: the database port on the host, verbose text logging, and an `api-build` service
+# that carries the full toolchain so the test suite can be run without installing
+# anything locally.
+
+services:
+  db:
+    ports:
+      - "${DB_HOST_PORT:-5432}:5432"
+
+  api:
+    build:
+      args:
+        BUILD_TYPE: Debug
+    environment:
+      LOG_LEVEL: debug
+      LOG_JSON: "false"
+
+  # Not started by `up` (see the `tools` profile). Run the suite with:
+  #   docker compose run --rm api-build ctest --test-dir build --output-on-failure
+  api-build:
+    profiles: ["tools"]
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+      target: builder
+      args:
+        BUILD_TYPE: Debug
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Integration tests create and drop their own throwaway databases; without these
+      # they skip themselves instead of failing.
+      LAUNCHER_TEST_DB_HOST: db
+      LAUNCHER_TEST_DB_PORT: 5432
+      LAUNCHER_TEST_DB_USER: ${DB_USER:-launcher}
+      LAUNCHER_TEST_DB_PASSWORD: ${DB_PASSWORD:-launcher}
+      LAUNCHER_TEST_DB_ADMIN: ${DB_NAME:-launcher}
+    working_dir: /src
+    entrypoint: []
+    command: ["ctest", "--test-dir", "build", "--output-on-failure"]
