@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  push:
+    branches: [dev]
+  pull_request:
+    branches: [dev]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Keep in sync with vcpkg.json "builtin-baseline" and docker/api/Dockerfile.
+  VCPKG_COMMIT: 39344dff01c5a5a0134caf2624cdd492f05d30ea
+  VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+
+jobs:
+  format:
+    name: clang-format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang-format
+        run: sudo apt-get update && sudo apt-get install -y clang-format
+
+      - name: Check formatting
+        run: |
+          files=$(find src tests -name '*.cpp' -o -name '*.h')
+          echo "$files" | xargs clang-format --dry-run --Werror
+
+  build-and-test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: launcher
+          POSTGRES_PASSWORD: launcher
+          POSTGRES_DB: launcher
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U launcher"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # bison/flex are needed by vcpkg's libpq port (pulled in by Drogon's postgres
+      # feature); the autotools are needed by libsodium. Keep in sync with
+      # docker/api/Dockerfile.
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build pkg-config zip unzip tar curl \
+            bison flex \
+            autoconf autoconf-archive automake libtool gettext
+
+      # The first run compiles Drogon and its dependencies from source, which dominates
+      # the job. Later runs restore vcpkg's binary cache and skip almost all of it.
+      - name: Restore vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/vcpkg/archives
+          key: vcpkg-${{ runner.os }}-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-${{ env.VCPKG_COMMIT }}-
+
+      - name: Set up vcpkg
+        run: |
+          git clone --filter=blob:none https://github.com/microsoft/vcpkg "$VCPKG_ROOT"
+          git -C "$VCPKG_ROOT" checkout "$VCPKG_COMMIT"
+          "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
+
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_MANIFEST_FEATURES=tests \
+            -DLAUNCHER_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Unit tests
+        run: ctest --test-dir build -L unit --output-on-failure
+
+      - name: Integration tests
+        env:
+          LAUNCHER_TEST_DB_HOST: localhost
+          LAUNCHER_TEST_DB_PORT: 5432
+          LAUNCHER_TEST_DB_USER: launcher
+          LAUNCHER_TEST_DB_PASSWORD: launcher
+          LAUNCHER_TEST_DB_ADMIN: launcher
+        run: ctest --test-dir build -L integration --output-on-failure
+
+  docker:
+    name: Docker image builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build the API image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/api/Dockerfile
+          target: runtime
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build the file server image
+        uses: docker/build-push-action@v6
+        with:
+          context: docker/fileserver
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
