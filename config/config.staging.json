@@ -1,0 +1,50 @@
+{
+  "environment": "staging",
+  "migrationsDirectory": "${MIGRATIONS_DIR:-/app/migrations}",
+
+  "server": {
+    "listenAddress": "${SERVER_HOST:-0.0.0.0}",
+    "port": ${SERVER_PORT:-8080},
+    "adminListenAddress": "${ADMIN_HOST:-127.0.0.1}",
+    "adminPort": ${ADMIN_PORT:-9090},
+    "adminEnabled": ${ADMIN_ENABLED:-true},
+    "threadCount": ${SERVER_THREADS:-0}
+  },
+
+  "database": {
+    "host": "${DB_HOST}",
+    "port": ${DB_PORT:-5432},
+    "name": "${DB_NAME}",
+    "user": "${DB_USER}",
+    "password": "${DB_PASSWORD}",
+    "connectionCount": ${DB_CONNECTIONS:-8}
+  },
+
+  "logging": {
+    "level": "${LOG_LEVEL:-info}",
+    "directory": "${LOG_DIR:-/var/log/launcher}",
+    "json": true
+  },
+
+  "storage": {
+    "blobRoot": "${BLOB_ROOT:-/data/blobs}",
+    "publicBaseUrl": "${FILE_PUBLIC_BASE_URL}",
+    "secureLinkSecret": "${FILE_SECURE_LINK_SECRET}",
+    "signedUrlTtlSeconds": ${SIGNED_URL_TTL:-3600}
+  },
+
+  "auth": {
+    "jwtSecret": "${JWT_SECRET}",
+    "issuer": "${JWT_ISSUER:-custom-game-launcher}",
+    "accessTokenTtlSeconds": 900,
+    "refreshTokenTtlSeconds": 2592000
+  },
+
+  "updates": {
+    "fullDownloadThresholdRatio": ${FULL_DOWNLOAD_THRESHOLD:-0.7}
+  },
+
+  "uploads": {
+    "defaultQuotaBytes": ${DEFAULT_UPLOAD_QUOTA_BYTES:-5368709120}
+  }
+}

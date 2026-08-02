@@ -1,0 +1,191 @@
+#include "app/Config.h"
+
+#include <json/json.h>
+
+#include <fstream>
+#include <sstream>
+
+namespace launcher::app {
+namespace {
+
+using common::ErrorCode;
+using common::Result;
+
+std::string readString(const Json::Value& node, const char* key, const std::string& fallback) {
+    return node.isMember(key) && node[key].isString() ? node[key].asString() : fallback;
+}
+
+bool readBool(const Json::Value& node, const char* key, bool fallback) {
+    return node.isMember(key) && node[key].isBool() ? node[key].asBool() : fallback;
+}
+
+double readDouble(const Json::Value& node, const char* key, double fallback) {
+    return node.isMember(key) && node[key].isNumeric() ? node[key].asDouble() : fallback;
+}
+
+template<typename T>
+T readInt(const Json::Value& node, const char* key, T fallback) {
+    if (!node.isMember(key) || !node[key].isNumeric()) {
+        return fallback;
+    }
+    return static_cast<T>(node[key].asInt64());
+}
+
+} // namespace
+
+std::string DatabaseConfig::connectionString() const {
+    std::ostringstream out;
+    out << "host=" << host << " port=" << port << " dbname=" << name << " user=" << user
+        << " password=" << password;
+    return out.str();
+}
+
+bool AppConfig::isProduction() const {
+    return environment == "production";
+}
+
+Result<AppConfig> AppConfig::parse(std::string_view json, const common::EnvLookup& lookup) {
+    auto expanded = common::interpolateEnv(json, lookup);
+    if (!expanded.ok()) {
+        return Result<AppConfig>::failure(expanded.error());
+    }
+
+    Json::Value root;
+    Json::CharReaderBuilder builder;
+    std::string parseErrors;
+    const std::string text = std::move(expanded).value();
+    std::istringstream stream(text);
+    if (!Json::parseFromStream(builder, stream, &root, &parseErrors)) {
+        return Result<AppConfig>::failure(ErrorCode::InvalidInput,
+                                          "invalid configuration JSON: " + parseErrors);
+    }
+    if (!root.isObject()) {
+        return Result<AppConfig>::failure(ErrorCode::InvalidInput,
+                                          "configuration root must be a JSON object");
+    }
+
+    AppConfig config;
+    config.environment = readString(root, "environment", config.environment);
+    config.migrationsDirectory =
+        readString(root, "migrationsDirectory", config.migrationsDirectory);
+
+    const auto& server = root["server"];
+    config.server.listenAddress = readString(server, "listenAddress", config.server.listenAddress);
+    config.server.port = readInt<uint16_t>(server, "port", config.server.port);
+    config.server.adminListenAddress =
+        readString(server, "adminListenAddress", config.server.adminListenAddress);
+    config.server.adminPort = readInt<uint16_t>(server, "adminPort", config.server.adminPort);
+    config.server.adminEnabled = readBool(server, "adminEnabled", config.server.adminEnabled);
+    config.server.threadCount = readInt<size_t>(server, "threadCount", config.server.threadCount);
+
+    const auto& database = root["database"];
+    config.database.host = readString(database, "host", config.database.host);
+    config.database.port = readInt<uint16_t>(database, "port", config.database.port);
+    config.database.name = readString(database, "name", config.database.name);
+    config.database.user = readString(database, "user", config.database.user);
+    config.database.password = readString(database, "password", config.database.password);
+    config.database.connectionCount =
+        readInt<size_t>(database, "connectionCount", config.database.connectionCount);
+
+    const auto& logging = root["logging"];
+    config.logging.level = readString(logging, "level", config.logging.level);
+    config.logging.directory = readString(logging, "directory", config.logging.directory);
+    config.logging.json = readBool(logging, "json", config.logging.json);
+
+    const auto& storage = root["storage"];
+    config.storage.blobRoot = readString(storage, "blobRoot", config.storage.blobRoot);
+    config.storage.publicBaseUrl =
+        readString(storage, "publicBaseUrl", config.storage.publicBaseUrl);
+    config.storage.secureLinkSecret =
+        readString(storage, "secureLinkSecret", config.storage.secureLinkSecret);
+    config.storage.signedUrlTtlSeconds =
+        readInt<uint32_t>(storage, "signedUrlTtlSeconds", config.storage.signedUrlTtlSeconds);
+
+    const auto& auth = root["auth"];
+    config.auth.jwtSecret = readString(auth, "jwtSecret", config.auth.jwtSecret);
+    config.auth.issuer = readString(auth, "issuer", config.auth.issuer);
+    config.auth.accessTokenTtlSeconds =
+        readInt<uint32_t>(auth, "accessTokenTtlSeconds", config.auth.accessTokenTtlSeconds);
+    config.auth.refreshTokenTtlSeconds =
+        readInt<uint32_t>(auth, "refreshTokenTtlSeconds", config.auth.refreshTokenTtlSeconds);
+
+    const auto& updates = root["updates"];
+    config.updates.fullDownloadThresholdRatio = readDouble(
+        updates, "fullDownloadThresholdRatio", config.updates.fullDownloadThresholdRatio);
+
+    const auto& uploads = root["uploads"];
+    config.uploads.defaultQuotaBytes =
+        readInt<int64_t>(uploads, "defaultQuotaBytes", config.uploads.defaultQuotaBytes);
+
+    if (auto validation = config.validate(); !validation.ok()) {
+        return Result<AppConfig>::failure(validation.error());
+    }
+
+    return Result<AppConfig>::success(std::move(config));
+}
+
+Result<AppConfig> AppConfig::loadFromFile(const std::filesystem::path& path,
+                                          const common::EnvLookup& lookup) {
+    std::ifstream file(path);
+    if (!file) {
+        return Result<AppConfig>::failure(ErrorCode::NotFound,
+                                          "configuration file not found: " + path.string());
+    }
+
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    return parse(buffer.str(), lookup);
+}
+
+common::VoidResult AppConfig::validate() const {
+    if (server.port == 0) {
+        return common::VoidResult::failure(ErrorCode::InvalidInput, "server.port must be non-zero");
+    }
+    if (database.name.empty() || database.user.empty()) {
+        return common::VoidResult::failure(ErrorCode::InvalidInput,
+                                           "database.name and database.user are required");
+    }
+    if (updates.fullDownloadThresholdRatio <= 0.0 || updates.fullDownloadThresholdRatio > 1.0) {
+        return common::VoidResult::failure(
+            ErrorCode::InvalidInput, "updates.fullDownloadThresholdRatio must be within (0, 1]");
+    }
+    if (uploads.defaultQuotaBytes <= 0) {
+        return common::VoidResult::failure(ErrorCode::InvalidInput,
+                                           "uploads.defaultQuotaBytes must be positive");
+    }
+
+    // Secrets are allowed to be blank in development so the stack boots with no setup, but
+    // never in a deployed environment.
+    if (environment != "development") {
+        if (auth.jwtSecret.size() < 32) {
+            return common::VoidResult::failure(
+                ErrorCode::InvalidInput,
+                "auth.jwtSecret must be at least 32 characters outside development");
+        }
+        if (storage.secureLinkSecret.empty()) {
+            return common::VoidResult::failure(
+                ErrorCode::InvalidInput,
+                "storage.secureLinkSecret is required outside development");
+        }
+        if (database.password.empty()) {
+            return common::VoidResult::failure(ErrorCode::InvalidInput,
+                                               "database.password is required outside development");
+        }
+    }
+
+    return common::VoidResult::success();
+}
+
+std::filesystem::path resolveConfigPath(const std::string& explicitPath,
+                                        const common::EnvLookup& lookup) {
+    if (!explicitPath.empty()) {
+        return {explicitPath};
+    }
+    if (auto fromEnv = lookup("LAUNCHER_CONFIG"); fromEnv.has_value() && !fromEnv->empty()) {
+        return {*fromEnv};
+    }
+    const auto environment = lookup("LAUNCHER_ENV").value_or("development");
+    return std::filesystem::path("config") / ("config." + environment + ".json");
+}
+
+} // namespace launcher::app
