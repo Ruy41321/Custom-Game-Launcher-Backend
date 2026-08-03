@@ -132,6 +132,16 @@ Result<AppConfig> AppConfig::parse(std::string_view json, const common::EnvLooku
     const auto& uploads = root["uploads"];
     config.uploads.defaultQuotaBytes =
         readInt<int64_t>(uploads, "defaultQuotaBytes", config.uploads.defaultQuotaBytes);
+    config.uploads.maxBlobBytes =
+        readInt<int64_t>(uploads, "maxBlobBytes", config.uploads.maxBlobBytes);
+    config.uploads.maxChunkBytes =
+        readInt<int64_t>(uploads, "maxChunkBytes", config.uploads.maxChunkBytes);
+    config.uploads.sessionTtlSeconds =
+        readInt<uint32_t>(uploads, "sessionTtlSeconds", config.uploads.sessionTtlSeconds);
+    config.uploads.maxOpenSessionsPerUser =
+        readInt<int64_t>(uploads, "maxOpenSessionsPerUser", config.uploads.maxOpenSessionsPerUser);
+    config.uploads.sweepIntervalSeconds =
+        readInt<uint32_t>(uploads, "sweepIntervalSeconds", config.uploads.sweepIntervalSeconds);
 
     if (auto validation = config.validate(); !validation.ok()) {
         return Result<AppConfig>::failure(validation.error());
@@ -168,6 +178,22 @@ common::VoidResult AppConfig::validate() const {
     if (uploads.defaultQuotaBytes <= 0) {
         return common::VoidResult::failure(ErrorCode::InvalidInput,
                                            "uploads.defaultQuotaBytes must be positive");
+    }
+    if (uploads.maxBlobBytes <= 0 || uploads.maxChunkBytes <= 0) {
+        return common::VoidResult::failure(ErrorCode::InvalidInput,
+                                           "uploads.maxBlobBytes and uploads.maxChunkBytes must be "
+                                           "positive");
+    }
+    if (uploads.maxChunkBytes > uploads.maxBlobBytes) {
+        return common::VoidResult::failure(
+            ErrorCode::InvalidInput,
+            "uploads.maxChunkBytes cannot exceed uploads.maxBlobBytes: a chunk is part of a file");
+    }
+    if (uploads.sessionTtlSeconds == 0 || uploads.maxOpenSessionsPerUser <= 0) {
+        return common::VoidResult::failure(
+            ErrorCode::InvalidInput,
+            "uploads.sessionTtlSeconds and uploads.maxOpenSessionsPerUser "
+            "must be positive");
     }
 
     // Secrets are allowed to be blank in development so the stack boots with no setup, but

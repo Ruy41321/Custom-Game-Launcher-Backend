@@ -3,7 +3,9 @@
 #include <stdexcept>
 #include <utility>
 
+#include "repositories/postgres/PgCatalogRepositories.h"
 #include "repositories/postgres/PgRepositories.h"
+#include "repositories/postgres/PgUploadRepositories.h"
 
 namespace launcher::app {
 
@@ -20,6 +22,13 @@ void AppContext::initialize(AppConfig config, drogon::orm::DbClientPtr database)
     roles_ = std::make_unique<repositories::postgres::PgRoleRepository>(database_);
     refreshTokens_ = std::make_unique<repositories::postgres::PgRefreshTokenRepository>(database_);
     userTokens_ = std::make_unique<repositories::postgres::PgUserTokenRepository>(database_);
+    games_ = std::make_unique<repositories::postgres::PgGameRepository>(database_);
+    gameVersions_ = std::make_unique<repositories::postgres::PgGameVersionRepository>(database_);
+    builds_ = std::make_unique<repositories::postgres::PgBuildRepository>(database_);
+    library_ = std::make_unique<repositories::postgres::PgLibraryRepository>(database_);
+    blobs_ = std::make_unique<repositories::postgres::PgBlobRepository>(database_);
+    uploadSessions_ =
+        std::make_unique<repositories::postgres::PgUploadSessionRepository>(database_);
 
     passwordHasher_ =
         std::make_unique<services::Argon2idPasswordHasher>(services::PasswordHashingSettings{
@@ -45,6 +54,23 @@ void AppContext::initialize(AppConfig config, drogon::orm::DbClientPtr database)
                                                            *passwordHasher_,
                                                            *tokenService_,
                                                            std::move(authSettings));
+
+    catalogService_ =
+        std::make_unique<services::CatalogService>(*games_, *gameVersions_, *builds_, *library_);
+
+    services::UploadSettings uploadSettings;
+    uploadSettings.maxBlobBytes = config_.uploads.maxBlobBytes;
+    uploadSettings.maxChunkBytes = config_.uploads.maxChunkBytes;
+    uploadSettings.sessionTtl = std::chrono::seconds{config_.uploads.sessionTtlSeconds};
+    uploadSettings.maxOpenSessionsPerUser = config_.uploads.maxOpenSessionsPerUser;
+
+    uploadService_ = std::make_unique<services::UploadService>(
+        *builds_,
+        *blobs_,
+        *uploadSessions_,
+        *users_,
+        storage::BlobStore{std::filesystem::path{config_.storage.blobRoot}},
+        std::move(uploadSettings));
 
     authRateLimiter_ = std::make_unique<common::RateLimiter>(
         config_.rateLimit.authAttempts, std::chrono::seconds{config_.rateLimit.authWindowSeconds});
@@ -82,6 +108,16 @@ const services::ITokenService& AppContext::tokenService() const {
     return *tokenService_;
 }
 
+const services::CatalogService& AppContext::catalogService() const {
+    requireInitialized();
+    return *catalogService_;
+}
+
+const services::UploadService& AppContext::uploadService() const {
+    requireInitialized();
+    return *uploadService_;
+}
+
 common::RateLimiter& AppContext::authRateLimiter() const {
     requireInitialized();
     return *authRateLimiter_;
@@ -90,9 +126,17 @@ common::RateLimiter& AppContext::authRateLimiter() const {
 void AppContext::reset() {
     initialized_ = false;
     authRateLimiter_.reset();
+    uploadService_.reset();
+    catalogService_.reset();
     authService_.reset();
     tokenService_.reset();
     passwordHasher_.reset();
+    uploadSessions_.reset();
+    blobs_.reset();
+    library_.reset();
+    builds_.reset();
+    gameVersions_.reset();
+    games_.reset();
     userTokens_.reset();
     refreshTokens_.reset();
     roles_.reset();

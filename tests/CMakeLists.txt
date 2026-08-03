@@ -15,6 +15,10 @@ add_executable(launcher_unit_tests
     unit/JwtTokenServiceTest.cpp
     unit/AuthServiceTest.cpp
     unit/RateLimiterTest.cpp
+    unit/CatalogDomainTest.cpp
+    unit/BlobStoreTest.cpp
+    unit/CatalogServiceTest.cpp
+    unit/UploadServiceTest.cpp
 )
 
 target_include_directories(launcher_unit_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -42,6 +46,8 @@ add_executable(launcher_integration_tests
     integration/MigrationRunnerIntegrationTest.cpp
     integration/HealthEndpointTest.cpp
     integration/AuthEndpointTest.cpp
+    integration/CatalogEndpointTest.cpp
+    integration/UploadEndpointTest.cpp
 )
 
 target_include_directories(launcher_integration_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")

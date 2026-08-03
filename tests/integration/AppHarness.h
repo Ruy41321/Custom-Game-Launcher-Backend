@@ -8,11 +8,14 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <thread>
 
 #include "integration/TestDatabase.h"
+#include "support/TemporaryDirectory.h"
 
 namespace launcher::testing {
 
@@ -43,6 +46,30 @@ class AppHarness : public ::testing::Environment {
     drogon::HttpResponsePtr
     postJson(const std::string& path, const Json::Value& body, const std::string& bearerToken = {});
 
+    drogon::HttpResponsePtr patchJson(const std::string& path,
+                                      const Json::Value& body,
+                                      const std::string& bearerToken = {});
+
+    drogon::HttpResponsePtr put(const std::string& path, const std::string& bearerToken = {});
+
+    drogon::HttpResponsePtr remove(const std::string& path, const std::string& bearerToken = {});
+
+    /// Raw-body PATCH, as an upload chunk arrives. `uploadOffset` below zero omits the header
+    /// entirely, which is how the "offset is mandatory" rule is exercised.
+    drogon::HttpResponsePtr patchBinary(const std::string& path,
+                                        const std::string& body,
+                                        int64_t uploadOffset,
+                                        const std::string& bearerToken = {});
+
+    /// Registers an account, confirms its address and logs in. Returns the session body.
+    Json::Value createVerifiedSession(const std::string& email);
+
+    /// Same, plus membership in a role — the manual devlist the server operator maintains.
+    Json::Value createSessionWithRole(const std::string& email, const std::string& roleKey);
+
+    /// Where uploaded blobs land for this run. Removed with the harness.
+    const std::filesystem::path& blobRoot() const { return blobRoot_.path(); }
+
     /// Clears the shared auth throttle so one test's attempts cannot affect the next.
     void resetRateLimiter();
 
@@ -50,6 +77,7 @@ class AppHarness : public ::testing::Environment {
     drogon::HttpResponsePtr send(const drogon::HttpRequestPtr& request,
                                  const std::string& bearerToken);
 
+    TemporaryDirectory blobRoot_{"launcher-blobs"};
     std::unique_ptr<TestDatabase> database_;
     std::thread serverThread_;
     bool started_{false};

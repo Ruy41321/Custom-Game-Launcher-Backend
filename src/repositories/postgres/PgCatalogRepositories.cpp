@@ -1,0 +1,542 @@
+#include "repositories/postgres/PgCatalogRepositories.h"
+
+#include <json/json.h>
+
+#include <utility>
+
+#include "repositories/postgres/PgSupport.h"
+
+namespace launcher::repositories::postgres {
+namespace {
+
+using common::ErrorCode;
+using common::Result;
+
+constexpr const char* GAME_COLUMNS = R"(
+    g.id, g.slug, g.title, g.summary, g.description, g.publisher_user_id,
+    u.display_name AS publisher_display_name,
+    COALESCE(to_char(g.release_date, 'YYYY-MM-DD'), '') AS release_date,
+    g.visibility::text AS visibility,
+    to_char(g.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at,
+    to_char(g.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS updated_at
+)";
+
+constexpr const char* VERSION_COLUMNS = R"(
+    id, game_id, semver, version_major, version_minor, version_patch,
+    stage::text AS stage, release_notes,
+    COALESCE(to_char(published_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '')
+        AS published_at,
+    to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at
+)";
+
+constexpr const char* BUILD_COLUMNS = R"(
+    id, game_version_id, platform::text AS platform, architecture::text AS architecture,
+    status::text AS status, COALESCE(manifest_sha256, '') AS manifest_sha256,
+    total_size_bytes, file_count,
+    COALESCE(entrypoint_relative_path, '') AS entrypoint_relative_path, default_launch_args,
+    to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at,
+    COALESCE(to_char(ready_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '') AS ready_at
+)";
+
+domain::Game mapGame(const drogon::orm::Row& row) {
+    domain::Game game;
+    game.id = row["id"].as<std::string>();
+    game.slug = row["slug"].as<std::string>();
+    game.title = row["title"].as<std::string>();
+    game.summary = row["summary"].as<std::string>();
+    game.description = row["description"].as<std::string>();
+    game.publisherUserId = row["publisher_user_id"].as<std::string>();
+    game.publisherDisplayName = row["publisher_display_name"].as<std::string>();
+    game.releaseDate = row["release_date"].as<std::string>();
+    game.visibility = domain::parseGameVisibility(row["visibility"].as<std::string>())
+                          .value_or(domain::GameVisibility::Draft);
+    game.createdAt = row["created_at"].as<std::string>();
+    game.updatedAt = row["updated_at"].as<std::string>();
+    return game;
+}
+
+domain::GameVersion mapVersion(const drogon::orm::Row& row) {
+    domain::GameVersion version;
+    version.id = row["id"].as<std::string>();
+    version.gameId = row["game_id"].as<std::string>();
+    version.semver = row["semver"].as<std::string>();
+    version.versionMajor = row["version_major"].as<int>();
+    version.versionMinor = row["version_minor"].as<int>();
+    version.versionPatch = row["version_patch"].as<int>();
+    version.stage = domain::parseBuildStage(row["stage"].as<std::string>())
+                        .value_or(domain::BuildStage::Release);
+    version.releaseNotes = row["release_notes"].as<std::string>();
+    version.publishedAt = row["published_at"].as<std::string>();
+    version.createdAt = row["created_at"].as<std::string>();
+    return version;
+}
+
+domain::Build mapBuild(const drogon::orm::Row& row) {
+    domain::Build build;
+    build.id = row["id"].as<std::string>();
+    build.gameVersionId = row["game_version_id"].as<std::string>();
+    build.platform = domain::parseBuildPlatform(row["platform"].as<std::string>())
+                         .value_or(domain::BuildPlatform::Windows);
+    build.architecture = domain::parseBuildArchitecture(row["architecture"].as<std::string>())
+                             .value_or(domain::BuildArchitecture::X64);
+    build.status = domain::parseBuildStatus(row["status"].as<std::string>())
+                       .value_or(domain::BuildStatus::Uploading);
+    build.manifestSha256 = row["manifest_sha256"].as<std::string>();
+    build.totalSizeBytes = row["total_size_bytes"].as<int64_t>();
+    build.fileCount = row["file_count"].as<int32_t>();
+    build.entrypointRelativePath = row["entrypoint_relative_path"].as<std::string>();
+    build.defaultLaunchArgs = row["default_launch_args"].as<std::string>();
+    build.createdAt = row["created_at"].as<std::string>();
+    build.readyAt = row["ready_at"].as<std::string>();
+    return build;
+}
+
+const char* orderByFor(GameSort sort) {
+    switch (sort) {
+    case GameSort::Title:
+        return " ORDER BY lower(g.title) ASC, g.created_at DESC, g.id ";
+    case GameSort::RecentlyAdded:
+        return " ORDER BY g.created_at DESC, g.id ";
+    case GameSort::ReleaseDate:
+        break;
+    }
+    return " ORDER BY g.release_date DESC NULLS LAST, g.created_at DESC, g.id ";
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// Games
+// ---------------------------------------------------------------------------
+
+PgGameRepository::PgGameRepository(drogon::orm::DbClientPtr database)
+    : database_(std::move(database)) {}
+
+drogon::Task<std::optional<domain::Game>> PgGameRepository::findById(std::string id) const {
+    const auto rows = co_await database_->execSqlCoro(
+        std::string("SELECT ") + GAME_COLUMNS +
+            " FROM games g JOIN users u ON u.id = g.publisher_user_id WHERE g.id = $1::uuid",
+        id);
+
+    if (rows.empty()) {
+        co_return std::nullopt;
+    }
+    co_return mapGame(rows[0]);
+}
+
+drogon::Task<std::optional<domain::Game>> PgGameRepository::findBySlug(std::string slug) const {
+    const auto rows = co_await database_->execSqlCoro(
+        std::string("SELECT ") + GAME_COLUMNS +
+            " FROM games g JOIN users u ON u.id = g.publisher_user_id WHERE g.slug = $1",
+        slug);
+
+    if (rows.empty()) {
+        co_return std::nullopt;
+    }
+    co_return mapGame(rows[0]);
+}
+
+drogon::Task<Result<domain::Game>> PgGameRepository::create(domain::NewGame game) const {
+    // The publisher's display name comes from a join, which INSERT ... RETURNING cannot do,
+    // so the insert feeds a CTE that the outer query joins as usual.
+    const auto rows = co_await database_->execSqlCoro(
+        std::string(R"(
+            WITH inserted AS (
+                INSERT INTO games
+                    (slug, title, summary, description, publisher_user_id, release_date, visibility)
+                VALUES ($1, $2, $3, $4, $5::uuid, NULLIF($6, '')::date, $7::game_visibility)
+                ON CONFLICT (slug) DO NOTHING
+                RETURNING *
+            )
+            SELECT )") +
+            GAME_COLUMNS + " FROM inserted g JOIN users u ON u.id = g.publisher_user_id",
+        game.slug,
+        game.title,
+        game.summary,
+        game.description,
+        game.publisherUserId,
+        game.releaseDate,
+        std::string(domain::toString(game.visibility)));
+
+    if (rows.empty()) {
+        co_return Result<domain::Game>::failure(ErrorCode::Conflict,
+                                                "a game with that slug already exists");
+    }
+    co_return Result<domain::Game>::success(mapGame(rows[0]));
+}
+
+drogon::Task<std::optional<domain::Game>>
+PgGameRepository::update(std::string id, domain::GameUpdate changes) const {
+    std::optional<std::string> visibility;
+    if (changes.visibility.has_value()) {
+        visibility = domain::toString(*changes.visibility);
+    }
+
+    const auto rows = co_await database_->execSqlCoro(
+        std::string(R"(
+            WITH updated AS (
+                UPDATE games SET
+                    title = COALESCE($2, title),
+                    summary = COALESCE($3, summary),
+                    description = COALESCE($4, description),
+                    release_date = CASE WHEN $5::text IS NULL THEN release_date
+                                        WHEN $5 = '' THEN NULL
+                                        ELSE $5::date END,
+                    visibility = COALESCE($6::game_visibility, visibility)
+                WHERE id = $1::uuid
+                RETURNING *
+            )
+            SELECT )") +
+            GAME_COLUMNS + " FROM updated g JOIN users u ON u.id = g.publisher_user_id",
+        id,
+        changes.title,
+        changes.summary,
+        changes.description,
+        changes.releaseDate,
+        visibility);
+
+    if (rows.empty()) {
+        co_return std::nullopt;
+    }
+    co_return mapGame(rows[0]);
+}
+
+drogon::Task<GamePage> PgGameRepository::search(GameQuery query) const {
+    // `includeUnpublished` widens the result to drafts; every caller that sets it has already
+    // narrowed the query to one publisher, which the service layer enforces.
+    constexpr const char* FILTER = R"(
+        WHERE (g.visibility = 'public' OR $1::boolean)
+          AND ($2::text IS NULL OR g.publisher_user_id = $2::uuid)
+          AND ($3::text IS NULL OR g.title ILIKE '%' || $3 || '%')
+    )";
+
+    const std::optional<std::string> publisher =
+        query.publisherUserId.empty() ? std::nullopt : std::optional{query.publisherUserId};
+    const std::optional<std::string> search =
+        query.search.empty() ? std::nullopt : std::optional{query.search};
+
+    const auto rows = co_await database_->execSqlCoro(
+        std::string("SELECT ") + GAME_COLUMNS +
+            " FROM games g JOIN users u ON u.id = g.publisher_user_id " + FILTER +
+            orderByFor(query.sort) + " LIMIT $4 OFFSET $5",
+        query.includeUnpublished,
+        publisher,
+        search,
+        number(query.limit),
+        number(query.offset));
+
+    // A second statement rather than a window function: `count(*) OVER ()` reports zero for a
+    // page past the end of the result, which would make the client's page count wrong exactly
+    // when it needs it.
+    const auto totals = co_await database_->execSqlCoro(
+        std::string("SELECT count(*) AS total FROM games g ") + FILTER,
+        query.includeUnpublished,
+        publisher,
+        search);
+
+    GamePage page;
+    page.total = totals.empty() ? 0 : totals[0]["total"].as<int64_t>();
+    page.items.reserve(rows.size());
+    for (const auto& row : rows) {
+        page.items.push_back(mapGame(row));
+    }
+    co_return page;
+}
+
+// ---------------------------------------------------------------------------
+// Versions
+// ---------------------------------------------------------------------------
+
+PgGameVersionRepository::PgGameVersionRepository(drogon::orm::DbClientPtr database)
+    : database_(std::move(database)) {}
+
+drogon::Task<Result<domain::GameVersion>>
+PgGameVersionRepository::create(domain::NewGameVersion version) const {
+    const auto rows = co_await database_->execSqlCoro(std::string(R"(
+            INSERT INTO game_versions
+                (game_id, semver, version_major, version_minor, version_patch,
+                 stage, release_notes, published_at)
+            VALUES ($1::uuid, $2, $3, $4, $5, $6::build_stage, $7,
+                    CASE WHEN $8::boolean THEN now() ELSE NULL END)
+            ON CONFLICT (game_id, semver) DO NOTHING
+            RETURNING )") + VERSION_COLUMNS,
+                                                      version.gameId,
+                                                      version.version.text,
+                                                      number(version.version.major),
+                                                      number(version.version.minor),
+                                                      number(version.version.patch),
+                                                      std::string(domain::toString(version.stage)),
+                                                      version.releaseNotes,
+                                                      version.publish);
+
+    if (rows.empty()) {
+        co_return Result<domain::GameVersion>::failure(
+            ErrorCode::Conflict, "this game already has a version " + version.version.text);
+    }
+    co_return Result<domain::GameVersion>::success(mapVersion(rows[0]));
+}
+
+drogon::Task<std::optional<domain::GameVersion>>
+PgGameVersionRepository::findById(std::string id) const {
+    const auto rows = co_await database_->execSqlCoro(
+        std::string("SELECT ") + VERSION_COLUMNS + " FROM game_versions WHERE id = $1::uuid", id);
+
+    if (rows.empty()) {
+        co_return std::nullopt;
+    }
+    co_return mapVersion(rows[0]);
+}
+
+drogon::Task<std::vector<domain::GameVersion>>
+PgGameVersionRepository::listForGame(std::string gameId, bool includeUnpublished) const {
+    const auto rows = co_await database_->execSqlCoro(
+        std::string("SELECT ") + VERSION_COLUMNS +
+            " FROM game_versions"
+            " WHERE game_id = $1::uuid AND (published_at IS NOT NULL OR $2::boolean)"
+            " ORDER BY version_major DESC, version_minor DESC, version_patch DESC,"
+            "          created_at DESC",
+        gameId,
+        includeUnpublished);
+
+    std::vector<domain::GameVersion> versions;
+    versions.reserve(rows.size());
+    for (const auto& row : rows) {
+        versions.push_back(mapVersion(row));
+    }
+    co_return versions;
+}
+
+drogon::Task<bool> PgGameVersionRepository::publish(std::string id) const {
+    // COALESCE keeps the original publication timestamp when a version is published twice.
+    const auto rows = co_await database_->execSqlCoro(
+        "UPDATE game_versions SET published_at = COALESCE(published_at, now()) "
+        "WHERE id = $1::uuid RETURNING id",
+        id);
+
+    co_return !rows.empty();
+}
+
+// ---------------------------------------------------------------------------
+// Builds
+// ---------------------------------------------------------------------------
+
+PgBuildRepository::PgBuildRepository(drogon::orm::DbClientPtr database)
+    : database_(std::move(database)) {}
+
+drogon::Task<Result<domain::Build>> PgBuildRepository::create(domain::NewBuild build) const {
+    const auto rows =
+        co_await database_->execSqlCoro(std::string(R"(
+            INSERT INTO builds (game_version_id, platform, architecture)
+            VALUES ($1::uuid, $2::build_platform, $3::build_architecture)
+            ON CONFLICT (game_version_id, platform, architecture) DO NOTHING
+            RETURNING )") + BUILD_COLUMNS,
+                                        build.gameVersionId,
+                                        std::string(domain::toString(build.platform)),
+                                        std::string(domain::toString(build.architecture)));
+
+    if (rows.empty()) {
+        co_return Result<domain::Build>::failure(
+            ErrorCode::Conflict, "this version already has a build for that platform");
+    }
+    co_return Result<domain::Build>::success(mapBuild(rows[0]));
+}
+
+drogon::Task<std::optional<domain::Build>> PgBuildRepository::findById(std::string id) const {
+    const auto rows = co_await database_->execSqlCoro(
+        std::string("SELECT ") + BUILD_COLUMNS + " FROM builds WHERE id = $1::uuid", id);
+
+    if (rows.empty()) {
+        co_return std::nullopt;
+    }
+    co_return mapBuild(rows[0]);
+}
+
+drogon::Task<std::vector<domain::Build>>
+PgBuildRepository::listForVersions(std::vector<std::string> versionIds) const {
+    std::vector<domain::Build> builds;
+    if (versionIds.empty()) {
+        co_return builds;
+    }
+
+    const auto rows = co_await database_->execSqlCoro(
+        std::string("SELECT ") + BUILD_COLUMNS +
+            " FROM builds"
+            " WHERE game_version_id IN ("
+            "     SELECT t.value::uuid FROM jsonb_array_elements_text($1::jsonb) AS t(value))"
+            " ORDER BY created_at DESC",
+        jsonArrayParameter(versionIds));
+
+    builds.reserve(rows.size());
+    for (const auto& row : rows) {
+        builds.push_back(mapBuild(row));
+    }
+    co_return builds;
+}
+
+drogon::Task<std::optional<domain::BuildOwnership>>
+PgBuildRepository::findOwnership(std::string buildId) const {
+    const auto rows = co_await database_->execSqlCoro(
+        R"(SELECT b.id AS build_id, b.game_version_id, v.game_id, g.publisher_user_id,
+                  g.visibility::text AS visibility, b.status::text AS status
+           FROM builds b
+           JOIN game_versions v ON v.id = b.game_version_id
+           JOIN games g ON g.id = v.game_id
+           WHERE b.id = $1::uuid)",
+        buildId);
+
+    if (rows.empty()) {
+        co_return std::nullopt;
+    }
+
+    domain::BuildOwnership ownership;
+    ownership.buildId = rows[0]["build_id"].as<std::string>();
+    ownership.gameVersionId = rows[0]["game_version_id"].as<std::string>();
+    ownership.gameId = rows[0]["game_id"].as<std::string>();
+    ownership.publisherUserId = rows[0]["publisher_user_id"].as<std::string>();
+    ownership.visibility = domain::parseGameVisibility(rows[0]["visibility"].as<std::string>())
+                               .value_or(domain::GameVisibility::Draft);
+    ownership.status = domain::parseBuildStatus(rows[0]["status"].as<std::string>())
+                           .value_or(domain::BuildStatus::Uploading);
+    co_return ownership;
+}
+
+drogon::Task<std::vector<domain::ManifestEntry>>
+PgBuildRepository::filesFor(std::string buildId) const {
+    const auto rows = co_await database_->execSqlCoro(
+        "SELECT bf.relative_path, bf.blob_sha256, bf.is_executable, b.size_bytes "
+        "FROM build_files bf JOIN blobs b ON b.sha256 = bf.blob_sha256 "
+        "WHERE bf.build_id = $1::uuid ORDER BY bf.relative_path",
+        buildId);
+
+    std::vector<domain::ManifestEntry> files;
+    files.reserve(rows.size());
+    for (const auto& row : rows) {
+        domain::ManifestEntry entry;
+        entry.relativePath = row["relative_path"].as<std::string>();
+        entry.blobSha256 = row["blob_sha256"].as<std::string>();
+        entry.sizeBytes = row["size_bytes"].as<int64_t>();
+        entry.isExecutable = row["is_executable"].as<bool>();
+        files.push_back(std::move(entry));
+    }
+    co_return files;
+}
+
+drogon::Task<std::optional<domain::Build>>
+PgBuildRepository::finalize(std::string buildId, FinalizedManifest manifest) const {
+    Json::Value files(Json::arrayValue);
+    for (const auto& file : manifest.files) {
+        Json::Value entry;
+        entry["path"] = file.relativePath;
+        entry["sha256"] = file.blobSha256;
+        entry["executable"] = file.isExecutable;
+        files.append(entry);
+    }
+
+    // One statement, for two reasons. A Drogon transaction commits asynchronously when its
+    // object is destroyed, so a build could be reported ready before its rows are durable;
+    // and gating the insert on the update's result is what makes a second, concurrent
+    // finalize a no-op instead of a duplicate-key error.
+    const auto rows =
+        co_await database_->execSqlCoro(std::string(R"(
+            WITH updated AS (
+                UPDATE builds SET
+                    status = 'ready',
+                    manifest_sha256 = $2,
+                    total_size_bytes = $3,
+                    file_count = $4,
+                    entrypoint_relative_path = $5,
+                    default_launch_args = $6,
+                    ready_at = now()
+                WHERE id = $1::uuid AND status = 'uploading'
+                RETURNING *
+            ), inserted AS (
+                INSERT INTO build_files (build_id, relative_path, blob_sha256, is_executable)
+                SELECT u.id, t.entry->>'path', t.entry->>'sha256',
+                       (t.entry->>'executable')::boolean
+                FROM updated u, jsonb_array_elements($7::jsonb) AS t(entry)
+            )
+            SELECT )") + BUILD_COLUMNS + " FROM updated",
+                                        buildId,
+                                        manifest.manifestSha256,
+                                        number(manifest.totalSizeBytes),
+                                        number(static_cast<int64_t>(manifest.files.size())),
+                                        manifest.entrypointRelativePath,
+                                        manifest.defaultLaunchArgs,
+                                        toCompactJson(files));
+
+    if (rows.empty()) {
+        co_return std::nullopt;
+    }
+    co_return mapBuild(rows[0]);
+}
+
+drogon::Task<bool> PgBuildRepository::markFailed(std::string buildId) const {
+    const auto rows = co_await database_->execSqlCoro(
+        "UPDATE builds SET status = 'failed' WHERE id = $1::uuid AND status <> 'ready' "
+        "RETURNING id",
+        buildId);
+
+    co_return !rows.empty();
+}
+
+// ---------------------------------------------------------------------------
+// Library
+// ---------------------------------------------------------------------------
+
+PgLibraryRepository::PgLibraryRepository(drogon::orm::DbClientPtr database)
+    : database_(std::move(database)) {}
+
+drogon::Task<bool> PgLibraryRepository::add(std::string userId, std::string gameId) const {
+    // Selecting the game id rather than passing it straight through makes the insert a no-op
+    // for a game that does not exist, which the EXISTS below then reports as false.
+    const auto rows = co_await database_->execSqlCoro(
+        R"(WITH inserted AS (
+               INSERT INTO user_games (user_id, game_id)
+               SELECT $1::uuid, g.id FROM games g WHERE g.id = $2::uuid
+               ON CONFLICT (user_id, game_id) DO NOTHING
+               RETURNING game_id
+           )
+           SELECT EXISTS (SELECT 1 FROM inserted)
+               OR EXISTS (SELECT 1 FROM user_games
+                          WHERE user_id = $1::uuid AND game_id = $2::uuid) AS present)",
+        userId,
+        gameId);
+
+    co_return !rows.empty() && rows[0]["present"].as<bool>();
+}
+
+drogon::Task<bool> PgLibraryRepository::remove(std::string userId, std::string gameId) const {
+    const auto rows = co_await database_->execSqlCoro(
+        "DELETE FROM user_games WHERE user_id = $1::uuid AND game_id = $2::uuid RETURNING game_id",
+        userId,
+        gameId);
+
+    co_return !rows.empty();
+}
+
+drogon::Task<bool> PgLibraryRepository::contains(std::string userId, std::string gameId) const {
+    const auto rows = co_await database_->execSqlCoro(
+        "SELECT 1 FROM user_games WHERE user_id = $1::uuid AND game_id = $2::uuid", userId, gameId);
+
+    co_return !rows.empty();
+}
+
+drogon::Task<std::vector<domain::Game>> PgLibraryRepository::list(std::string userId) const {
+    const auto rows = co_await database_->execSqlCoro(
+        std::string("SELECT ") + GAME_COLUMNS +
+            " FROM user_games ug"
+            " JOIN games g ON g.id = ug.game_id"
+            " JOIN users u ON u.id = g.publisher_user_id"
+            " WHERE ug.user_id = $1::uuid"
+            " ORDER BY g.release_date DESC NULLS LAST, g.created_at DESC, g.id",
+        userId);
+
+    std::vector<domain::Game> games;
+    games.reserve(rows.size());
+    for (const auto& row : rows) {
+        games.push_back(mapGame(row));
+    }
+    co_return games;
+}
+
+} // namespace launcher::repositories::postgres

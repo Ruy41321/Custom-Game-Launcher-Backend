@@ -55,6 +55,11 @@
   },
 
   "uploads": {
-    "defaultQuotaBytes": ${DEFAULT_UPLOAD_QUOTA_BYTES:-5368709120}
+    "defaultQuotaBytes": ${DEFAULT_UPLOAD_QUOTA_BYTES:-5368709120},
+    "maxBlobBytes": ${MAX_BLOB_BYTES:-2147483648},
+    "maxChunkBytes": ${MAX_UPLOAD_CHUNK_BYTES:-8388608},
+    "sessionTtlSeconds": ${UPLOAD_SESSION_TTL:-86400},
+    "maxOpenSessionsPerUser": ${MAX_OPEN_UPLOADS:-16},
+    "sweepIntervalSeconds": ${UPLOAD_SWEEP_INTERVAL:-600}
   }
 }

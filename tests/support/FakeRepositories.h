@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <map>
 #include <optional>
 #include <string>
@@ -98,6 +99,29 @@ class FakeUserRepository : public repositories::IUserRepository {
 
     drogon::Task<void> recordSuccessfulLogin(std::string userId) const override {
         loginRecordedFor.push_back(userId);
+        co_return;
+    }
+
+    drogon::Task<bool> chargeUpload(std::string userId, int64_t bytes) const override {
+        for (auto& user : users) {
+            if (user.id != userId) {
+                continue;
+            }
+            if (user.uploadUsedBytes + bytes > user.uploadQuotaBytes) {
+                co_return false;
+            }
+            user.uploadUsedBytes += bytes;
+            co_return true;
+        }
+        co_return false;
+    }
+
+    drogon::Task<void> releaseUpload(std::string userId, int64_t bytes) const override {
+        for (auto& user : users) {
+            if (user.id == userId) {
+                user.uploadUsedBytes = std::max<int64_t>(0, user.uploadUsedBytes - bytes);
+            }
+        }
         co_return;
     }
 };

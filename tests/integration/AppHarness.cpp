@@ -9,6 +9,7 @@
 #include <stdexcept>
 
 #include "app/AppContext.h"
+#include "app/Bootstrap.h"
 #include "app/Config.h"
 #include "app/HttpError.h"
 #include "migrations/MigrationRunner.h"
@@ -25,11 +26,17 @@ constexpr uint16_t TEST_PORT = 18080;
 
 AppHarness* HARNESS = nullptr;
 
-app::AppConfig testConfig() {
+app::AppConfig testConfig(const std::filesystem::path& blobRoot) {
     app::AppConfig config;
     config.environment = "development";
     config.auth.jwtSecret = "0123456789abcdef0123456789abcdef";
     config.auth.requireVerifiedEmail = true;
+    config.storage.blobRoot = blobRoot.string();
+
+    // Small enough that a test can send a "too large" chunk without allocating megabytes, and
+    // still large enough for every fixture in the suite.
+    config.uploads.maxChunkBytes = 64 * 1024;
+    config.uploads.maxBlobBytes = 1024 * 1024;
 
     // The cheapest Argon2id parameters libsodium accepts. Cost is what the unit tests cover;
     // here it would only make the suite slow.
@@ -67,10 +74,14 @@ void AppHarness::SetUp() {
         }
     }
 
+    const auto config = testConfig(blobRoot_.path());
     app::AppContext::instance().initialize(
-        testConfig(), database_ ? database_->client() : drogon::orm::DbClientPtr{});
+        config, database_ ? database_->client() : drogon::orm::DbClientPtr{});
 
     app::registerErrorHandling();
+    // The same call production makes: without it Drogon's default one-megabyte body cap would
+    // reject upload chunks the deployed server accepts.
+    app::configureUploadLimits(config.uploads);
     drogon::app().addListener(TEST_HOST, TEST_PORT);
     drogon::app().setThreadNum(1);
 
@@ -133,6 +144,91 @@ drogon::HttpResponsePtr AppHarness::postJson(const std::string& path,
     request->setMethod(drogon::Post);
     request->setPath(path);
     return send(request, bearerToken);
+}
+
+drogon::HttpResponsePtr AppHarness::patchJson(const std::string& path,
+                                              const Json::Value& body,
+                                              const std::string& bearerToken) {
+    auto request = drogon::HttpRequest::newHttpJsonRequest(body);
+    request->setMethod(drogon::Patch);
+    request->setPath(path);
+    return send(request, bearerToken);
+}
+
+drogon::HttpResponsePtr AppHarness::put(const std::string& path, const std::string& bearerToken) {
+    auto request = drogon::HttpRequest::newHttpRequest();
+    request->setMethod(drogon::Put);
+    request->setPath(path);
+    return send(request, bearerToken);
+}
+
+drogon::HttpResponsePtr AppHarness::remove(const std::string& path,
+                                           const std::string& bearerToken) {
+    auto request = drogon::HttpRequest::newHttpRequest();
+    request->setMethod(drogon::Delete);
+    request->setPath(path);
+    return send(request, bearerToken);
+}
+
+drogon::HttpResponsePtr AppHarness::patchBinary(const std::string& path,
+                                                const std::string& body,
+                                                int64_t uploadOffset,
+                                                const std::string& bearerToken) {
+    auto request = drogon::HttpRequest::newHttpRequest();
+    request->setMethod(drogon::Patch);
+    request->setPath(path);
+    request->setContentTypeString("application/offset+octet-stream");
+    request->setBody(body);
+    if (uploadOffset >= 0) {
+        request->addHeader("Upload-Offset", std::to_string(uploadOffset));
+    }
+    return send(request, bearerToken);
+}
+
+Json::Value AppHarness::createVerifiedSession(const std::string& email) {
+    Json::Value registration;
+    registration["email"] = email;
+    registration["password"] = "correct horse battery staple";
+    registration["displayName"] = "Test User";
+
+    const auto registered = postJson("/api/v1/auth/register", registration);
+    EXPECT_EQ(registered->statusCode(), drogon::k201Created);
+    const auto registeredBody = registered->getJsonObject();
+    EXPECT_NE(registeredBody, nullptr);
+
+    Json::Value verify;
+    verify["token"] = (*registeredBody)["devEmailVerificationToken"].asString();
+    EXPECT_EQ(postJson("/api/v1/auth/verify-email", verify)->statusCode(), drogon::k200OK);
+
+    Json::Value credentials;
+    credentials["email"] = email;
+    credentials["password"] = registration["password"];
+
+    const auto session = postJson("/api/v1/auth/login", credentials);
+    EXPECT_EQ(session->statusCode(), drogon::k200OK);
+    const auto sessionBody = session->getJsonObject();
+    return sessionBody == nullptr ? Json::Value{} : *sessionBody;
+}
+
+Json::Value AppHarness::createSessionWithRole(const std::string& email,
+                                              const std::string& roleKey) {
+    const auto session = createVerifiedSession(email);
+
+    // The devlist is role membership, and the server operator maintains it by hand, so there
+    // is no endpoint to call: the grant goes straight into the table.
+    database().exec("INSERT INTO user_roles (user_id, role_id) SELECT '" +
+                    session["user"]["id"].asString() + "'::uuid, id FROM roles WHERE key = '" +
+                    roleKey + "' ON CONFLICT DO NOTHING");
+
+    // The permissions live in the access token, so a token minted before the grant does not
+    // carry it; refreshing is what a real client would do.
+    Json::Value refresh;
+    refresh["refreshToken"] = session["refreshToken"];
+    const auto refreshed = postJson("/api/v1/auth/refresh", refresh);
+    EXPECT_EQ(refreshed->statusCode(), drogon::k200OK);
+
+    const auto body = refreshed->getJsonObject();
+    return body == nullptr ? Json::Value{} : *body;
 }
 
 void AppHarness::resetRateLimiter() {

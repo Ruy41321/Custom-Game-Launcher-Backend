@@ -2,6 +2,7 @@
 
 #include <drogon/utils/coroutine.h>
 
+#include <cstdint>
 #include <optional>
 #include <string>
 
@@ -34,6 +35,18 @@ class IUserRepository {
                                                   std::string passwordHash) const = 0;
 
     virtual drogon::Task<void> recordSuccessfulLogin(std::string userId) const = 0;
+
+    /// Books `bytes` against the cumulative upload allowance, refusing when that would take
+    /// the account past its quota.
+    ///
+    /// The check and the increment are one conditional statement on purpose: a read followed
+    /// by a write lets concurrent uploads each see room that only one of them can have.
+    /// False means the quota is exhausted, and nothing was charged.
+    virtual drogon::Task<bool> chargeUpload(std::string userId, int64_t bytes) const = 0;
+
+    /// Gives bytes back when a charged upload turns out not to have stored anything new.
+    /// Clamped at zero so a double release can never make the counter negative.
+    virtual drogon::Task<void> releaseUpload(std::string userId, int64_t bytes) const = 0;
 };
 
 } // namespace launcher::repositories

@@ -32,6 +32,10 @@ class PgUserRepository : public IUserRepository {
 
     drogon::Task<void> recordSuccessfulLogin(std::string userId) const override;
 
+    drogon::Task<bool> chargeUpload(std::string userId, int64_t bytes) const override;
+
+    drogon::Task<void> releaseUpload(std::string userId, int64_t bytes) const override;
+
   private:
     drogon::orm::DbClientPtr database_;
 };

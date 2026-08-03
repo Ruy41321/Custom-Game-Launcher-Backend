@@ -6,13 +6,21 @@
 
 #include "app/Config.h"
 #include "common/RateLimiter.h"
+#include "repositories/IBlobRepository.h"
+#include "repositories/IBuildRepository.h"
+#include "repositories/IGameRepository.h"
+#include "repositories/IGameVersionRepository.h"
+#include "repositories/ILibraryRepository.h"
 #include "repositories/IRefreshTokenRepository.h"
 #include "repositories/IRoleRepository.h"
+#include "repositories/IUploadSessionRepository.h"
 #include "repositories/IUserRepository.h"
 #include "repositories/IUserTokenRepository.h"
 #include "services/AuthService.h"
+#include "services/CatalogService.h"
 #include "services/PasswordHasher.h"
 #include "services/TokenService.h"
+#include "services/UploadService.h"
 
 namespace launcher::app {
 
@@ -38,6 +46,10 @@ class AppContext {
     const services::AuthService& authService() const;
 
     const services::ITokenService& tokenService() const;
+
+    const services::CatalogService& catalogService() const;
+
+    const services::UploadService& uploadService() const;
 
     /// Shared by the authentication endpoints; see common::RateLimiter for why it is
     /// in-process.
@@ -65,10 +77,18 @@ class AppContext {
     std::unique_ptr<repositories::IRoleRepository> roles_;
     std::unique_ptr<repositories::IRefreshTokenRepository> refreshTokens_;
     std::unique_ptr<repositories::IUserTokenRepository> userTokens_;
+    std::unique_ptr<repositories::IGameRepository> games_;
+    std::unique_ptr<repositories::IGameVersionRepository> gameVersions_;
+    std::unique_ptr<repositories::IBuildRepository> builds_;
+    std::unique_ptr<repositories::ILibraryRepository> library_;
+    std::unique_ptr<repositories::IBlobRepository> blobs_;
+    std::unique_ptr<repositories::IUploadSessionRepository> uploadSessions_;
 
     std::unique_ptr<services::IPasswordHasher> passwordHasher_;
     std::unique_ptr<services::ITokenService> tokenService_;
     std::unique_ptr<services::AuthService> authService_;
+    std::unique_ptr<services::CatalogService> catalogService_;
+    std::unique_ptr<services::UploadService> uploadService_;
 
     std::unique_ptr<common::RateLimiter> authRateLimiter_;
 };

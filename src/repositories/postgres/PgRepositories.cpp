@@ -119,6 +119,29 @@ drogon::Task<void> PgUserRepository::recordSuccessfulLogin(std::string userId) c
     co_return;
 }
 
+drogon::Task<bool> PgUserRepository::chargeUpload(std::string userId, int64_t bytes) const {
+    // The quota test lives in the WHERE clause rather than in a preceding SELECT: two uploads
+    // finishing at once would each see the same free space, and both would be allowed to use
+    // it. Here at most one of them updates the row.
+    const auto rows = co_await database_->execSqlCoro(
+        "UPDATE users SET upload_used_bytes = upload_used_bytes + $2 "
+        "WHERE id = $1::uuid AND upload_used_bytes + $2 <= upload_quota_bytes "
+        "RETURNING upload_used_bytes",
+        userId,
+        std::to_string(bytes));
+
+    co_return !rows.empty();
+}
+
+drogon::Task<void> PgUserRepository::releaseUpload(std::string userId, int64_t bytes) const {
+    co_await database_->execSqlCoro(
+        "UPDATE users SET upload_used_bytes = GREATEST(0, upload_used_bytes - $2) "
+        "WHERE id = $1::uuid",
+        userId,
+        std::to_string(bytes));
+    co_return;
+}
+
 // ---------------------------------------------------------------------------
 // Roles and permissions
 // ---------------------------------------------------------------------------

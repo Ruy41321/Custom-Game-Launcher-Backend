@@ -121,4 +121,28 @@ VoidResult validateDisplayName(std::string_view displayName) {
     return VoidResult::success();
 }
 
+bool isUuid(std::string_view value) {
+    constexpr std::size_t UUID_LENGTH = 36;
+    constexpr std::size_t HYPHENS[] = {8, 13, 18, 23};
+
+    if (value.size() != UUID_LENGTH) {
+        return false;
+    }
+    for (const auto position : HYPHENS) {
+        if (value[position] != '-') {
+            return false;
+        }
+    }
+
+    for (std::size_t index = 0; index < value.size(); ++index) {
+        if (index == 8 || index == 13 || index == 18 || index == 23) {
+            continue;
+        }
+        if (std::isxdigit(static_cast<unsigned char>(value[index])) == 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
 } // namespace launcher::domain

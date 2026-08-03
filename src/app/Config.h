@@ -73,6 +73,16 @@ struct UpdateConfig {
 
 struct UploadConfig {
     int64_t defaultQuotaBytes{5LL * 1024 * 1024 * 1024};
+    /// Largest single file in a build.
+    int64_t maxBlobBytes{2LL * 1024 * 1024 * 1024};
+    /// Largest body one upload request may carry. Drogon buffers a request body before the
+    /// handler sees it, so this also fixes the framework's own limit — see Bootstrap.
+    int64_t maxChunkBytes{8LL * 1024 * 1024};
+    /// How long an interrupted upload stays resumable before its staging file is reclaimed.
+    uint32_t sessionTtlSeconds{86400};
+    /// Bounds the staging disk one account can hold with nothing finished.
+    int64_t maxOpenSessionsPerUser{16};
+    uint32_t sweepIntervalSeconds{600};
 };
 
 struct AppConfig {

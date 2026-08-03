@@ -53,6 +53,11 @@
   },
 
   "uploads": {
-    "defaultQuotaBytes": 5368709120
+    "defaultQuotaBytes": 5368709120,
+    "maxBlobBytes": 2147483648,
+    "maxChunkBytes": 8388608,
+    "sessionTtlSeconds": 86400,
+    "maxOpenSessionsPerUser": 16,
+    "sweepIntervalSeconds": 600
   }
 }

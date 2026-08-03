@@ -45,4 +45,23 @@ optionalString(const Json::Value& body, const char* field, const std::string& fa
     return body[field].asString();
 }
 
+int64_t requireInt64(const Json::Value& body, const char* field) {
+    if (!body.isMember(field) || !body[field].isNumeric()) {
+        throw ApiException(ErrorCode::InvalidInput,
+                           std::string(field) + " is required and must be a number");
+    }
+    if (!body[field].isIntegral() || !body[field].isInt64()) {
+        throw ApiException(ErrorCode::InvalidInput,
+                           std::string(field) + " must be a whole number that fits in 64 bits");
+    }
+    return body[field].asInt64();
+}
+
+bool optionalBool(const Json::Value& body, const char* field, bool fallback) {
+    if (!body.isMember(field) || !body[field].isBool()) {
+        return fallback;
+    }
+    return body[field].asBool();
+}
+
 } // namespace launcher::app

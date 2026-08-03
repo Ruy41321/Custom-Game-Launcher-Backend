@@ -33,4 +33,11 @@ common::VoidResult validatePassword(std::string_view password);
 
 common::VoidResult validateDisplayName(std::string_view displayName);
 
+/// True for the canonical 8-4-4-4-12 hexadecimal form.
+///
+/// Callers check this before a value reaches a `$n::uuid` comparison: PostgreSQL raises on a
+/// malformed uuid literal, which would turn a mistyped identifier into a 500 instead of the
+/// 404 it actually is.
+bool isUuid(std::string_view value);
+
 } // namespace launcher::domain
