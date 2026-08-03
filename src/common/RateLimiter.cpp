@@ -12,10 +12,20 @@ constexpr std::size_t MINIMUM_CAPACITY = 1;
 } // namespace
 
 RateLimiter::RateLimiter(std::size_t capacity, std::chrono::seconds refillWindow, Clock clock)
-    : capacity_(static_cast<double>(std::max(capacity, MINIMUM_CAPACITY))),
-      refillWindow_(refillWindow.count() > 0 ? refillWindow : std::chrono::seconds{1}),
-      clock_(clock ? std::move(clock) : []() { return std::chrono::steady_clock::now(); }) {
+    : clock_(clock ? std::move(clock) : []() { return std::chrono::steady_clock::now(); }) {
+    applyLimits(capacity, refillWindow);
+}
+
+void RateLimiter::applyLimits(std::size_t capacity, std::chrono::seconds refillWindow) {
+    capacity_ = static_cast<double>(std::max(capacity, MINIMUM_CAPACITY));
+    refillWindow_ = refillWindow.count() > 0 ? refillWindow : std::chrono::seconds{1};
     tokensPerSecond_ = capacity_ / static_cast<double>(refillWindow_.count());
+}
+
+void RateLimiter::reconfigure(std::size_t capacity, std::chrono::seconds refillWindow) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    applyLimits(capacity, refillWindow);
+    buckets_.clear();
 }
 
 void RateLimiter::refill(Bucket& bucket, std::chrono::steady_clock::time_point now) const {

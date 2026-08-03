@@ -158,6 +158,33 @@ TEST(RateLimiterTest, ResetClearsEveryBucket) {
     EXPECT_TRUE(limiter.tryAcquire("client"));
 }
 
+TEST(RateLimiterTest, ReconfigureAppliesTheNewLimitsAndClearsBuckets) {
+    FakeClock clock;
+    RateLimiter limiter(10, 60s, clock.asClock());
+
+    ASSERT_TRUE(limiter.tryAcquire("client"));
+    limiter.reconfigure(2, 60s);
+
+    EXPECT_EQ(limiter.trackedKeys(), 0U) << "the old bucket must not survive the new limit";
+    EXPECT_TRUE(limiter.tryAcquire("client"));
+    EXPECT_TRUE(limiter.tryAcquire("client"));
+    EXPECT_FALSE(limiter.tryAcquire("client")) << "the new capacity should apply";
+}
+
+TEST(RateLimiterTest, ReconfigureAlsoChangesTheRefillRate) {
+    FakeClock clock;
+    RateLimiter limiter(2, 60s, clock.asClock());
+
+    // 2 per 2 seconds, i.e. one token per second, instead of one every 30.
+    limiter.reconfigure(2, 2s);
+    ASSERT_TRUE(limiter.tryAcquire("client"));
+    ASSERT_TRUE(limiter.tryAcquire("client"));
+    ASSERT_FALSE(limiter.tryAcquire("client"));
+
+    clock.advance(1100ms);
+    EXPECT_TRUE(limiter.tryAcquire("client"));
+}
+
 TEST(RateLimiterTest, TreatsAZeroCapacityAsOne) {
     FakeClock clock;
     RateLimiter limiter(0, 60s, clock.asClock());

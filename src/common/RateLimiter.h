@@ -28,6 +28,10 @@ class RateLimiter {
     /// Consumes one token, returning false when the caller is over its limit.
     bool tryAcquire(const std::string& key);
 
+    /// Applies new limits and forgets every bucket. Changed in place rather than by
+    /// building a new limiter because callers hold a long-lived reference to this one.
+    void reconfigure(std::size_t capacity, std::chrono::seconds refillWindow);
+
     /// Seconds until the given key regains a token; zero when one is available now.
     std::chrono::seconds retryAfter(const std::string& key);
 
@@ -49,11 +53,14 @@ class RateLimiter {
 
     void refill(Bucket& bucket, std::chrono::steady_clock::time_point now) const;
 
+    /// Shared by the constructor and reconfigure(); the caller holds the mutex.
+    void applyLimits(std::size_t capacity, std::chrono::seconds refillWindow);
+
     mutable std::mutex mutex_;
     std::unordered_map<std::string, Bucket> buckets_;
-    double capacity_;
-    double tokensPerSecond_;
-    std::chrono::seconds refillWindow_;
+    double capacity_{0.0};
+    double tokensPerSecond_{0.0};
+    std::chrono::seconds refillWindow_{0};
     Clock clock_;
 };
 
