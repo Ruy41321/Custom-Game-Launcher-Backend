@@ -6,6 +6,8 @@
 #include <drogon/HttpResponse.h>
 #include <json/json.h>
 
+#include <chrono>
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <thread>
@@ -51,6 +53,29 @@ class AppHarness : public ::testing::Environment {
     std::unique_ptr<TestDatabase> database_;
     std::thread serverThread_;
     bool started_{false};
+};
+
+/// Narrows the auth throttle for the duration of a test, restoring the harness default
+/// afterwards.
+///
+/// A throttle is a rate, not a count: with the harness default of 500 attempts per minute
+/// the bucket refills at 8.3 tokens per second, so whether a fixed number of requests ever
+/// empties it depends on how fast the machine answers them. Shrinking the bucket instead
+/// makes the assertion hold on any machine.
+class ScopedAuthRateLimit {
+  public:
+    ScopedAuthRateLimit(std::size_t attempts, std::chrono::seconds window);
+
+    ~ScopedAuthRateLimit();
+
+    ScopedAuthRateLimit(const ScopedAuthRateLimit&) = delete;
+    ScopedAuthRateLimit& operator=(const ScopedAuthRateLimit&) = delete;
+    ScopedAuthRateLimit(ScopedAuthRateLimit&&) = delete;
+    ScopedAuthRateLimit& operator=(ScopedAuthRateLimit&&) = delete;
+
+  private:
+    std::size_t previousAttempts_;
+    std::chrono::seconds previousWindow_;
 };
 
 /// Skips the calling test when no database is configured.

@@ -4,6 +4,8 @@
 #include <json/json.h>
 
 #include <atomic>
+#include <chrono>
+#include <cstddef>
 #include <string>
 
 #include "integration/AppHarness.h"
@@ -11,6 +13,7 @@
 namespace {
 
 using launcher::testing::AppHarness;
+using launcher::testing::ScopedAuthRateLimit;
 
 constexpr const char* PASSWORD = "correct horse battery staple";
 
@@ -351,22 +354,25 @@ TEST(AuthEndpointTest, PasswordResetLooksIdenticalForAnUnknownAddress) {
 // deterministically by RateLimiterTest.
 TEST(AuthEndpointTest, ThrottlesRepeatedLoginAttempts) {
     LAUNCHER_REQUIRE_DATABASE();
-    harness().resetRateLimiter();
 
-    bool throttled = false;
-    drogon::HttpResponsePtr limited;
-    for (int attempt = 0; attempt < 600 && !throttled; ++attempt) {
-        limited = harness().postJson("/api/v1/auth/login",
-                                     credentials("nobody@example.test", "wrong password here"));
-        throttled = limited->statusCode() == drogon::k429TooManyRequests;
+    // Both constructing and destroying this empties the bucket, so the count below is exact
+    // and nothing is left behind for the next test.
+    constexpr std::size_t ATTEMPTS = 5;
+    const ScopedAuthRateLimit limit(ATTEMPTS, std::chrono::seconds{60});
+
+    const auto attempt = []() {
+        return harness().postJson("/api/v1/auth/login",
+                                  credentials("nobody@example.test", "wrong password here"));
+    };
+
+    for (std::size_t sent = 0; sent < ATTEMPTS; ++sent) {
+        ASSERT_EQ(attempt()->statusCode(), drogon::k401Unauthorized) << "attempt " << sent;
     }
 
-    ASSERT_TRUE(throttled) << "login should be rate limited well before 600 attempts";
+    const auto limited = attempt();
+    ASSERT_EQ(limited->statusCode(), drogon::k429TooManyRequests);
     EXPECT_EQ(bodyOf(limited)["code"].asString(), "rate_limited");
     EXPECT_FALSE(limited->getHeader("Retry-After").empty());
-
-    // Leave the shared bucket clean for whatever runs next.
-    harness().resetRateLimiter();
 }
 
 } // namespace

@@ -139,6 +139,16 @@ void AppHarness::resetRateLimiter() {
     app::AppContext::instance().authRateLimiter().reset();
 }
 
+ScopedAuthRateLimit::ScopedAuthRateLimit(std::size_t attempts, std::chrono::seconds window)
+    : previousAttempts_(app::AppContext::instance().config().rateLimit.authAttempts),
+      previousWindow_(app::AppContext::instance().config().rateLimit.authWindowSeconds) {
+    app::AppContext::instance().authRateLimiter().reconfigure(attempts, window);
+}
+
+ScopedAuthRateLimit::~ScopedAuthRateLimit() {
+    app::AppContext::instance().authRateLimiter().reconfigure(previousAttempts_, previousWindow_);
+}
+
 namespace {
 
 // gtest takes ownership of the environment and deletes it, so it must be heap allocated.
