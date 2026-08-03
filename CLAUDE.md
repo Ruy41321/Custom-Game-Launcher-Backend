@@ -233,7 +233,10 @@ curl -s http://localhost:8080/api/v1/health
 | Docker Desktop is installed but its daemon is often **stopped** | Start it before any compose or integration-test command |
 | CMake 3.31 and Ninja exist only inside the VS 2022 install, not on `PATH` | Use `CMakePresets.json`; do not assume bare `cmake` works |
 | vcpkg is present only as the VS bundle, not bootstrapped | One-time `vcpkg-init` needed for local builds; Docker handles it itself |
-| `psql` and `gh` are **not installed** | Use `docker compose exec db psql`; do GitHub work through git over SSH |
+| `psql` is **not installed** | Use `docker compose exec db psql` |
+| `gh` 2.97 is installed at `C:\Program Files\GitHub CLI` and authenticated as `Ruy41321` | Read CI failures with `gh run view <id> --log-failed` instead of guessing. The installer does not add it to an already-open shell's `PATH`; prepend the directory if `gh` is not found |
+| **CI runs on hardware roughly 5x slower than the maintainer's** | ~49ms per integration HTTP request against ~10ms locally. Any assertion whose outcome depends on how many requests fit in a time window will pass locally and fail there — see the rate-limit row below |
+| **A token-bucket assertion must shrink the bucket, not out-run its refill** | The throttle test sent a fixed number of requests against the default 500/60s limit. The bucket refills at 8.3 tokens/s, so the number of requests needed to empty it is a function of request latency: ~546 locally, ~845 in CI. Tests now narrow the limit with `ScopedAuthRateLimit` so the assertion is exact on any machine |
 | MSVC 14.44 / VS 2022 Community is available | A local C++ build is possible but slow on first configure |
 | **Never set `VCPKG_FORCE_SYSTEM_BINARIES=1`** in the build image | It makes vcpkg use the distro's CMake, which is older than the port scripts need; zlib fails to configure with a `string(JSON …)` error |
 | **`vcpkg install` from the CLI writes to the *manifest* directory**, while the CMake toolchain looks in `${CMAKE_BINARY_DIR}/vcpkg_installed` | The Dockerfile must pass `-DVCPKG_INSTALLED_DIR=/src/vcpkg_installed`, or every `find_package` fails despite the dependencies being present |
@@ -311,6 +314,19 @@ Legend: ✅ done · 🚧 in progress · ⬜ not started
 - ✅ [Documentation/authentication.md](Documentation/authentication.md)
 - ⚠️ No mail transport yet: verification and reset tokens are returned in the response in
   **development only**. Remove those fields when delivery lands.
+
+### GitHub Actions, first real runs (2026-08-03)
+The workflow finally ran. Three runs, and what each taught:
+
+- Run 1 was cancelled by the concurrency group.
+- Run 2 (`d100e28`, pre-auth): `clang-format` failed, everything else green.
+- Run 3 (`65bcd98`, auth): formatting green, `Build and test` failed on exactly one test,
+  `AuthEndpointTest.ThrottlesRepeatedLoginAttempts`. Not flaky — deterministically broken on
+  any machine slower than the maintainer's; see the rate-limit row in §8. Fixed by narrowing
+  the bucket instead of raising the attempt cap.
+
+The `docker` job has been green from the start. The vcpkg host packages the workflow installs
+turned out to be correct, so that standing suspicion is closed.
 
 ### Next up
 - ⬜ **M4** Catalog + Explore APIs, resumable build upload, manifest/blob ingestion, quotas
