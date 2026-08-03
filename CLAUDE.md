@@ -132,6 +132,12 @@ layout accepts it later as an additional blob kind, with no schema change.
 | D18 | **The manifest is a byte-exact canonical document, and the endpoint serves those exact bytes** | `builds.manifest_sha256` covers the served response, so a client verifies a download by hashing what it received instead of reproducing a canonical form of its own. Sorted by path, fixed key order, no whitespace, hand-written serialiser — jsoncpp changing how it escapes would silently break every stored hash. The build id is excluded so identical content yields identical hashes. | Re-serialising through jsoncpp on read (hash drifts with the library); hashing the database rows (no stable byte order) |
 | D19 | **Lists of values reach SQL as one `jsonb` parameter, expanded with `jsonb_array_elements`** | A PostgreSQL array literal would mean hand-rolling the array-literal escaping rules for paths and hashes; jsoncpp already escapes correctly, and `jsonb_array_elements_text(… ) WITH ORDINALITY` even preserves the caller's order. | Array literals (custom escaping); one statement per element (N round trips) |
 | D20 | **Numeric bind parameters are sent as text, not as C++ integers** | Drogon sends an integral parameter in PostgreSQL's *binary* format sized by the C++ type, so an `int` reaching a `bigint` column is rejected as malformed binary input. A text parameter is parsed by the server into whatever type it inferred for that position, which is correct whatever the column happens to be. | Matching each C++ width to its column by hand (one wrong pairing is a runtime error nothing catches at compile time) |
+| D21 | **The download plan is a POST, not a GET** | It mints signed URLs and records that a download was handed out. Neither is cacheable and neither is free of consequence, which is exactly what GET promises. The body also leaves room for a client to describe its install more richly later without inventing a query-string encoding. | `GET …/download?from=…` (a cacheable, "safe" method with credentials in the response and a row written per call) |
+| D22 | **Only the URL *path* is signed, never the scheme or host** | `$uri` is all nginx sees, so it is all the signature can cover. The consequence is the useful part: the same deployment keeps working when it is fronted by another hostname or moved behind TLS, and `storage.publicBaseUrl` can change without invalidating anything already minted. | Signing the absolute URL (any hostname change breaks every live link, and nginx cannot verify it anyway) |
+| D23 | **A local copy is only ever offered from a path the update keeps unchanged** | A file that merely moved does not have to travel, but the source of the copy must survive the update: otherwise whether the copy works depends on the order the client applied the plan in, which is a bug that appears on some machines some of the time. Restricting `copyFrom` to survivors makes the plan order-independent by construction. | Offering any local path holding the content (ordering hazard); no copy hint at all (a rename re-downloads the whole file) |
+| D24 | **Planned bytes count distinct blobs, not manifest entries** | Paths are the unit of the plan, blobs are the unit of the transfer. Two changed files with identical content are two entries and one download, so summing entries would overstate both what the client is told to expect and what the analytics record. | Summing entry sizes (double counts shared content) |
+| D25 | **Files the manifest never mentioned do not make an install broken** | An install directory legitimately accumulates saves, configuration and logs. `verify` reports them under `unexpected` so the client can decide, but `intact` ignores them — a server that called an install corrupt because of a save file would train users to ignore the check. | Treating unexpected files as corruption (false positives); not reporting them at all (no way to clean up a botched update) |
+| D26 | **Build authorization rules live in `domain/`, not in a service** | Both halves of a build's life ask the same two questions — who may publish to it, who may see it exists. `domain::mayPublishBuild` / `mayReadBuild` are pure functions over `BuildOwnership` and `Actor`, so `UploadService` and `DownloadService` cannot drift apart on the 404-not-403 rule. | A copy in each service (two places for one security rule to be wrong in) |
 
 ---
 
@@ -278,6 +284,10 @@ curl -s http://localhost:8080/api/v1/health
 | **Drogon's default request body limit is 1 MB** | Far below one upload chunk, and it rejects the request before the controller ever runs, so the failure looks like a routing problem rather than a size one. `app::configureUploadLimits` raises `setClientMaxBodySize` *and* `setClientMaxMemoryBodySize`; the integration harness calls the same function, so tests never run under limits nobody deploys |
 | **A range-for over `bodyOf(response)["items"]` walks freed memory** | The helper returns a `Json::Value` by value; `["items"]` is a reference into that temporary, and C++20 does not extend its lifetime for the loop (P2718 fixes this in C++23). It cost a debugging cycle presenting as "the endpoint returns nothing" when the endpoint was correct. Bind the body to a named local first |
 | **`.env` sets `DB_PASSWORD=change-me`, not the compose default** | `LAUNCHER_TEST_DB_PASSWORD` must match it, or every integration test *skips itself* with "LAUNCHER_TEST_DB_HOST is not set" — the connection error is printed once, before gtest's output, and is easy to scroll past. `docker compose --profile tools run` reads `.env` for you; a bare `docker run` does not |
+| **Git Bash rewrites container paths in `docker run`** | `-v "$(pwd):/work" -w /work` becomes `C:/Program Files/Git/work` and the run fails. Use `MSYS_NO_PATHCONV=1`, `$(pwd -W)` for the source side and `//work` for `-w`. `docker compose` is unaffected, which is why this only bites the fast build loop |
+| **Tampering with `expires` in a signed URL gives 403, not 410** | The expiry is part of what the signature covers, so changing it invalidates the signature and nginx reports "bad signature" before it ever looks at the clock. To see the 410 path, sign a URL whose expiry is already in the past |
+| **MD5 is in OpenSSL 3's *default* provider** | `EVP_md5()` works with no legacy-provider setup, unlike MD4/MD2. `secure_link` needs MD5 and there is nothing to configure |
+| **A fake hash in a test must still be valid hex** | Verification checks the shape of what a client reports before comparing anything, so a filler like `std::string(64, 'x')` is rejected as malformed and the assertion under test never runs. Build test hashes out of `0-9a-f` |
 | **A `CHECK (expires_at > created_at)` on upload sessions blocks force-expiry** | Moving an expiry into the past is a legitimate administrative action, and it is how the expiry path is tested. The constraint was removed from migration 0002 before it was merged |
 
 ---
@@ -396,8 +406,36 @@ shim. Worth a `ci:` bump before it becomes urgent.
   manifest hashed to the recorded `manifestSha256`
 - `clang-format` clean across `src/` and `tests/`
 
+### Milestone 5 — Delta updates, signed downloads, integrity ✅
+- ✅ `POST /api/v1/builds/{id}/download`: the plan to reach a build, from any older one or from
+  nothing, with the delta computed over the two manifests on demand
+- ✅ Signed download URLs (`secure_link`: `base64url(md5("<expires><uri> <secret>"))`), signing
+  the path only so a hostname change invalidates nothing
+- ✅ Full-download fallback past `updates.fullDownloadThresholdRatio`
+- ✅ `copyFrom` hints for content that only moved, restricted to paths the update keeps, so a
+  plan is order-independent
+- ✅ `POST /api/v1/builds/{id}/verify`: missing / corrupt / unexpected, plus signed URLs that
+  repair the difference
+- ✅ `download_events` recorded per plan, with the version the client came from
+- ✅ Build authorization rules moved into `domain/` and shared with the upload side
+- ✅ [Documentation/downloads-and-deltas.md](Documentation/downloads-and-deltas.md)
+
+### Verified on 2026-08-03
+- 322/322 tests green (243 unit, 79 integration against a real PostgreSQL)
+- End-to-end against `docker compose up -d --build`: two builds of one game published, the
+  delta plan carried only the changed executable (21 of 77 bytes) and listed the shared asset
+  as unchanged
+- **The signed URL was fetched through nginx**: 200 with the right bytes, 206 for a `Range`
+  request, 403 without a token and with a wrong one, 410 for a correctly signed but expired
+  URL. This is the part no automated test can reach, since the suite has no file server
+- `verify` confirmed an intact install and, for a tampered one, named the corrupt and missing
+  files and handed back repair URLs
+- `download_events` held one `full` (77 bytes, no source version) and one `delta` (21 bytes,
+  from the previous version)
+- `clang-format` clean across `src/` and `tests/`
+
 ### Next up
-- ⬜ **M5** Delta endpoint, signed download URLs, integrity verification
+- ⬜ **M6** Client API layer: the launcher finally talks to the server
 - ⬜ **M9** Localhost admin web GUI
 - ⬜ **M10** `Documentation/` per module, security hardening, GDPR erasure
 

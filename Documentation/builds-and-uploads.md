@@ -205,11 +205,12 @@ meant.
 The integration harness calls the same function, so the tests never run under limits nobody
 deploys.
 
-## Not yet implemented
+## The other half
 
-Downloading. The manifest tells a client which blobs it needs, but the signed download URLs
-(nginx `secure_link`, HTTP `Range`) and the delta endpoint that computes the set difference
-between two manifests are milestone 5.
+Downloading — the delta between two manifests, the signed URLs nginx validates, and integrity
+verification — is in [downloads-and-deltas.md](downloads-and-deltas.md).
+
+## Not yet implemented
 
 Garbage collection of unreferenced blobs is also outstanding: `build_files.blob_sha256` is
 `ON DELETE RESTRICT`, so nothing can remove a referenced blob, but nothing yet sweeps the

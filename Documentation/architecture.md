@@ -125,6 +125,9 @@ advises a full download instead.
 Deltas are currently file-level: a changed file is fetched whole. Sub-file binary diffing is
 a later addition that needs no schema change.
 
+The download side is documented in [downloads-and-deltas.md](downloads-and-deltas.md), the
+publishing side in [builds-and-uploads.md](builds-and-uploads.md).
+
 ## Logging
 
 spdlog, one JSON object per line, level from configuration. Any dynamic value embedded in a
