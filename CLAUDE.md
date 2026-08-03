@@ -214,6 +214,13 @@ docker compose exec api /app/launcher-api --migrate
 # psql is not installed on the host — go through the container
 docker compose exec db psql -U launcher -d launcher -c "\dt"
 
+# Grant the devlist. There is no endpoint for this by design (D8), and it is the first thing
+# any manual publishing walkthrough needs. Note the column is roles.key, not roles.name.
+docker compose exec -T db psql -U launcher -d launcher -c \
+    "INSERT INTO user_roles (user_id, role_id)
+     SELECT u.id, r.id FROM users u, roles r WHERE u.email = 'you@example.com' AND r.key = 'dev'
+     ON CONFLICT DO NOTHING;"
+
 # Tests. `api-build` is the toolchain image and sits behind the `tools` profile, so it is
 # not started by `up`; the --profile flag is required.
 docker compose --profile tools run --rm api-build ctest --test-dir build --output-on-failure
