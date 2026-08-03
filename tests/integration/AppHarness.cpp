@@ -146,6 +146,13 @@ drogon::HttpResponsePtr AppHarness::postJson(const std::string& path,
     return send(request, bearerToken);
 }
 
+drogon::HttpResponsePtr AppHarness::post(const std::string& path, const std::string& bearerToken) {
+    auto request = drogon::HttpRequest::newHttpRequest();
+    request->setMethod(drogon::Post);
+    request->setPath(path);
+    return send(request, bearerToken);
+}
+
 drogon::HttpResponsePtr AppHarness::patchJson(const std::string& path,
                                               const Json::Value& body,
                                               const std::string& bearerToken) {

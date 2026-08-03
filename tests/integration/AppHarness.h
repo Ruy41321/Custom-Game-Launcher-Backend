@@ -46,6 +46,9 @@ class AppHarness : public ::testing::Environment {
     drogon::HttpResponsePtr
     postJson(const std::string& path, const Json::Value& body, const std::string& bearerToken = {});
 
+    /// POST with no body at all, which is how a client with nothing to say sends one.
+    drogon::HttpResponsePtr post(const std::string& path, const std::string& bearerToken = {});
+
     drogon::HttpResponsePtr patchJson(const std::string& path,
                                       const Json::Value& body,
                                       const std::string& bearerToken = {});

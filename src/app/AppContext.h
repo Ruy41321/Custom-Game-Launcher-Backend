@@ -8,6 +8,7 @@
 #include "common/RateLimiter.h"
 #include "repositories/IBlobRepository.h"
 #include "repositories/IBuildRepository.h"
+#include "repositories/IDownloadRepository.h"
 #include "repositories/IGameRepository.h"
 #include "repositories/IGameVersionRepository.h"
 #include "repositories/ILibraryRepository.h"
@@ -18,6 +19,7 @@
 #include "repositories/IUserTokenRepository.h"
 #include "services/AuthService.h"
 #include "services/CatalogService.h"
+#include "services/DownloadService.h"
 #include "services/PasswordHasher.h"
 #include "services/TokenService.h"
 #include "services/UploadService.h"
@@ -51,6 +53,8 @@ class AppContext {
 
     const services::UploadService& uploadService() const;
 
+    const services::DownloadService& downloadService() const;
+
     /// Shared by the authentication endpoints; see common::RateLimiter for why it is
     /// in-process.
     common::RateLimiter& authRateLimiter() const;
@@ -83,12 +87,14 @@ class AppContext {
     std::unique_ptr<repositories::ILibraryRepository> library_;
     std::unique_ptr<repositories::IBlobRepository> blobs_;
     std::unique_ptr<repositories::IUploadSessionRepository> uploadSessions_;
+    std::unique_ptr<repositories::IDownloadRepository> downloads_;
 
     std::unique_ptr<services::IPasswordHasher> passwordHasher_;
     std::unique_ptr<services::ITokenService> tokenService_;
     std::unique_ptr<services::AuthService> authService_;
     std::unique_ptr<services::CatalogService> catalogService_;
     std::unique_ptr<services::UploadService> uploadService_;
+    std::unique_ptr<services::DownloadService> downloadService_;
 
     std::unique_ptr<common::RateLimiter> authRateLimiter_;
 };

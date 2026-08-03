@@ -24,6 +24,13 @@ Json::Value requireJsonObject(const drogon::HttpRequestPtr& request) {
     return *body;
 }
 
+Json::Value optionalJsonObject(const drogon::HttpRequestPtr& request) {
+    if (request->body().empty()) {
+        return Json::Value(Json::objectValue);
+    }
+    return requireJsonObject(request);
+}
+
 std::string requireString(const Json::Value& body, const char* field) {
     if (!body.isMember(field) || !body[field].isString()) {
         throw ApiException(ErrorCode::InvalidInput,

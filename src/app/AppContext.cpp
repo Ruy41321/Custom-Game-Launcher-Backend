@@ -4,6 +4,7 @@
 #include <utility>
 
 #include "repositories/postgres/PgCatalogRepositories.h"
+#include "repositories/postgres/PgDownloadRepositories.h"
 #include "repositories/postgres/PgRepositories.h"
 #include "repositories/postgres/PgUploadRepositories.h"
 
@@ -29,6 +30,7 @@ void AppContext::initialize(AppConfig config, drogon::orm::DbClientPtr database)
     blobs_ = std::make_unique<repositories::postgres::PgBlobRepository>(database_);
     uploadSessions_ =
         std::make_unique<repositories::postgres::PgUploadSessionRepository>(database_);
+    downloads_ = std::make_unique<repositories::postgres::PgDownloadRepository>(database_);
 
     passwordHasher_ =
         std::make_unique<services::Argon2idPasswordHasher>(services::PasswordHashingSettings{
@@ -71,6 +73,17 @@ void AppContext::initialize(AppConfig config, drogon::orm::DbClientPtr database)
         *users_,
         storage::BlobStore{std::filesystem::path{config_.storage.blobRoot}},
         std::move(uploadSettings));
+
+    storage::SignedUrlSettings urlSettings;
+    urlSettings.publicBaseUrl = config_.storage.publicBaseUrl;
+    urlSettings.secret = config_.storage.secureLinkSecret;
+    urlSettings.ttl = std::chrono::seconds{config_.storage.signedUrlTtlSeconds};
+
+    downloadService_ = std::make_unique<services::DownloadService>(
+        *builds_,
+        *downloads_,
+        storage::DownloadUrlSigner{std::move(urlSettings)},
+        services::DownloadSettings{config_.updates.fullDownloadThresholdRatio});
 
     authRateLimiter_ = std::make_unique<common::RateLimiter>(
         config_.rateLimit.authAttempts, std::chrono::seconds{config_.rateLimit.authWindowSeconds});
@@ -118,6 +131,11 @@ const services::UploadService& AppContext::uploadService() const {
     return *uploadService_;
 }
 
+const services::DownloadService& AppContext::downloadService() const {
+    requireInitialized();
+    return *downloadService_;
+}
+
 common::RateLimiter& AppContext::authRateLimiter() const {
     requireInitialized();
     return *authRateLimiter_;
@@ -126,11 +144,13 @@ common::RateLimiter& AppContext::authRateLimiter() const {
 void AppContext::reset() {
     initialized_ = false;
     authRateLimiter_.reset();
+    downloadService_.reset();
     uploadService_.reset();
     catalogService_.reset();
     authService_.reset();
     tokenService_.reset();
     passwordHasher_.reset();
+    downloads_.reset();
     uploadSessions_.reset();
     blobs_.reset();
     library_.reset();

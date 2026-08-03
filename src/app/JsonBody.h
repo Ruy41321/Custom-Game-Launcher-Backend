@@ -13,6 +13,11 @@ namespace launcher::app {
 /// failures; the central exception handler renders them.
 Json::Value requireJsonObject(const drogon::HttpRequestPtr& request);
 
+/// Same, for a request whose body is entirely optional: an empty body yields an empty object,
+/// so the caller reads its fields the usual way. A body that is present but malformed is still
+/// an error — "absent" and "wrong" are different answers.
+Json::Value optionalJsonObject(const drogon::HttpRequestPtr& request);
+
 /// Reads a required string field. An absent, non-string or blank value is a validation
 /// error naming the field, so the client can point at the right input.
 std::string requireString(const Json::Value& body, const char* field);
