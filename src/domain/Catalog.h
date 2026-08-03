@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "common/Result.h"
+#include "domain/Actor.h"
 #include "domain/Semver.h"
 
 namespace launcher::domain {
@@ -139,6 +140,18 @@ struct BuildOwnership {
     GameVisibility visibility{GameVisibility::Draft};
     BuildStatus status{BuildStatus::Uploading};
 };
+
+/// May act on a build as its publisher: its owner, or an operator who manages any game.
+///
+/// Here rather than in a service because both halves of the build lifecycle ask the same
+/// question — the upload side to decide who may publish, the download side to decide who may
+/// see a draft — and two copies of an authorization rule is one copy too many.
+bool mayPublishBuild(const BuildOwnership& ownership, const Actor& actor);
+
+/// May see that a build exists at all. A game still in draft is visible only to its publisher,
+/// and to everyone else the build is reported missing rather than forbidden: a 403 would
+/// confirm it exists.
+bool mayReadBuild(const BuildOwnership& ownership, const Actor& actor);
 
 /// A game together with the versions and builds a particular caller is allowed to see.
 struct GameDetail {

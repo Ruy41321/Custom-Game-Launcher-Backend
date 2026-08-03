@@ -36,10 +36,6 @@ constexpr int SWEEP_BATCH = 100;
 /// that a wildly wrong request does not produce a megabyte of error detail.
 constexpr std::size_t MAX_REPORTED_MISSING = 20;
 
-bool mayPublish(const domain::BuildOwnership& ownership, const Actor& actor) {
-    return actor.owns(ownership.publisherUserId) || actor.managesAnyGame();
-}
-
 } // namespace
 
 UploadService::UploadService(const repositories::IBuildRepository& builds,
@@ -66,7 +62,7 @@ UploadService::writableBuild(Actor actor, std::string buildId) const {
     }
 
     const auto ownership = co_await builds_.findOwnership(buildId);
-    if (!ownership.has_value() || !mayPublish(*ownership, actor)) {
+    if (!ownership.has_value() || !domain::mayPublishBuild(*ownership, actor)) {
         co_return Result<domain::BuildOwnership>::failure(ErrorCode::NotFound, NO_SUCH_BUILD);
     }
     if (ownership->status != domain::BuildStatus::Uploading) {
@@ -409,8 +405,7 @@ drogon::Task<Result<ManifestDocument>> UploadService::manifest(Actor actor,
         co_return Result<ManifestDocument>::failure(ErrorCode::NotFound, NO_SUCH_BUILD);
     }
 
-    const bool draft = ownership->visibility == domain::GameVisibility::Draft;
-    if (draft && !mayPublish(*ownership, actor)) {
+    if (!domain::mayReadBuild(*ownership, actor)) {
         co_return Result<ManifestDocument>::failure(ErrorCode::NotFound, NO_SUCH_BUILD);
     }
     if (ownership->status != domain::BuildStatus::Ready) {

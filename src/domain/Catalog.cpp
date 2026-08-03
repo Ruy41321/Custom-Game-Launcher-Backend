@@ -236,4 +236,12 @@ VoidResult validateReleaseDate(std::string_view date) {
     return VoidResult::success();
 }
 
+bool mayPublishBuild(const BuildOwnership& ownership, const Actor& actor) {
+    return actor.owns(ownership.publisherUserId) || actor.managesAnyGame();
+}
+
+bool mayReadBuild(const BuildOwnership& ownership, const Actor& actor) {
+    return ownership.visibility != GameVisibility::Draft || mayPublishBuild(ownership, actor);
+}
+
 } // namespace launcher::domain
