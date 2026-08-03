@@ -126,6 +126,12 @@ layout accepts it later as an additional blob kind, with no schema change.
 | D12 | **Coroutines through controllers, services and repositories** | Controllers run *on* Drogon's event loops. `execSqlSync` there would block a loop thread for the whole query, so a handful of slow queries stalls every request the server is handling. `co_await execSqlCoro` suspends instead. Tests drive coroutines with `drogon::sync_wait`. | Sync repositories (blocks event loops); dispatching to a worker pool (reintroduces the thread-per-request cost Drogon exists to avoid) |
 | D13 | **Repository/service coroutine parameters are taken by value** | A reference parameter to a coroutine dangles as soon as the coroutine first suspends, because the caller's frame may be gone. Passing by value moves the argument into the coroutine frame. This is a correctness rule, not a style preference. | `const&` parameters (use-after-free that only shows under load) |
 | D14 | **Argon2id parameters default to libsodium's INTERACTIVE limits** | MODERATE costs 256 MiB *per concurrent hash*; a few simultaneous logins would OOM the cheap VPS this is designed for. INTERACTIVE (64 MiB) is the documented interactive-login profile and the limits are configurable for bigger hosts. | MODERATE/SENSITIVE (memory exhaustion under concurrent login) |
+| D15 | **The database, not the staging file, owns an upload's offset** | The offset is handed out by one conditional `UPDATE … WHERE received_bytes = $expected`, and the write happens after. Two chunks racing at the same offset cannot both match, so only one is ever told to write. Reading the file size instead would let a duplicated request overwrite a range that a concurrent one was already writing. | `stat()` on the `.part` file (racy); a per-session mutex (does not survive more than one process) |
+| D16 | **`Upload-Offset` is mandatory on every chunk** | Defaulting it to the server's current offset is the one mistake a resumed upload cannot recover from: a client that lost track silently duplicates or skips a range, and the hash check only catches it after the whole file has been sent. A wrong offset is a 409 carrying the real one, so the client recovers from the error itself. | Implicit append (silent corruption); `Content-Range` (semantics designed for responses, not partial writes) |
+| D17 | **Quota is charged when an upload completes, by one conditional statement** | `UPDATE users SET upload_used_bytes = … WHERE upload_used_bytes + $2 <= upload_quota_bytes` — an empty result *is* the refusal. A read-then-write lets two uploads finishing at once each see the same free space. Dedup, hash failure and a lost insert race all refund, so an account only pays for bytes that became new storage. Staging disk is bounded separately by `maxOpenSessionsPerUser × maxBlobBytes`. | Reserving quota at session start (release paths on every abort, expiry and crash, for a counter that would then include bytes that never arrived) |
+| D18 | **The manifest is a byte-exact canonical document, and the endpoint serves those exact bytes** | `builds.manifest_sha256` covers the served response, so a client verifies a download by hashing what it received instead of reproducing a canonical form of its own. Sorted by path, fixed key order, no whitespace, hand-written serialiser — jsoncpp changing how it escapes would silently break every stored hash. The build id is excluded so identical content yields identical hashes. | Re-serialising through jsoncpp on read (hash drifts with the library); hashing the database rows (no stable byte order) |
+| D19 | **Lists of values reach SQL as one `jsonb` parameter, expanded with `jsonb_array_elements`** | A PostgreSQL array literal would mean hand-rolling the array-literal escaping rules for paths and hashes; jsoncpp already escapes correctly, and `jsonb_array_elements_text(… ) WITH ORDINALITY` even preserves the caller's order. | Array literals (custom escaping); one statement per element (N round trips) |
+| D20 | **Numeric bind parameters are sent as text, not as C++ integers** | Drogon sends an integral parameter in PostgreSQL's *binary* format sized by the C++ type, so an `int` reaching a `bigint` column is rejected as malformed binary input. A text parameter is parsed by the server into whatever type it inferred for that position, which is correct whatever the column happens to be. | Matching each C++ width to its column by hand (one wrong pairing is a runtime error nothing catches at compile time) |
 
 ---
 
@@ -144,7 +150,8 @@ src/
   controllers/v1/       HTTP surface, one controller per resource
   services/             business logic
   repositories/         I<Name>Repository interface + Pg<Name>Repository
-  domain/               entities, value objects
+  domain/               entities, value objects, Actor (who is asking)
+  storage/              BlobStore — the content-addressed filesystem layout
   filters/              JwtAuthFilter, RateLimitFilter, RequestIdFilter
   common/               Error, Result<T>, JsonUtils, Logging
   migrations/           MigrationRunner
@@ -211,6 +218,29 @@ docker compose --profile tools run --rm api-build \
     sh -c "find src tests -name '*.cpp' -o -name '*.h' | xargs clang-format -i"
 ```
 
+Fast edit/build/test loop. The image carries the toolchain and `vcpkg_installed`; bind-mounting
+the working tree gives an incremental `build/` on the host instead of recompiling everything
+inside a new image layer on every change. Roughly ten seconds per iteration against several
+minutes for `docker compose build`.
+
+```bash
+# Configure once (from the repository root)
+docker run --rm -v "${PWD}:/work" -w /work custom-game-launcher-api-build \
+    cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+        -DCMAKE_TOOLCHAIN_FILE=/opt/vcpkg/scripts/buildsystems/vcpkg.cmake \
+        -DVCPKG_INSTALLED_DIR=/src/vcpkg_installed \
+        -DVCPKG_MANIFEST_INSTALL=OFF -DVCPKG_MANIFEST_FEATURES=tests -DLAUNCHER_BUILD_TESTS=ON
+
+# Then, per change — integration tests need the compose database on the same network, and
+# LAUNCHER_TEST_DB_PASSWORD must match DB_PASSWORD in .env or every test silently skips.
+docker compose up -d db
+docker run --rm --network custom-game-launcher_default \
+    -e LAUNCHER_TEST_DB_HOST=db -e LAUNCHER_TEST_DB_USER=launcher \
+    -e LAUNCHER_TEST_DB_PASSWORD=change-me -e LAUNCHER_TEST_DB_ADMIN=launcher \
+    -v "${PWD}:/work" -w /work custom-game-launcher-api-build \
+    sh -c "cmake --build build --parallel && ctest --test-dir build --output-on-failure"
+```
+
 Optional local Windows build (CMake and Ninja ship with VS 2022 but are **not on PATH**;
 `CMakePresets.json` encodes their full paths):
 
@@ -245,6 +275,10 @@ curl -s http://localhost:8080/api/v1/health
 | **A Drogon transaction commits asynchronously when its object is destroyed** | There is no `commitCoro()`. A coroutine that inserts inside a transaction and returns the new row's key can hand that key to the client *before* the commit lands, and the next request then cannot find it. This is exactly how refresh-token rotation broke. Prefer a single statement — data-modifying CTEs (`WITH inserted AS (INSERT … RETURNING …)`) give the same atomicity and are already durable when the query returns |
 | **Do not detect unique violations by exception type** | `dynamic_cast` to `drogon::orm::SqlError` on what the batched backend throws did not match, so a duplicate registration surfaced as a 500. Use `ON CONFLICT … DO NOTHING RETURNING` and treat an empty result as the conflict; it is race-free and driver-independent |
 | **Destroying a Drogon `DbClient` can abort with "Resource deadlock avoided"** | Its destructor joins the connection loop thread, and the last `shared_ptr` reference can end up owned *by* that thread. This showed up as intermittent `Subprocess aborted` failures in integration tests. Test setup/teardown therefore uses libpq directly (`tests/integration/TestDatabase`), and a `DbClient` is only created when a test genuinely exercises one |
+| **Drogon's default request body limit is 1 MB** | Far below one upload chunk, and it rejects the request before the controller ever runs, so the failure looks like a routing problem rather than a size one. `app::configureUploadLimits` raises `setClientMaxBodySize` *and* `setClientMaxMemoryBodySize`; the integration harness calls the same function, so tests never run under limits nobody deploys |
+| **A range-for over `bodyOf(response)["items"]` walks freed memory** | The helper returns a `Json::Value` by value; `["items"]` is a reference into that temporary, and C++20 does not extend its lifetime for the loop (P2718 fixes this in C++23). It cost a debugging cycle presenting as "the endpoint returns nothing" when the endpoint was correct. Bind the body to a named local first |
+| **`.env` sets `DB_PASSWORD=change-me`, not the compose default** | `LAUNCHER_TEST_DB_PASSWORD` must match it, or every integration test *skips itself* with "LAUNCHER_TEST_DB_HOST is not set" — the connection error is printed once, before gtest's output, and is easy to scroll past. `docker compose --profile tools run` reads `.env` for you; a bare `docker run` does not |
+| **A `CHECK (expires_at > created_at)` on upload sessions blocks force-expiry** | Moving an expiry into the past is a legitimate administrative action, and it is how the expiry path is tested. The constraint was removed from migration 0002 before it was merged |
 
 ---
 
@@ -331,11 +365,40 @@ The workflow finally ran. Three runs, and what each taught:
 The `docker` job has been green from the start. The vcpkg host packages the workflow installs
 turned out to be correct, so that standing suspicion is closed.
 
+### Milestone 4 — Catalog, Explore and build upload ✅
+- ✅ Catalog API: create and patch games, versions, builds; slug derivation and validation
+- ✅ Explore with title search, three sort orders and paging; drafts never listed
+- ✅ Visibility rules (`draft` / `unlisted` / `public`), enforced in `CatalogService`; a game
+  the caller may not see is a 404, never a 403
+- ✅ Server-side library: idempotent add, remove, list
+- ✅ Content-addressed `BlobStore` with staging, hash verification and atomic publish
+- ✅ Blob negotiation, resumable tus-style upload sessions, offset reservation in the database
+- ✅ Manifest ingestion in one statement; byte-exact canonical document served by `GET .../manifest`
+- ✅ Cumulative upload quotas charged race-free at completion, refunded on dedup and failure
+- ✅ Abandoned-session sweeper on a timer
+- ✅ `0002_upload_sessions.sql`: `upload_sessions`, `blobs.uploaded_by_user_id`
+- ✅ [Documentation/catalog.md](Documentation/catalog.md),
+  [Documentation/builds-and-uploads.md](Documentation/builds-and-uploads.md)
+
+### Verified on 2026-08-03
+- 277/277 tests green (209 unit, 68 integration against a real PostgreSQL)
+- `docker compose up -d --build` brings api, db and fileserver to healthy; `0001` and `0002`
+  both applied at boot
+- End-to-end against the running stack: register → devlist grant → game → version → build →
+  blob negotiation → two-chunk resumable upload → manifest. The blob landed at
+  `/data/blobs/66/91/6691…` owned by `launcher`, staging was empty afterwards, and the served
+  manifest hashed to the recorded `manifestSha256`
+- `clang-format` clean across `src/` and `tests/`
+
 ### Next up
-- ⬜ **M4** Catalog + Explore APIs, resumable build upload, manifest/blob ingestion, quotas
 - ⬜ **M5** Delta endpoint, signed download URLs, integrity verification
 - ⬜ **M9** Localhost admin web GUI
 - ⬜ **M10** `Documentation/` per module, security hardening, GDPR erasure
+
+Deliberately **not** in M4, and worth stating so a later session does not assume they exist:
+game media (cover art, screenshots) and patch notes have tables but no endpoints; blob garbage
+collection is unwritten — `build_files` is `ON DELETE RESTRICT`, so nothing can remove a
+*referenced* blob, but nothing sweeps unreferenced ones either.
 
 ---
 
