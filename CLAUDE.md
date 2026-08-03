@@ -365,6 +365,12 @@ The workflow finally ran. Three runs, and what each taught:
 The `docker` job has been green from the start. The vcpkg host packages the workflow installs
 turned out to be correct, so that standing suspicion is closed.
 
+Run 5 (`6853d7f`, milestone 4) is green on all three jobs: `clang-format` 15s, `Build and test`
+2m57s for 277 tests, `Docker image builds` 12m6s. Every run since has warned that
+`actions/checkout@v4`, `actions/cache@v4` and the docker actions target Node.js 20, which the
+runners now force onto Node 24 — harmless today, a hard failure whenever GitHub drops the
+shim. Worth a `ci:` bump before it becomes urgent.
+
 ### Milestone 4 — Catalog, Explore and build upload ✅
 - ✅ Catalog API: create and patch games, versions, builds; slug derivation and validation
 - ✅ Explore with title search, three sort orders and paging; drafts never listed
