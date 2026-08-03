@@ -9,8 +9,8 @@ Written in C++20 with [Drogon](https://github.com/drogonframework/drogon). The w
 API, database and file server — comes up with one `docker compose` command and is meant to
 run comfortably on a cheap VPS.
 
-> **Status:** early development. The scaffolding, database schema and health endpoints are
-> in place; authentication and the catalog APIs are next. See
+> **Status:** early development. Scaffolding, the database schema and the full authentication
+> surface are in place; the catalog and build-upload APIs are next. See
 > [CLAUDE.md](CLAUDE.md#11-progress) for the current state.
 
 ## Features
@@ -141,7 +141,8 @@ ssh -L 9090:127.0.0.1:9090 user@your-vps
 | `src/common/` | Errors, `Result<T>`, hashing, logging |
 | `migrations/` | Numbered SQL migrations, immutable once merged |
 | `tests/` | `unit/` and `integration/` |
-| `Documentation/` | One document per module |
+| `filters/` | Authentication and rate-limiting middleware |
+| `Documentation/` | One document per module — start with [authentication.md](Documentation/authentication.md) |
 
 Architecture, conventions and the running list of technical decisions live in
 [CLAUDE.md](CLAUDE.md).

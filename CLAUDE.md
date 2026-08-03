@@ -123,6 +123,9 @@ layout accepts it later as an additional blob kind, with no schema change.
 | D9 | **spdlog, JSON lines** | Structured levels debug/info/warn/error with a request-id on every line, greppable in production. | Raw trantor `LOG_*` (unstructured) |
 | D10 | **Docker-first builds** | The Linux container is the reference build. A first vcpkg/Drogon build on Windows takes tens of minutes and is failure-prone. | Windows-first (slow, diverges from production) |
 | D11 | **Admin GUI = localhost-only web UI** | Second Drogon listener bound to `127.0.0.1:9090`, reached over an SSH tunnel. Works on a headless VPS, exposes nothing publicly. | Avalonia desktop app on the server (needs X11/VNC on a headless box) |
+| D12 | **Coroutines through controllers, services and repositories** | Controllers run *on* Drogon's event loops. `execSqlSync` there would block a loop thread for the whole query, so a handful of slow queries stalls every request the server is handling. `co_await execSqlCoro` suspends instead. Tests drive coroutines with `drogon::sync_wait`. | Sync repositories (blocks event loops); dispatching to a worker pool (reintroduces the thread-per-request cost Drogon exists to avoid) |
+| D13 | **Repository/service coroutine parameters are taken by value** | A reference parameter to a coroutine dangles as soon as the coroutine first suspends, because the caller's frame may be gone. Passing by value moves the argument into the coroutine frame. This is a correctness rule, not a style preference. | `const&` parameters (use-after-free that only shows under load) |
+| D14 | **Argon2id parameters default to libsodium's INTERACTIVE limits** | MODERATE costs 256 MiB *per concurrent hash*; a few simultaneous logins would OOM the cheap VPS this is designed for. INTERACTIVE (64 MiB) is the documented interactive-login profile and the limits are configurable for bigger hosts. | MODERATE/SENSITIVE (memory exhaustion under concurrent login) |
 
 ---
 
@@ -236,6 +239,8 @@ curl -s http://localhost:8080/api/v1/health
 | **`vcpkg install` from the CLI writes to the *manifest* directory**, while the CMake toolchain looks in `${CMAKE_BINARY_DIR}/vcpkg_installed` | The Dockerfile must pass `-DVCPKG_INSTALLED_DIR=/src/vcpkg_installed`, or every `find_package` fails despite the dependencies being present |
 | Some vcpkg ports need host tools that appear nowhere in `vcpkg.json` | `bison`/`flex` for libpq, and `autoconf`/`autoconf-archive`/`automake`/`libtool`/`gettext` for libsodium. Keep `docker/api/Dockerfile` and `.github/workflows/ci.yml` in sync |
 | Drogon's batched PG backend rejects multi-statement SQL | See decision D4a; do not "simplify" the migration runner back onto `DbClient` |
+| **A Drogon transaction commits asynchronously when its object is destroyed** | There is no `commitCoro()`. A coroutine that inserts inside a transaction and returns the new row's key can hand that key to the client *before* the commit lands, and the next request then cannot find it. This is exactly how refresh-token rotation broke. Prefer a single statement — data-modifying CTEs (`WITH inserted AS (INSERT … RETURNING …)`) give the same atomicity and are already durable when the query returns |
+| **Do not detect unique violations by exception type** | `dynamic_cast` to `drogon::orm::SqlError` on what the batched backend throws did not match, so a duplicate registration surfaced as a 500. Use `ON CONFLICT … DO NOTHING RETURNING` and treat an empty result as the conflict; it is race-free and driver-independent |
 | **Destroying a Drogon `DbClient` can abort with "Resource deadlock avoided"** | Its destructor joins the connection loop thread, and the last `shared_ptr` reference can end up owned *by* that thread. This showed up as intermittent `Subprocess aborted` failures in integration tests. Test setup/teardown therefore uses libpq directly (`tests/integration/TestDatabase`), and a `DbClient` is only created when a test genuinely exercises one |
 
 ---
@@ -296,9 +301,18 @@ Legend: ✅ done · 🚧 in progress · ⬜ not started
 - `clang-format` clean across `src/` and `tests/`
 - ⚠️ The GitHub Actions workflow has **not** run yet; it is verified locally only
 
+### Milestone 3 — Authentication ✅
+- ✅ Argon2id password hashing with transparent rehash on parameter upgrade
+- ✅ JWT access tokens (HS256, jsoncpp traits), permissions embedded in the claims
+- ✅ Refresh tokens: hashed at rest, rotated on every use, family revoked on reuse
+- ✅ Register, email verification, login, logout, password reset
+- ✅ Repository layer over Drogon coroutines; `JwtAuthFilter` + `requirePermission`
+- ✅ Per-address token-bucket rate limiting on the unauthenticated endpoints
+- ✅ [Documentation/authentication.md](Documentation/authentication.md)
+- ⚠️ No mail transport yet: verification and reset tokens are returned in the response in
+  **development only**. Remove those fields when delivery lands.
+
 ### Next up
-- ⬜ **M3** Auth: register, email verification, login, refresh rotation, password reset,
-  RBAC middleware, rate limiting
 - ⬜ **M4** Catalog + Explore APIs, resumable build upload, manifest/blob ingestion, quotas
 - ⬜ **M5** Delta endpoint, signed download URLs, integrity verification
 - ⬜ **M9** Localhost admin web GUI
