@@ -400,6 +400,11 @@ Run 5 (`6853d7f`, milestone 4) is green on all three jobs: `clang-format` 15s, `
 runners now force onto Node 24 — harmless today, a hard failure whenever GitHub drops the
 shim. Worth a `ci:` bump before it becomes urgent.
 
+Milestone 5 pushed two commits close together, and the concurrency group cancelled the first
+run two minutes in — the same behaviour as run 1, and not a failure: the surviving run covers
+the same tree plus the later commit. Run 7 (`4d42e12`) is green on all three jobs, 322 tests.
+When two pushes land back to back, watch the *newest* run and ignore the cancelled one.
+
 ### Milestone 4 — Catalog, Explore and build upload ✅
 - ✅ Catalog API: create and patch games, versions, builds; slug derivation and validation
 - ✅ Explore with title search, three sort orders and paging; drafts never listed
