@@ -26,6 +26,17 @@ constexpr uint16_t TEST_PORT = 18080;
 
 AppHarness* HARNESS = nullptr;
 
+/// How many times a request that never reached the server is sent again before giving up.
+constexpr int TRANSPORT_ATTEMPTS = 3;
+
+/// Stands in for the response a failed request never produced, so a caller that dereferences
+/// it reports a failed assertion instead of dying on a null pointer.
+drogon::HttpResponsePtr transportFailure() {
+    auto response = drogon::HttpResponse::newHttpResponse();
+    response->setStatusCode(drogon::k500InternalServerError);
+    return response;
+}
+
 app::AppConfig testConfig(const std::filesystem::path& blobRoot) {
     app::AppConfig config;
     config.environment = "development";
@@ -123,11 +134,31 @@ drogon::HttpResponsePtr AppHarness::send(const drogon::HttpRequestPtr& request,
         request->addHeader("Authorization", "Bearer " + bearerToken);
     }
 
-    auto client = drogon::HttpClient::newHttpClient(std::string("http://") + TEST_HOST + ":" +
-                                                    std::to_string(TEST_PORT));
-    auto [result, response] = client->sendRequest(request, 20.0);
-    EXPECT_EQ(result, drogon::ReqResult::Ok);
-    return response;
+    // A transport failure yields no response at all, and every caller here immediately does
+    // `response->statusCode()`. Returning the null pointer turned an occasional flake into a
+    // segfault with no output, which is how this surfaced in CI: an unreadable crash in a test
+    // that had nothing to do with the change under review.
+    for (int attempt = 0; attempt < TRANSPORT_ATTEMPTS; ++attempt) {
+        auto client = drogon::HttpClient::newHttpClient(std::string("http://") + TEST_HOST + ":" +
+                                                        std::to_string(TEST_PORT));
+        auto [result, response] = client->sendRequest(request, 20.0);
+        if (result == drogon::ReqResult::Ok && response != nullptr) {
+            return response;
+        }
+
+        // Retried only for BadServerAddress, which means no connection was ever established:
+        // the request cannot have reached the server, so sending it again cannot duplicate a
+        // registration or an upload chunk. A timeout gets no retry for exactly that reason —
+        // it may well have arrived.
+        if (result != drogon::ReqResult::BadServerAddress) {
+            ADD_FAILURE() << "request to " << request->path() << " failed: " << result;
+            return transportFailure();
+        }
+    }
+
+    ADD_FAILURE() << "request to " << request->path() << " could not reach the test server after "
+                  << TRANSPORT_ATTEMPTS << " attempts";
+    return transportFailure();
 }
 
 drogon::HttpResponsePtr AppHarness::get(const std::string& path, const std::string& bearerToken) {
