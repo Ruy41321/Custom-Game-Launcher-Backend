@@ -108,6 +108,22 @@ Result<AppConfig> AppConfig::parse(std::string_view json, const common::EnvLooku
         readInt<uint32_t>(auth, "accessTokenTtlSeconds", config.auth.accessTokenTtlSeconds);
     config.auth.refreshTokenTtlSeconds =
         readInt<uint32_t>(auth, "refreshTokenTtlSeconds", config.auth.refreshTokenTtlSeconds);
+    config.auth.emailVerificationTtlSeconds = readInt<uint32_t>(
+        auth, "emailVerificationTtlSeconds", config.auth.emailVerificationTtlSeconds);
+    config.auth.passwordResetTtlSeconds =
+        readInt<uint32_t>(auth, "passwordResetTtlSeconds", config.auth.passwordResetTtlSeconds);
+    config.auth.requireVerifiedEmail =
+        readBool(auth, "requireVerifiedEmail", config.auth.requireVerifiedEmail);
+    config.auth.argon2OperationsLimit =
+        readInt<uint64_t>(auth, "argon2OperationsLimit", config.auth.argon2OperationsLimit);
+    config.auth.argon2MemoryLimitBytes =
+        readInt<uint64_t>(auth, "argon2MemoryLimitBytes", config.auth.argon2MemoryLimitBytes);
+
+    const auto& rateLimit = root["rateLimit"];
+    config.rateLimit.authAttempts =
+        readInt<uint32_t>(rateLimit, "authAttempts", config.rateLimit.authAttempts);
+    config.rateLimit.authWindowSeconds =
+        readInt<uint32_t>(rateLimit, "authWindowSeconds", config.rateLimit.authWindowSeconds);
 
     const auto& updates = root["updates"];
     config.updates.fullDownloadThresholdRatio = readDouble(

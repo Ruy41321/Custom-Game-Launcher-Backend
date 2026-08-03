@@ -37,7 +37,15 @@
     "jwtSecret": "${JWT_SECRET:-dev-insecure-jwt-secret-do-not-deploy}",
     "issuer": "custom-game-launcher",
     "accessTokenTtlSeconds": 900,
-    "refreshTokenTtlSeconds": 2592000
+    "refreshTokenTtlSeconds": 2592000,
+    "emailVerificationTtlSeconds": 86400,
+    "passwordResetTtlSeconds": 3600,
+    "requireVerifiedEmail": ${REQUIRE_VERIFIED_EMAIL:-false}
+  },
+
+  "rateLimit": {
+    "authAttempts": ${AUTH_RATE_LIMIT_ATTEMPTS:-50},
+    "authWindowSeconds": ${AUTH_RATE_LIMIT_WINDOW:-60}
   },
 
   "updates": {

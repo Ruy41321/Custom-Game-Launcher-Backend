@@ -82,7 +82,7 @@ class TestDatabase {
     TestDatabaseSettings settings_;
     std::string name_;
     PGconn* connection_{nullptr};
-    drogon::orm::DbClientPtr client_;  ///< null until client() is called
+    drogon::orm::DbClientPtr client_; ///< null until client() is called
 };
 
-}  // namespace launcher::testing
+} // namespace launcher::testing

@@ -49,6 +49,20 @@ struct AuthConfig {
     std::string issuer{"custom-game-launcher"};
     uint32_t accessTokenTtlSeconds{900};
     uint32_t refreshTokenTtlSeconds{2592000};
+    uint32_t emailVerificationTtlSeconds{86400};
+    uint32_t passwordResetTtlSeconds{3600};
+    /// Turned off in development, where there is no mail transport to deliver the link.
+    bool requireVerifiedEmail{true};
+    /// 0 selects libsodium's INTERACTIVE profile; see decision D14 in CLAUDE.md.
+    uint64_t argon2OperationsLimit{0};
+    uint64_t argon2MemoryLimitBytes{0};
+};
+
+struct RateLimitConfig {
+    /// Attempts allowed per client address before the bucket empties, and the window over
+    /// which it refills. Applies to login, registration and password-reset requests.
+    uint32_t authAttempts{10};
+    uint32_t authWindowSeconds{60};
 };
 
 struct UpdateConfig {
@@ -69,6 +83,7 @@ struct AppConfig {
     LoggingConfig logging;
     StorageConfig storage;
     AuthConfig auth;
+    RateLimitConfig rateLimit;
     UpdateConfig updates;
     UploadConfig uploads;
 

@@ -163,8 +163,8 @@ TEST_F(MigrationRunnerIntegrationTest, AFailedMigrationIsRolledBackEntirely) {
 
     ASSERT_FALSE(result.ok());
     EXPECT_FALSE(database_->scalarBool("SELECT to_regclass('public.gadgets') IS NOT NULL"));
-    EXPECT_EQ(
-        database_->scalarInt("SELECT count(*) FROM schema_migrations WHERE version = '0001'"), 0);
+    EXPECT_EQ(database_->scalarInt("SELECT count(*) FROM schema_migrations WHERE version = '0001'"),
+              0);
 }
 
 // Defence in depth: the API validates manifest paths too, but a malicious manifest must not
@@ -173,21 +173,16 @@ TEST_F(MigrationRunnerIntegrationTest, RejectsPathTraversalInBuildFiles) {
     auto runner = repositoryRunner();
     ASSERT_TRUE(runner.run().ok());
 
-    database_->exec(
-        "INSERT INTO blobs (sha256, size_bytes, storage_key) "
-        "VALUES (repeat('a', 64), 10, 'aa/aa/blob')");
-    database_->exec(
-        "INSERT INTO users (email, password_hash, display_name) "
-        "VALUES ('dev@example.com', 'x', 'Dev')");
-    database_->exec(
-        "INSERT INTO games (slug, title, publisher_user_id) "
-        "SELECT 'test-game', 'Test Game', id FROM users LIMIT 1");
-    database_->exec(
-        "INSERT INTO game_versions (game_id, semver, version_major) "
-        "SELECT id, '1.0', 1 FROM games LIMIT 1");
-    database_->exec(
-        "INSERT INTO builds (game_version_id, platform) "
-        "SELECT id, 'windows' FROM game_versions LIMIT 1");
+    database_->exec("INSERT INTO blobs (sha256, size_bytes, storage_key) "
+                    "VALUES (repeat('a', 64), 10, 'aa/aa/blob')");
+    database_->exec("INSERT INTO users (email, password_hash, display_name) "
+                    "VALUES ('dev@example.com', 'x', 'Dev')");
+    database_->exec("INSERT INTO games (slug, title, publisher_user_id) "
+                    "SELECT 'test-game', 'Test Game', id FROM users LIMIT 1");
+    database_->exec("INSERT INTO game_versions (game_id, semver, version_major) "
+                    "SELECT id, '1.0', 1 FROM games LIMIT 1");
+    database_->exec("INSERT INTO builds (game_version_id, platform) "
+                    "SELECT id, 'windows' FROM game_versions LIMIT 1");
 
     constexpr const char* INSERT_BUILD_FILE =
         "INSERT INTO build_files (build_id, relative_path, blob_sha256) "
@@ -203,4 +198,4 @@ TEST_F(MigrationRunnerIntegrationTest, RejectsPathTraversalInBuildFiles) {
     EXPECT_EQ(database_->scalarInt("SELECT count(*) FROM build_files"), 1);
 }
 
-}  // namespace
+} // namespace

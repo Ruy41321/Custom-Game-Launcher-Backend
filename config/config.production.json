@@ -37,7 +37,17 @@
     "jwtSecret": "${JWT_SECRET}",
     "issuer": "${JWT_ISSUER:-custom-game-launcher}",
     "accessTokenTtlSeconds": ${ACCESS_TOKEN_TTL:-900},
-    "refreshTokenTtlSeconds": ${REFRESH_TOKEN_TTL:-2592000}
+    "refreshTokenTtlSeconds": ${REFRESH_TOKEN_TTL:-2592000},
+    "emailVerificationTtlSeconds": ${EMAIL_VERIFICATION_TTL:-86400},
+    "passwordResetTtlSeconds": ${PASSWORD_RESET_TTL:-3600},
+    "requireVerifiedEmail": ${REQUIRE_VERIFIED_EMAIL:-true},
+    "argon2OperationsLimit": ${ARGON2_OPSLIMIT:-0},
+    "argon2MemoryLimitBytes": ${ARGON2_MEMLIMIT:-0}
+  },
+
+  "rateLimit": {
+    "authAttempts": ${AUTH_RATE_LIMIT_ATTEMPTS:-10},
+    "authWindowSeconds": ${AUTH_RATE_LIMIT_WINDOW:-60}
   },
 
   "updates": {

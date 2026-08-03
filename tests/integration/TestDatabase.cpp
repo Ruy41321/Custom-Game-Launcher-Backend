@@ -37,7 +37,7 @@ std::string errorOf(PGconn* connection) {
     return text;
 }
 
-}  // namespace
+} // namespace
 
 std::optional<TestDatabaseSettings> TestDatabaseSettings::fromEnvironment() {
     const auto host = env("LAUNCHER_TEST_DB_HOST");
@@ -120,8 +120,8 @@ TestDatabase::~TestDatabase() {
         PGresult* dropped =
             PQexec(admin, ("DROP DATABASE IF EXISTS \"" + name_ + "\" WITH (FORCE)").c_str());
         if (PQresultStatus(dropped) != PGRES_COMMAND_OK) {
-            std::cerr << "warning: could not drop test database " << name_ << ": "
-                      << errorOf(admin) << '\n';
+            std::cerr << "warning: could not drop test database " << name_ << ": " << errorOf(admin)
+                      << '\n';
         }
         PQclear(dropped);
     }
@@ -210,4 +210,4 @@ int TestDatabase::scalarInt(const std::string& sql) {
     return std::stoi(scalar(sql));
 }
 
-}  // namespace launcher::testing
+} // namespace launcher::testing

@@ -10,6 +10,11 @@ add_executable(launcher_unit_tests
     unit/EnvInterpolationTest.cpp
     unit/ConfigTest.cpp
     unit/MigrationPlanTest.cpp
+    unit/ValidationTest.cpp
+    unit/PasswordHasherTest.cpp
+    unit/JwtTokenServiceTest.cpp
+    unit/AuthServiceTest.cpp
+    unit/RateLimiterTest.cpp
 )
 
 target_include_directories(launcher_unit_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -33,8 +38,10 @@ gtest_discover_tests(launcher_unit_tests
 # ---------------------------------------------------------------------------
 add_executable(launcher_integration_tests
     integration/TestDatabase.cpp
+    integration/AppHarness.cpp
     integration/MigrationRunnerIntegrationTest.cpp
     integration/HealthEndpointTest.cpp
+    integration/AuthEndpointTest.cpp
 )
 
 target_include_directories(launcher_integration_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
