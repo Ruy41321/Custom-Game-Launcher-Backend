@@ -325,6 +325,9 @@ The workflow finally ran. Three runs, and what each taught:
   any machine slower than the maintainer's; see the rate-limit row in §8. Fixed by narrowing
   the bucket instead of raising the attempt cap.
 
+- Run 4 (`3e5cbb0`) is green end to end: 131 unit + 31 integration, and the throttle test now
+  takes 0.53s there instead of failing after 30.
+
 The `docker` job has been green from the start. The vcpkg host packages the workflow installs
 turned out to be correct, so that standing suspicion is closed.
 
