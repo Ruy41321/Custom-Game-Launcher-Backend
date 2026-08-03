@@ -317,6 +317,25 @@ curl -s http://localhost:8080/api/v1/health
 - Optional feature branches off `dev`, merged back into `dev` via pull request.
 - CI runs on every push and pull request targeting `dev`.
 
+### Finishing a milestone
+
+Pushing `dev` at the end of a milestone is **not** something to ask permission for — do it,
+then watch the run it triggers. A milestone is not finished until CI is green:
+
+```bash
+git push origin dev
+# gh lives in "C:\Program Files\GitHub CLI" and is not on an already-open shell's PATH
+gh run list --branch dev --limit 3          # the new run appears a few seconds after the push
+gh run watch <id>                           # or poll `gh run list` until it completes
+gh run view <id> --log-failed               # only what failed, not the whole log
+```
+
+A red run is part of the same milestone, not the next session's problem: fix it, push the fix,
+and check again. `Docker image builds` takes around twelve minutes, so the whole run is worth
+waiting for rather than guessing at.
+
+This applies to finishing a milestone. Mid-milestone pushes are still the maintainer's call.
+
 ---
 
 ## 11. Progress
@@ -458,3 +477,20 @@ At the end of every working session, update:
 4. **§8 Environment gotchas** — record anything that cost time to figure out.
 
 Keep it accurate over optimistic: a wrong progress table is worse than no progress table.
+
+### At the end of a milestone, additionally
+
+5. **Push `dev` and see CI through to green** — see §10. Not something to ask about.
+6. **Update `HANDOFF.md`**, which lives one directory above both repositories
+   (`C:\Users\Luigi\Developing\Personal\GameLauncher\HANDOFF.md`) and is deliberately outside
+   version control, so it never lands in a commit. It is the first thing the next session
+   reads, before either `CLAUDE.md`. Bring these up to date:
+   - **Stato** — which milestones are done, the current test count, what is pushed;
+   - **Prossimo** — the next milestone, in enough detail to start without re-deriving it;
+   - **Cosa esiste già lato server** — the endpoint sketch and the invariants a new surface
+     must not break, so the next session inherits the contract rather than rediscovering it;
+   - **Debiti aperti** — anything deferred, added or paid off.
+
+   `HANDOFF.md` is a briefing, not a changelog: it says what is true now and what to do next,
+   and everything already captured by `CLAUDE.md` or the `Documentation/` files belongs there
+   instead, referenced by name.
