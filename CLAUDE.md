@@ -201,6 +201,25 @@ Everything — identifiers, comments, docs, commit messages — is in **English*
 
 Docker is the reference path. Start Docker Desktop first.
 
+Two scripts wrap the invocations below so that starting the server and running the suite are
+one command each, with the failures that cost the most time reported as themselves — a stopped
+daemon, a missing `.env`, an unconfigured `build/`, and the password mismatch that makes every
+integration test skip itself while looking like a pass.
+
+```powershell
+./scripts/dev.ps1                    # bring the stack up and wait until /health/ready answers
+./scripts/dev.ps1 -Rebuild -Logs     # rebuild the images, start, then tail the API log
+./scripts/dev.ps1 -Down -Volumes     # tear it down, database and blobs included
+
+./scripts/test.ps1                   # build incrementally, then run the whole suite
+./scripts/test.ps1 -Unit -Filter Media   # only the unit tests whose name matches
+./scripts/test.ps1 -Format           # clang-format src/ and tests/ in place
+```
+
+Do not pipe these through `2>&1` in Windows PowerShell 5.1: `docker compose` writes progress to
+stderr, the shell wraps each line in an ErrorRecord, and the command reports failure on a run
+that succeeded. The underlying commands, for when a script is not what is wanted:
+
 ```bash
 # Full stack (api + db + fileserver), dev overrides
 docker compose -f docker-compose.yml -f docker-compose.override.yml up --build -d
