@@ -6,6 +6,7 @@
 
 #include "app/Bootstrap.h"
 #include "app/Config.h"
+#include "app/RoleGrant.h"
 #include "common/EnvInterpolation.h"
 #include "common/Logging.h"
 #include "launcher/Version.h"
@@ -20,10 +21,14 @@ void printUsage() {
               << "Usage: launcher-api [options]\n\n"
               << "Options:\n"
               << "  --migrate              Apply pending database migrations and exit\n"
+              << "  --grant-role <email> <role>\n"
+              << "                         Grant a role and exit. The only way to create the\n"
+              << "                         first administrator, since granting one through the\n"
+              << "                         admin surface needs a role nobody holds yet.\n"
               << "  --config <path>        Configuration file to load\n"
               << "  --version              Print the version and exit\n"
               << "  --help                 Show this message\n\n"
-              << "Without --migrate the HTTP server is started.\n\n"
+              << "Without --migrate or --grant-role the HTTP server is started.\n\n"
               << "Configuration is resolved from --config, then $LAUNCHER_CONFIG, then\n"
               << "config/config.$LAUNCHER_ENV.json (defaulting to development).\n";
 }
@@ -35,6 +40,8 @@ int main(int argc, char** argv) {
 
     bool migrateOnly = false;
     std::string configPath;
+    std::string grantEmail;
+    std::string grantRole;
 
     for (std::size_t i = 0; i < args.size(); ++i) {
         const auto& arg = args[i];
@@ -48,6 +55,15 @@ int main(int argc, char** argv) {
         }
         if (arg == "--migrate") {
             migrateOnly = true;
+            continue;
+        }
+        if (arg == "--grant-role") {
+            if (i + 2 >= args.size()) {
+                std::cerr << "--grant-role requires an email address and a role key\n";
+                return EXIT_USAGE;
+            }
+            grantEmail = args[++i];
+            grantRole = args[++i];
             continue;
         }
         if (arg == "--config") {
@@ -81,6 +97,10 @@ int main(int argc, char** argv) {
     const auto appConfig = std::move(config).value();
     launcher::common::initLogging(
         {appConfig.logging.level, appConfig.logging.directory, appConfig.logging.json});
+
+    if (!grantEmail.empty()) {
+        return launcher::app::runRoleGrant(appConfig, grantEmail, grantRole);
+    }
 
     return migrateOnly ? launcher::app::runMigrations(appConfig)
                        : launcher::app::runServer(appConfig);

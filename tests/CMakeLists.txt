@@ -65,6 +65,7 @@ add_executable(launcher_integration_tests
     integration/AdminAuthEndpointTest.cpp
     integration/AdminUserEndpointTest.cpp
     integration/AdminAnalyticsEndpointTest.cpp
+    integration/RoleGrantIntegrationTest.cpp
 )
 
 target_include_directories(launcher_integration_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
