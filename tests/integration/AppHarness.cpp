@@ -50,6 +50,11 @@ app::AppConfig testConfig(const std::filesystem::path& blobRoot,
     // Small enough that a test can send an oversized image without allocating megabytes.
     config.media.maxBytes = 4096;
 
+    // No grace period here. In a deployment it is what stops the collector eating a build that
+    // is still being uploaded, and it has to outlast the slowest publish; in a test it would
+    // only mean waiting a day to observe the behaviour under test.
+    config.retention.blobGraceSeconds = 0;
+
     // Small enough that a test can send a "too large" chunk without allocating megabytes, and
     // still large enough for every fixture in the suite.
     config.uploads.maxChunkBytes = 64 * 1024;

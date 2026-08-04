@@ -33,6 +33,10 @@ class BuildController : public drogon::HttpController<BuildController> {
                   "/api/v1/builds/{1}/manifest",
                   drogon::Get,
                   "launcher::filters::JwtAuthFilter");
+    ADD_METHOD_TO(BuildController::remove,
+                  "/api/v1/builds/{1}",
+                  drogon::Delete,
+                  "launcher::filters::JwtAuthFilter");
     METHOD_LIST_END
 
     drogon::Task<> missingBlobs(drogon::HttpRequestPtr request,
@@ -50,6 +54,10 @@ class BuildController : public drogon::HttpController<BuildController> {
     drogon::Task<> manifest(drogon::HttpRequestPtr request,
                             std::function<void(const drogon::HttpResponsePtr&)> callback,
                             std::string buildId);
+
+    drogon::Task<> remove(drogon::HttpRequestPtr request,
+                          std::function<void(const drogon::HttpResponsePtr&)> callback,
+                          std::string buildId);
 };
 
 } // namespace launcher::controllers::v1

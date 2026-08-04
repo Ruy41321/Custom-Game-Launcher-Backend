@@ -26,6 +26,12 @@ class PgBlobRepository : public IBlobRepository {
                               std::string storageKey,
                               std::optional<std::string> uploadedByUserId) const override;
 
+    drogon::Task<std::vector<CollectableBlob>> findUnreferenced(int64_t minimumAgeSeconds,
+                                                                int limit) const override;
+
+    drogon::Task<bool> deleteIfUnreferenced(std::string sha256,
+                                            int64_t minimumAgeSeconds) const override;
+
   private:
     drogon::orm::DbClientPtr database_;
 };

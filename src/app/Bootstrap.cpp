@@ -39,6 +39,21 @@ void scheduleUploadSweeper(uint32_t intervalSeconds) {
     });
 }
 
+void scheduleBlobCollector(uint32_t intervalSeconds) {
+    // build_files is ON DELETE RESTRICT, so a referenced blob was never at risk. This is the
+    // other half: an upload that was never finalised, and the content of a build somebody
+    // deleted, are otherwise paid for and stored forever.
+    drogon::app().getLoop()->runEvery(static_cast<double>(intervalSeconds), []() {
+        drogon::async_run([]() -> drogon::Task<> {
+            try {
+                co_await AppContext::instance().retentionService().collectUnreferencedBlobs();
+            } catch (const std::exception& e) {
+                spdlog::warn("blob sweep failed: {}", common::escapeJson(e.what()));
+            }
+        });
+    });
+}
+
 } // namespace
 
 void configureUploadLimits(const UploadConfig& uploads) {
@@ -83,6 +98,7 @@ int runServer(const AppConfig& config) {
         framework.addListener(config.server.listenAddress, config.server.port);
         configureUploadLimits(config.uploads);
         scheduleUploadSweeper(config.uploads.sweepIntervalSeconds);
+        scheduleBlobCollector(config.retention.sweepIntervalSeconds);
 
         if (config.server.adminEnabled) {
             // Loopback only, by design: the admin surface is reached over an SSH tunnel and

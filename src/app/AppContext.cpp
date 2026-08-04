@@ -92,6 +92,16 @@ void AppContext::initialize(AppConfig config, drogon::orm::DbClientPtr database)
         storage::DownloadUrlSigner{std::move(urlSettings)},
         services::DownloadSettings{config_.updates.fullDownloadThresholdRatio});
 
+    services::RetentionSettings retentionSettings;
+    retentionSettings.blobGraceSeconds = config_.retention.blobGraceSeconds;
+    retentionSettings.batchSize = config_.retention.sweepBatchSize;
+
+    retentionService_ = std::make_unique<services::RetentionService>(
+        *blobs_,
+        *users_,
+        storage::BlobStore{std::filesystem::path{config_.storage.blobRoot}},
+        retentionSettings);
+
     authRateLimiter_ = std::make_unique<common::RateLimiter>(
         config_.rateLimit.authAttempts, std::chrono::seconds{config_.rateLimit.authWindowSeconds});
 
@@ -133,6 +143,11 @@ const services::CatalogService& AppContext::catalogService() const {
     return *catalogService_;
 }
 
+const services::RetentionService& AppContext::retentionService() const {
+    requireInitialized();
+    return *retentionService_;
+}
+
 const services::MediaService& AppContext::mediaService() const {
     requireInitialized();
     return *mediaService_;
@@ -156,6 +171,7 @@ common::RateLimiter& AppContext::authRateLimiter() const {
 void AppContext::reset() {
     initialized_ = false;
     authRateLimiter_.reset();
+    retentionService_.reset();
     downloadService_.reset();
     uploadService_.reset();
     mediaService_.reset();

@@ -344,6 +344,13 @@ drogon::Task<bool> PgGameVersionRepository::publish(std::string id) const {
     co_return !rows.empty();
 }
 
+drogon::Task<bool> PgGameVersionRepository::remove(std::string id) const {
+    const auto rows = co_await database_->execSqlCoro(
+        "DELETE FROM game_versions WHERE id = $1::uuid RETURNING id", id);
+
+    co_return !rows.empty();
+}
+
 // ---------------------------------------------------------------------------
 // Builds
 // ---------------------------------------------------------------------------
@@ -503,6 +510,15 @@ drogon::Task<bool> PgBuildRepository::markFailed(std::string buildId) const {
         "UPDATE builds SET status = 'failed' WHERE id = $1::uuid AND status <> 'ready' "
         "RETURNING id",
         buildId);
+
+    co_return !rows.empty();
+}
+
+drogon::Task<bool> PgBuildRepository::remove(std::string buildId) const {
+    // build_files goes with it by cascade; the blobs those rows named are left alone, because
+    // another build may still reference them and answering that is the collector's job.
+    const auto rows = co_await database_->execSqlCoro(
+        "DELETE FROM builds WHERE id = $1::uuid RETURNING id", buildId);
 
     co_return !rows.empty();
 }

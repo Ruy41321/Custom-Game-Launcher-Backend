@@ -24,6 +24,10 @@ constexpr const char* NO_SUCH_GAME = "no such game";
 
 constexpr const char* NOT_YOURS = "this game belongs to another publisher";
 
+constexpr const char* NO_SUCH_BUILD = "no such build";
+
+constexpr const char* NO_SUCH_VERSION = "no such version";
+
 bool isVisibleTo(const Game& game, const Actor& actor) {
     return domain::mayViewGame(game, actor);
 }
@@ -306,6 +310,50 @@ CatalogService::createBuild(Actor actor, std::string gameId, CreateBuildCommand 
     build.architecture = command.architecture;
 
     co_return co_await builds_.create(std::move(build));
+}
+
+drogon::Task<VoidResult> CatalogService::deleteBuild(Actor actor, std::string buildId) const {
+    if (!domain::isUuid(buildId)) {
+        co_return VoidResult::failure(ErrorCode::NotFound, NO_SUCH_BUILD);
+    }
+
+    const auto ownership = co_await builds_.findOwnership(buildId);
+    // The same two questions the upload and download sides ask, from the same place, so this
+    // route cannot disagree with them about who may see a draft's builds.
+    if (!ownership.has_value() || !domain::mayReadBuild(*ownership, actor)) {
+        co_return VoidResult::failure(ErrorCode::NotFound, NO_SUCH_BUILD);
+    }
+    if (!domain::mayPublishBuild(*ownership, actor)) {
+        co_return VoidResult::failure(ErrorCode::Forbidden, NOT_YOURS);
+    }
+
+    if (!co_await builds_.remove(buildId)) {
+        co_return VoidResult::failure(ErrorCode::NotFound, NO_SUCH_BUILD);
+    }
+    co_return VoidResult::success();
+}
+
+drogon::Task<VoidResult>
+CatalogService::deleteVersion(Actor actor, std::string gameId, std::string versionId) const {
+    auto game = co_await editableGame(actor, gameId);
+    if (!game.ok()) {
+        co_return VoidResult::failure(game.error());
+    }
+    if (!domain::isUuid(versionId)) {
+        co_return VoidResult::failure(ErrorCode::NotFound, NO_SUCH_VERSION);
+    }
+
+    const auto version = co_await versions_.findById(versionId);
+    // A version of another game is reported missing rather than refused: the caller was told
+    // about a path that does not exist, not about one they may not use.
+    if (!version.has_value() || version->gameId != game.value().id) {
+        co_return VoidResult::failure(ErrorCode::NotFound, NO_SUCH_VERSION);
+    }
+
+    if (!co_await versions_.remove(versionId)) {
+        co_return VoidResult::failure(ErrorCode::NotFound, NO_SUCH_VERSION);
+    }
+    co_return VoidResult::success();
 }
 
 drogon::Task<VoidResult> CatalogService::addToLibrary(Actor actor, std::string gameId) const {

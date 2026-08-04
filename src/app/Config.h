@@ -96,6 +96,20 @@ struct UploadConfig {
     uint32_t sweepIntervalSeconds{600};
 };
 
+struct RetentionConfig {
+    /// How long a blob must have existed before the collector may take it.
+    ///
+    /// Correctness, not tuning: every blob of a build is uploaded *before* the manifest that
+    /// names them, so during a publish live content is referenced by nothing at all. This has
+    /// to outlast the slowest publish a deployment expects, which is why it matches the day an
+    /// upload session is given.
+    uint32_t blobGraceSeconds{86400};
+    uint32_t sweepIntervalSeconds{3600};
+    /// Blobs one pass may collect, so a large reclaim is spread over several passes instead of
+    /// holding an event loop for the whole of it.
+    int32_t sweepBatchSize{500};
+};
+
 struct AppConfig {
     std::string environment{"development"};
     std::string migrationsDirectory{"migrations"};
@@ -108,6 +122,7 @@ struct AppConfig {
     RateLimitConfig rateLimit;
     UpdateConfig updates;
     UploadConfig uploads;
+    RetentionConfig retention;
 
     bool isProduction() const;
 

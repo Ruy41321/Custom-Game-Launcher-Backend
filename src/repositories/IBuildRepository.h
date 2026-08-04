@@ -52,6 +52,11 @@ class IBuildRepository {
     finalize(std::string buildId, FinalizedManifest manifest) const = 0;
 
     virtual drogon::Task<bool> markFailed(std::string buildId) const = 0;
+
+    /// Deletes a build and the manifest rows hanging off it. The blobs those rows pointed at
+    /// are left alone: they may still belong to other builds, and deciding that is the
+    /// collector's job, not this one's.
+    virtual drogon::Task<bool> remove(std::string buildId) const = 0;
 };
 
 } // namespace launcher::repositories

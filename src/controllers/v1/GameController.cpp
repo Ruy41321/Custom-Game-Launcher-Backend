@@ -207,4 +207,19 @@ GameController::createBuild(drogon::HttpRequestPtr request,
     co_return;
 }
 
+drogon::Task<>
+GameController::deleteVersion(drogon::HttpRequestPtr request,
+                              std::function<void(const drogon::HttpResponsePtr&)> callback,
+                              std::string idOrSlug,
+                              std::string versionId) {
+    auto removed = co_await catalog().deleteVersion(
+        actorOf(request), std::move(idOrSlug), std::move(versionId));
+    if (!removed.ok()) {
+        fail(removed.error());
+    }
+
+    callback(noContentResponse(request));
+    co_return;
+}
+
 } // namespace launcher::controllers::v1

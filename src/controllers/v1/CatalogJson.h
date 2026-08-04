@@ -22,6 +22,11 @@ drogon::HttpResponsePtr jsonResponse(const drogon::HttpRequestPtr& request,
                                      const Json::Value& body,
                                      drogon::HttpStatusCode status = drogon::k200OK);
 
+/// A 204 carrying the request id, for the routes whose answer is that there is nothing left
+/// to say. Shared so a deletion does not have to hand-assemble a response and forget the
+/// header every other route sets.
+drogon::HttpResponsePtr noContentResponse(const drogon::HttpRequestPtr& request);
+
 Json::Value gameToJson(const domain::Game& game);
 
 Json::Value mediaToJson(const domain::GameMedia& media);

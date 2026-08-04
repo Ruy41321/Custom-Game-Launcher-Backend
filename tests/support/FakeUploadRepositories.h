@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
 #include <unordered_set>
@@ -76,6 +77,61 @@ class FakeBlobRepository : public repositories::IBlobRepository {
         records.push_back(repositories::BlobRecord{sha256, sizeBytes, storageKey});
         uploaders.push_back(uploadedByUserId.value_or(""));
         co_return true;
+    }
+
+    /// What the real queries decide with a NOT EXISTS over build_files and upload_sessions,
+    /// and with the row's age. Modelled here rather than stubbed away, because the two rules
+    /// the collector depends on — never take a referenced blob, never take a young one — are
+    /// exactly what its tests are about.
+    mutable std::vector<std::string> referenced;
+    mutable std::map<std::string, int64_t> ageSecondsBySha;
+
+    bool isCollectable(const std::string& sha256, int64_t minimumAgeSeconds) const {
+        if (std::find(referenced.begin(), referenced.end(), sha256) != referenced.end()) {
+            return false;
+        }
+        const auto age = ageSecondsBySha.find(sha256);
+        const int64_t seconds = age == ageSecondsBySha.end() ? 0 : age->second;
+        return seconds >= minimumAgeSeconds;
+    }
+
+    drogon::Task<std::vector<repositories::CollectableBlob>>
+    findUnreferenced(int64_t minimumAgeSeconds, int limit) const override {
+        std::vector<repositories::CollectableBlob> collectable;
+        for (std::size_t index = 0; index < records.size(); ++index) {
+            if (static_cast<int>(collectable.size()) >= limit) {
+                break;
+            }
+            const auto& record = records[index];
+            if (!isCollectable(record.sha256, minimumAgeSeconds)) {
+                continue;
+            }
+            repositories::CollectableBlob blob;
+            blob.sha256 = record.sha256;
+            blob.sizeBytes = record.sizeBytes;
+            blob.storageKey = record.storageKey;
+            blob.uploadedByUserId = index < uploaders.size() ? uploaders[index] : std::string{};
+            collectable.push_back(std::move(blob));
+        }
+        co_return collectable;
+    }
+
+    drogon::Task<bool> deleteIfUnreferenced(std::string sha256,
+                                            int64_t minimumAgeSeconds) const override {
+        if (!isCollectable(sha256, minimumAgeSeconds)) {
+            co_return false;
+        }
+        for (std::size_t index = 0; index < records.size(); ++index) {
+            if (records[index].sha256 != sha256) {
+                continue;
+            }
+            records.erase(records.begin() + static_cast<std::ptrdiff_t>(index));
+            if (index < uploaders.size()) {
+                uploaders.erase(uploaders.begin() + static_cast<std::ptrdiff_t>(index));
+            }
+            co_return true;
+        }
+        co_return false;
     }
 };
 

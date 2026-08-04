@@ -25,6 +25,7 @@ add_executable(launcher_unit_tests
     unit/DeltaTest.cpp
     unit/DownloadUrlSignerTest.cpp
     unit/DownloadServiceTest.cpp
+    unit/RetentionServiceTest.cpp
 )
 
 target_include_directories(launcher_unit_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -56,6 +57,7 @@ add_executable(launcher_integration_tests
     integration/MediaEndpointTest.cpp
     integration/UploadEndpointTest.cpp
     integration/DownloadEndpointTest.cpp
+    integration/RetentionEndpointTest.cpp
 )
 
 target_include_directories(launcher_integration_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")

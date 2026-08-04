@@ -28,6 +28,10 @@ class IGameVersionRepository {
     /// Idempotent: publishing an already published version keeps its original timestamp.
     /// False when no such version exists.
     virtual drogon::Task<bool> publish(std::string id) const = 0;
+
+    /// Deletes a version and cascades to its builds. Nothing is done about the blobs those
+    /// builds referenced; the collector notices them on its next pass.
+    virtual drogon::Task<bool> remove(std::string id) const = 0;
 };
 
 } // namespace launcher::repositories

@@ -134,6 +134,62 @@ drogon::Task<bool> PgBlobRepository::record(std::string sha256,
     co_return !rows.empty();
 }
 
+drogon::Task<std::vector<CollectableBlob>>
+PgBlobRepository::findUnreferenced(int64_t minimumAgeSeconds, int limit) const {
+    // Three conditions, and each one is load-bearing. No manifest names it, so nothing can
+    // download it. No open upload session is waiting on it, so no publish in flight is about
+    // to. And it is old enough that a publisher who stored it minutes ago has had time to
+    // submit the manifest that will name it — between those two moments a blob is referenced
+    // by nothing at all, and a sweep with no grace period eats live builds.
+    const auto rows = co_await database_->execSqlCoro(
+        R"(
+            SELECT b.sha256, b.size_bytes, b.storage_key,
+                   COALESCE(b.uploaded_by_user_id::text, '') AS uploaded_by_user_id
+            FROM blobs b
+            WHERE b.created_at < now() - make_interval(secs => $1::double precision)
+              AND NOT EXISTS (SELECT 1 FROM build_files f WHERE f.blob_sha256 = b.sha256)
+              AND NOT EXISTS (SELECT 1 FROM upload_sessions s
+                              WHERE s.blob_sha256 = b.sha256 AND s.status = 'pending')
+            ORDER BY b.created_at
+            LIMIT $2
+        )",
+        number(minimumAgeSeconds),
+        number(limit));
+
+    std::vector<CollectableBlob> collectable;
+    collectable.reserve(rows.size());
+    for (const auto& row : rows) {
+        CollectableBlob blob;
+        blob.sha256 = row["sha256"].as<std::string>();
+        blob.sizeBytes = row["size_bytes"].as<int64_t>();
+        blob.storageKey = row["storage_key"].as<std::string>();
+        blob.uploadedByUserId = row["uploaded_by_user_id"].as<std::string>();
+        collectable.push_back(std::move(blob));
+    }
+    co_return collectable;
+}
+
+drogon::Task<bool> PgBlobRepository::deleteIfUnreferenced(std::string sha256,
+                                                          int64_t minimumAgeSeconds) const {
+    // The same conditions again, inside the delete. A build published between the listing and
+    // this statement would have taken the blob, and build_files is ON DELETE RESTRICT, so the
+    // race would surface as a database error rather than as the no-op it should be.
+    const auto rows = co_await database_->execSqlCoro(
+        R"(
+            DELETE FROM blobs b
+            WHERE b.sha256 = $1
+              AND b.created_at < now() - make_interval(secs => $2::double precision)
+              AND NOT EXISTS (SELECT 1 FROM build_files f WHERE f.blob_sha256 = b.sha256)
+              AND NOT EXISTS (SELECT 1 FROM upload_sessions s
+                              WHERE s.blob_sha256 = b.sha256 AND s.status = 'pending')
+            RETURNING b.sha256
+        )",
+        sha256,
+        number(minimumAgeSeconds));
+
+    co_return !rows.empty();
+}
+
 // ---------------------------------------------------------------------------
 // Upload sessions
 // ---------------------------------------------------------------------------

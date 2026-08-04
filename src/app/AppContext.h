@@ -23,6 +23,7 @@
 #include "services/DownloadService.h"
 #include "services/MediaService.h"
 #include "services/PasswordHasher.h"
+#include "services/RetentionService.h"
 #include "services/TokenService.h"
 #include "services/UploadService.h"
 
@@ -58,6 +59,8 @@ class AppContext {
     const services::UploadService& uploadService() const;
 
     const services::DownloadService& downloadService() const;
+
+    const services::RetentionService& retentionService() const;
 
     /// Shared by the authentication endpoints; see common::RateLimiter for why it is
     /// in-process.
@@ -101,6 +104,7 @@ class AppContext {
     std::unique_ptr<services::MediaService> mediaService_;
     std::unique_ptr<services::UploadService> uploadService_;
     std::unique_ptr<services::DownloadService> downloadService_;
+    std::unique_ptr<services::RetentionService> retentionService_;
 
     std::unique_ptr<common::RateLimiter> authRateLimiter_;
 };

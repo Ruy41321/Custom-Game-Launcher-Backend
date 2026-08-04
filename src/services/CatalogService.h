@@ -76,6 +76,14 @@ class CatalogService {
     drogon::Task<common::Result<domain::Build>>
     createBuild(domain::Actor actor, std::string gameId, CreateBuildCommand command) const;
 
+    /// Removes a build and its manifest rows. The blobs it referenced are left to the
+    /// collector: another build may share them, and answering that is not this service's job.
+    drogon::Task<common::VoidResult> deleteBuild(domain::Actor actor, std::string buildId) const;
+
+    /// Removes a version and, by cascade, every build under it.
+    drogon::Task<common::VoidResult>
+    deleteVersion(domain::Actor actor, std::string gameId, std::string versionId) const;
+
     drogon::Task<common::VoidResult> addToLibrary(domain::Actor actor, std::string gameId) const;
 
     drogon::Task<common::VoidResult> removeFromLibrary(domain::Actor actor,

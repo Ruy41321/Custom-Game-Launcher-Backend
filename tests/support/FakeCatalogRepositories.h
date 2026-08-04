@@ -193,6 +193,15 @@ class FakeGameVersionRepository : public repositories::IGameVersionRepository {
         co_return matched;
     }
 
+    drogon::Task<bool> remove(std::string id) const override {
+        const auto before = versions.size();
+        versions.erase(std::remove_if(versions.begin(),
+                                      versions.end(),
+                                      [&](const auto& version) { return version.id == id; }),
+                       versions.end());
+        co_return versions.size() != before;
+    }
+
     drogon::Task<bool> publish(std::string id) const override {
         for (auto& version : versions) {
             if (version.id == id) {
@@ -314,6 +323,21 @@ class FakeBuildRepository : public repositories::IBuildRepository {
             }
         }
         co_return false;
+    }
+
+    drogon::Task<bool> remove(std::string buildId) const override {
+        const auto before = builds.size();
+        builds.erase(std::remove_if(builds.begin(),
+                                    builds.end(),
+                                    [&](const auto& build) { return build.id == buildId; }),
+                     builds.end());
+        ownerships.erase(
+            std::remove_if(ownerships.begin(),
+                           ownerships.end(),
+                           [&](const auto& owned) { return owned.buildId == buildId; }),
+            ownerships.end());
+        files.erase(buildId);
+        co_return builds.size() != before;
     }
 };
 

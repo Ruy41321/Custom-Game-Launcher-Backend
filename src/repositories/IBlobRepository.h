@@ -15,6 +15,17 @@ struct BlobRecord {
     std::string storageKey;
 };
 
+/// A blob nothing points at any more, together with what has to happen when it goes: the file
+/// is removed from disk, and the account that paid for those bytes gets them back.
+struct CollectableBlob {
+    std::string sha256;
+    int64_t sizeBytes{0};
+    std::string storageKey;
+    /// Empty when the uploader's account has since been deleted; there is then nobody to
+    /// refund, and the bytes are simply reclaimed.
+    std::string uploadedByUserId;
+};
+
 class IBlobRepository {
   public:
     virtual ~IBlobRepository() = default;
@@ -40,6 +51,23 @@ class IBlobRepository {
                                       int64_t sizeBytes,
                                       std::string storageKey,
                                       std::optional<std::string> uploadedByUserId) const = 0;
+
+    /// Blobs no manifest references and no open upload session is waiting on.
+    ///
+    /// `minimumAgeSeconds` is not a tuning knob but a correctness one: between the moment a
+    /// blob is stored and the moment the manifest naming it is submitted, nothing references
+    /// it, and a sweep with no grace period would collect the pieces of a build that is still
+    /// being uploaded.
+    virtual drogon::Task<std::vector<CollectableBlob>> findUnreferenced(int64_t minimumAgeSeconds,
+                                                                        int limit) const = 0;
+
+    /// Deletes a blob only if it is *still* unreferenced, and reports whether it went.
+    ///
+    /// The condition is repeated inside the statement rather than trusted from the listing
+    /// above: a build published in between would have taken the blob, and the ON DELETE
+    /// RESTRICT on build_files would turn that race into an error instead of a no-op.
+    virtual drogon::Task<bool> deleteIfUnreferenced(std::string sha256,
+                                                    int64_t minimumAgeSeconds) const = 0;
 };
 
 } // namespace launcher::repositories

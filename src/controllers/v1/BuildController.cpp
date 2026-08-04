@@ -11,6 +11,7 @@
 #include "controllers/v1/CatalogJson.h"
 #include "controllers/v1/UploadJson.h"
 #include "filters/JwtAuthFilter.h"
+#include "services/CatalogService.h"
 #include "services/UploadService.h"
 
 namespace launcher::controllers::v1 {
@@ -164,6 +165,19 @@ BuildController::manifest(drogon::HttpRequestPtr request,
     }
 
     callback(response);
+    co_return;
+}
+
+drogon::Task<> BuildController::remove(drogon::HttpRequestPtr request,
+                                       std::function<void(const drogon::HttpResponsePtr&)> callback,
+                                       std::string buildId) {
+    auto removed = co_await app::AppContext::instance().catalogService().deleteBuild(
+        actorOf(request), std::move(buildId));
+    if (!removed.ok()) {
+        fail(removed.error());
+    }
+
+    callback(noContentResponse(request));
     co_return;
 }
 

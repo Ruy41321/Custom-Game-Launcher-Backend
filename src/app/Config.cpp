@@ -106,6 +106,14 @@ Result<AppConfig> AppConfig::parse(std::string_view json, const common::EnvLooku
     config.media.publicBaseUrl = readString(media, "publicBaseUrl", config.media.publicBaseUrl);
     config.media.maxBytes = readInt<int64_t>(media, "maxBytes", config.media.maxBytes);
 
+    const auto& retention = root["retention"];
+    config.retention.blobGraceSeconds =
+        readInt<uint32_t>(retention, "blobGraceSeconds", config.retention.blobGraceSeconds);
+    config.retention.sweepIntervalSeconds =
+        readInt<uint32_t>(retention, "sweepIntervalSeconds", config.retention.sweepIntervalSeconds);
+    config.retention.sweepBatchSize =
+        readInt<int32_t>(retention, "sweepBatchSize", config.retention.sweepBatchSize);
+
     const auto& auth = root["auth"];
     config.auth.jwtSecret = readString(auth, "jwtSecret", config.auth.jwtSecret);
     config.auth.issuer = readString(auth, "issuer", config.auth.issuer);

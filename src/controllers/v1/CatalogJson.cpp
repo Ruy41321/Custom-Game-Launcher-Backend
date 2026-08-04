@@ -56,6 +56,15 @@ drogon::HttpResponsePtr jsonResponse(const drogon::HttpRequestPtr& request,
     return response;
 }
 
+drogon::HttpResponsePtr noContentResponse(const drogon::HttpRequestPtr& request) {
+    auto response = drogon::HttpResponse::newHttpResponse();
+    response->setStatusCode(drogon::k204NoContent);
+    if (const auto requestId = app::requestIdOf(request); !requestId.empty()) {
+        response->addHeader("X-Request-Id", requestId);
+    }
+    return response;
+}
+
 Json::Value gameToJson(const domain::Game& game) {
     Json::Value json;
     json["id"] = game.id;

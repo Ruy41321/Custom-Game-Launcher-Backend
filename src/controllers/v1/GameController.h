@@ -47,6 +47,10 @@ class GameController : public drogon::HttpController<GameController> {
                   "/api/v1/games/{1}/versions/{2}/builds",
                   drogon::Post,
                   "launcher::filters::JwtAuthFilter");
+    ADD_METHOD_TO(GameController::deleteVersion,
+                  "/api/v1/games/{1}/versions/{2}",
+                  drogon::Delete,
+                  "launcher::filters::JwtAuthFilter");
     METHOD_LIST_END
 
     drogon::Task<> explore(drogon::HttpRequestPtr request,
@@ -74,6 +78,11 @@ class GameController : public drogon::HttpController<GameController> {
                                std::function<void(const drogon::HttpResponsePtr&)> callback,
                                std::string idOrSlug,
                                std::string versionId);
+
+    drogon::Task<> deleteVersion(drogon::HttpRequestPtr request,
+                                 std::function<void(const drogon::HttpResponsePtr&)> callback,
+                                 std::string idOrSlug,
+                                 std::string versionId);
 };
 
 } // namespace launcher::controllers::v1

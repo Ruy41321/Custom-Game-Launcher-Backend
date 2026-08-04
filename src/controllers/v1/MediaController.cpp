@@ -133,12 +133,7 @@ drogon::Task<> MediaController::remove(drogon::HttpRequestPtr request,
         fail(removed.error());
     }
 
-    auto response = drogon::HttpResponse::newHttpResponse();
-    response->setStatusCode(drogon::k204NoContent);
-    if (const auto requestId = app::requestIdOf(request); !requestId.empty()) {
-        response->addHeader("X-Request-Id", requestId);
-    }
-    callback(response);
+    callback(noContentResponse(request));
     co_return;
 }
 

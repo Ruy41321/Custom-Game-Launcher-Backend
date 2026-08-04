@@ -46,6 +46,8 @@ class PgGameVersionRepository : public IGameVersionRepository {
 
     drogon::Task<bool> publish(std::string id) const override;
 
+    drogon::Task<bool> remove(std::string id) const override;
+
   private:
     drogon::orm::DbClientPtr database_;
 };
@@ -70,6 +72,8 @@ class PgBuildRepository : public IBuildRepository {
                                                         FinalizedManifest manifest) const override;
 
     drogon::Task<bool> markFailed(std::string buildId) const override;
+
+    drogon::Task<bool> remove(std::string buildId) const override;
 
   private:
     drogon::orm::DbClientPtr database_;
