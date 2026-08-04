@@ -66,6 +66,22 @@ configure_file(
 file(GLOB_RECURSE LAUNCHER_CORE_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
 list(REMOVE_ITEM LAUNCHER_CORE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp")
 
+# The admin console is embedded in the binary rather than served from a directory: the
+# deployed image then has no path to mount, nothing can get out of step with the API it talks
+# to, and the integration tests exercise the same bytes a deployment serves. The source stays
+# a real .html file, which is the part that matters for editing it.
+#
+# CONFIGURE_DEPENDS on the directory is what makes a change to the HTML re-run CMake; file(READ)
+# alone happens once at configure time and would otherwise leave a stale page compiled in.
+set(LAUNCHER_ADMIN_UI_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/admin/ui/index.html")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${LAUNCHER_ADMIN_UI_SOURCE}")
+file(READ "${LAUNCHER_ADMIN_UI_SOURCE}" LAUNCHER_ADMIN_UI_HTML)
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/AdminUi.cpp.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/AdminUi.cpp"
+    @ONLY)
+list(APPEND LAUNCHER_CORE_SOURCES "${CMAKE_CURRENT_BINARY_DIR}/generated/AdminUi.cpp")
+
 add_library(launcher_core OBJECT ${LAUNCHER_CORE_SOURCES})
 
 target_include_directories(launcher_core

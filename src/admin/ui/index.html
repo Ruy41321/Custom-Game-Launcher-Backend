@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Custom Game Launcher — administration</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #12141a; --panel: #1b1e26; --line: #2b303c; --text: #e6e8ee;
+    --muted: #98a0b3; --accent: #7aa2f7; --bad: #f7768e; --good: #9ece6a;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg: #f4f5f8; --panel: #fff; --line: #dde0e8; --text: #1b1e26;
+            --muted: #5a6376; --accent: #3355cc; --bad: #c0334d; --good: #3d8f2f; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; padding: 12px 20px;
+           border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  header .who { margin-left: auto; color: var(--muted); font-size: 13px; }
+  nav { display: flex; gap: 4px; padding: 0 20px; border-bottom: 1px solid var(--line);
+        background: var(--panel); }
+  nav button { background: none; border: none; border-bottom: 2px solid transparent;
+               color: var(--muted); padding: 10px 14px; cursor: pointer; font: inherit; }
+  nav button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
+  main { padding: 20px; max-width: 1100px; }
+  section[hidden] { display: none; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+           padding: 16px; margin-bottom: 16px; }
+  h2 { font-size: 14px; margin: 0 0 12px; font-weight: 600; }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  input, select, button.action {
+    background: var(--bg); color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 7px 10px; font: inherit;
+  }
+  button.action { cursor: pointer; }
+  button.action:hover { border-color: var(--accent); }
+  button.action[disabled] { opacity: .5; cursor: default; }
+  .row { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 12px; }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line);
+           white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; }
+  tr.detail > td { white-space: normal; background: var(--bg); }
+  code { font-family: ui-monospace, monospace; font-size: 12px; color: var(--muted); }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .tile { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 12px; }
+  .tile b { display: block; font-size: 20px; font-weight: 600; }
+  .tile span { color: var(--muted); font-size: 12px; }
+  .bars { display: flex; align-items: flex-end; gap: 2px; height: 90px; margin-top: 8px; }
+  .bars div { flex: 1; background: var(--accent); min-height: 1px; border-radius: 2px 2px 0 0; }
+  .pill { display: inline-block; border: 1px solid var(--line); border-radius: 10px;
+          padding: 1px 8px; margin-right: 4px; font-size: 12px; }
+  .error { color: var(--bad); }
+  .ok { color: var(--good); }
+  #signin { max-width: 340px; margin: 60px auto; }
+  #signin input { width: 100%; margin-bottom: 10px; }
+  #notice { padding: 8px 20px; }
+</style>
+</head>
+<body>
+
+<div id="signin" class="panel">
+  <h2>Sign in</h2>
+  <p style="color:var(--muted);font-size:12px">
+    This console is served on the loopback listener only. If you reached it from another
+    machine, you did so through your own SSH tunnel.
+  </p>
+  <form id="signin-form">
+    <label for="email">Email</label>
+    <input id="email" type="email" autocomplete="username" required>
+    <label for="password">Password</label>
+    <input id="password" type="password" autocomplete="current-password" required>
+    <button class="action" type="submit">Sign in</button>
+  </form>
+  <p id="signin-error" class="error"></p>
+</div>
+
+<div id="console" hidden>
+  <header>
+    <h1>Custom Game Launcher — administration</h1>
+    <span class="who" id="who"></span>
+    <button class="action" id="signout">Sign out</button>
+  </header>
+  <nav>
+    <button data-tab="users" aria-selected="true">Users</button>
+    <button data-tab="analytics" aria-selected="false">Downloads</button>
+    <button data-tab="audit" aria-selected="false">Audit</button>
+  </nav>
+  <p id="notice" class="error"></p>
+  <main>
+
+    <section id="tab-users">
+      <div class="panel">
+        <div class="row">
+          <div>
+            <label for="user-search">Search</label>
+            <input id="user-search" placeholder="email or display name">
+          </div>
+          <div>
+            <label for="user-inactive">Show</label>
+            <select id="user-inactive">
+              <option value="">Everybody</option>
+              <option value="true">Deactivated only</option>
+            </select>
+          </div>
+          <button class="action" id="user-reload">Reload</button>
+        </div>
+        <div class="scroll">
+          <table id="users-table">
+            <thead><tr>
+              <th>Email</th><th>Roles</th><th>Quota</th><th>Used</th>
+              <th>Last login</th><th>Status</th><th></th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p id="users-total" style="color:var(--muted);font-size:12px"></p>
+      </div>
+    </section>
+
+    <section id="tab-analytics" hidden>
+      <div class="panel">
+        <div class="row">
+          <div>
+            <label for="days">Window</label>
+            <select id="days">
+              <option value="7">Last 7 days</option>
+              <option value="30" selected>Last 30 days</option>
+              <option value="90">Last 90 days</option>
+              <option value="365">Last year</option>
+            </select>
+          </div>
+        </div>
+        <div class="tiles" id="totals"></div>
+        <h2 style="margin-top:16px">Downloads per day</h2>
+        <div class="bars" id="chart"></div>
+        <p id="chart-range" style="color:var(--muted);font-size:12px"></p>
+        <p style="color:var(--muted);font-size:12px">
+          Bytes are what the plans expected to transfer, not what clients pulled: the file
+          server answers the transfer itself and never reports back.
+        </p>
+      </div>
+      <div class="panel">
+        <h2>Most downloaded</h2>
+        <div class="scroll">
+          <table id="games-table">
+            <thead><tr><th>Game</th><th>Downloads</th><th>Accounts</th><th>Planned</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-audit" hidden>
+      <div class="panel">
+        <div class="row">
+          <div>
+            <label for="audit-action">Action</label>
+            <input id="audit-action" placeholder="user.quota.changed">
+          </div>
+          <button class="action" id="audit-reload">Reload</button>
+        </div>
+        <div class="scroll">
+          <table id="audit-table">
+            <thead><tr><th>When</th><th>Who</th><th>Action</th><th>Subject</th><th>Detail</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<script>
+"use strict";
+
+// The access token lives in this variable and nowhere else — no browser storage, no cookie.
+// This page is reached over a tunnel from a machine that is somebody's desktop, and a token
+// that survives the tab is a token that outlives the reason it was issued.
+//
+// A test greps the served page for the names of the storage APIs, so it is deliberately
+// worded without them: an assertion that cannot be satisfied by prose is worth more than a
+// comment naming what it forbids.
+let accessToken = null;
+let refreshToken = null;
+let roleKeys = [];
+
+const $ = (id) => document.getElementById(id);
+
+function notice(message, good) {
+  const bar = $("notice");
+  bar.textContent = message || "";
+  bar.className = good ? "ok" : "error";
+}
+
+async function api(path, options) {
+  const request = Object.assign({ headers: {} }, options || {});
+  request.headers["Accept"] = "application/json";
+  if (accessToken) request.headers["Authorization"] = "Bearer " + accessToken;
+  if (request.body !== undefined) request.headers["Content-Type"] = "application/json";
+
+  const response = await fetch(path, request);
+  const text = await response.text();
+  const body = text ? JSON.parse(text) : null;
+
+  if (!response.ok) {
+    // The error envelope is the same one every endpoint uses, so there is one place to read
+    // it, and `detail` is written to be shown to a person.
+    const error = new Error((body && body.detail) || response.statusText);
+    error.status = response.status;
+    throw error;
+  }
+  return body;
+}
+
+function bytes(value) {
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let n = Number(value), i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return (i === 0 ? n : n.toFixed(1)) + " " + units[i];
+}
+
+function cell(row, text) {
+  const td = document.createElement("td");
+  td.textContent = text;
+  row.appendChild(td);
+  return td;
+}
+
+// --- sign in ---------------------------------------------------------------
+
+$("signin-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  $("signin-error").textContent = "";
+  try {
+    const session = await api("/admin/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ email: $("email").value, password: $("password").value })
+    });
+    accessToken = session.accessToken;
+    refreshToken = session.refreshToken;
+    roleKeys = session.permissions || [];
+    $("who").textContent = session.operator.email;
+    $("signin").hidden = true;
+    $("console").hidden = false;
+    $("password").value = "";
+    loadUsers();
+  } catch (error) {
+    $("signin-error").textContent = error.message;
+  }
+});
+
+$("signout").addEventListener("click", async () => {
+  try {
+    await api("/admin/api/auth/logout", {
+      method: "POST", body: JSON.stringify({ refreshToken: refreshToken })
+    });
+  } catch (ignored) { /* signing out is best effort; the page is going away either way */ }
+  accessToken = null;
+  refreshToken = null;
+  location.reload();
+});
+
+// --- tabs ------------------------------------------------------------------
+
+const loaders = { users: loadUsers, analytics: loadAnalytics, audit: loadAudit };
+
+document.querySelectorAll("nav button").forEach((button) => {
+  button.addEventListener("click", () => {
+    document.querySelectorAll("nav button").forEach((other) => {
+      const selected = other === button;
+      other.setAttribute("aria-selected", String(selected));
+      $("tab-" + other.dataset.tab).hidden = !selected;
+    });
+    notice("");
+    loaders[button.dataset.tab]();
+  });
+});
+
+// --- users -----------------------------------------------------------------
+
+async function loadUsers() {
+  const parameters = new URLSearchParams();
+  if ($("user-search").value) parameters.set("search", $("user-search").value);
+  if ($("user-inactive").value) parameters.set("inactive", $("user-inactive").value);
+
+  let page;
+  try {
+    page = await api("/admin/api/users?" + parameters.toString());
+  } catch (error) { return notice(error.message); }
+
+  const body = $("users-table").querySelector("tbody");
+  body.textContent = "";
+  page.items.forEach((user) => body.appendChild(userRow(user)));
+  $("users-total").textContent = page.total + " account(s)";
+}
+
+function userRow(user) {
+  const row = document.createElement("tr");
+  cell(row, user.email);
+
+  const roles = document.createElement("td");
+  (user.roles || []).forEach((role) => {
+    const pill = document.createElement("span");
+    pill.className = "pill";
+    pill.textContent = role;
+    roles.appendChild(pill);
+  });
+  row.appendChild(roles);
+
+  cell(row, bytes(user.uploadQuotaBytes));
+  cell(row, bytes(user.uploadUsedBytes));
+  cell(row, user.lastLoginAt ? user.lastLoginAt.slice(0, 10) : "never");
+  cell(row, user.active ? "active" : "deactivated").className = user.active ? "" : "error";
+
+  const actions = document.createElement("td");
+  actions.appendChild(button("Edit", () => toggleEditor(row, user)));
+  row.appendChild(actions);
+  return row;
+}
+
+function button(label, onClick) {
+  const element = document.createElement("button");
+  element.className = "action";
+  element.textContent = label;
+  element.addEventListener("click", onClick);
+  return element;
+}
+
+function toggleEditor(row, user) {
+  if (row.nextSibling && row.nextSibling.classList.contains("detail")) {
+    row.nextSibling.remove();
+    return;
+  }
+
+  const editor = document.createElement("tr");
+  editor.className = "detail";
+  const holder = document.createElement("td");
+  holder.colSpan = 7;
+  editor.appendChild(holder);
+
+  const quota = document.createElement("input");
+  quota.type = "number";
+  quota.min = "0";
+  quota.value = user.uploadQuotaBytes;
+  quota.style.width = "180px";
+
+  const line = document.createElement("div");
+  line.className = "row";
+  line.append(labelled("Upload quota (bytes)", quota));
+  line.append(button("Save quota", async () => {
+    await change(user.id, { uploadQuotaBytes: Number(quota.value) });
+  }));
+  line.append(button(user.active ? "Deactivate" : "Reactivate", async () => {
+    await change(user.id, { active: !user.active });
+  }));
+
+  const role = document.createElement("input");
+  role.placeholder = "dev";
+  role.style.width = "120px";
+  line.append(labelled("Role", role));
+  line.append(button("Grant", () => roleChange(user.id, role.value, "PUT")));
+  line.append(button("Revoke", () => roleChange(user.id, role.value, "DELETE")));
+
+  holder.appendChild(line);
+
+  const identifier = document.createElement("code");
+  identifier.textContent = user.id;
+  holder.appendChild(identifier);
+
+  row.after(editor);
+}
+
+function labelled(text, control) {
+  const wrapper = document.createElement("div");
+  const label = document.createElement("label");
+  label.textContent = text;
+  wrapper.append(label, control);
+  return wrapper;
+}
+
+async function change(userId, patch) {
+  try {
+    await api("/admin/api/users/" + userId, { method: "PATCH", body: JSON.stringify(patch) });
+    notice("Saved.", true);
+    loadUsers();
+  } catch (error) { notice(error.message); }
+}
+
+async function roleChange(userId, roleKey, method) {
+  if (!roleKey) return notice("Name a role first.");
+  try {
+    await api("/admin/api/users/" + userId + "/roles/" + encodeURIComponent(roleKey),
+              { method: method });
+    notice("Saved.", true);
+    loadUsers();
+  } catch (error) { notice(error.message); }
+}
+
+$("user-reload").addEventListener("click", loadUsers);
+$("user-search").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") loadUsers();
+});
+$("user-inactive").addEventListener("change", loadUsers);
+
+// --- analytics -------------------------------------------------------------
+
+async function loadAnalytics() {
+  let report;
+  try {
+    report = await api("/admin/api/analytics/downloads?days=" + $("days").value);
+  } catch (error) { return notice(error.message); }
+
+  const tiles = $("totals");
+  tiles.textContent = "";
+  [["Downloads", report.totals.downloads],
+   ["Accounts", report.totals.distinctUsers],
+   ["Planned", bytes(report.totals.bytesPlanned)],
+   ["Full", report.totals.fullDownloads],
+   ["Delta", report.totals.deltaDownloads]].forEach(([name, value]) => {
+    const tile = document.createElement("div");
+    tile.className = "tile";
+    const strong = document.createElement("b");
+    strong.textContent = value;
+    const span = document.createElement("span");
+    span.textContent = name;
+    tile.append(strong, span);
+    tiles.appendChild(tile);
+  });
+
+  // Every day in the window is present, including the empty ones, so the bars are spaced by
+  // time rather than by "days something happened".
+  const chart = $("chart");
+  chart.textContent = "";
+  const peak = Math.max(1, ...report.daily.map((day) => day.downloads));
+  report.daily.forEach((day) => {
+    const bar = document.createElement("div");
+    bar.style.height = Math.round((day.downloads / peak) * 100) + "%";
+    bar.title = day.day + ": " + day.downloads;
+    chart.appendChild(bar);
+  });
+  $("chart-range").textContent = report.daily.length
+    ? report.daily[0].day + " to " + report.daily[report.daily.length - 1].day +
+      " — peak " + peak + " in a day"
+    : "";
+
+  const body = $("games-table").querySelector("tbody");
+  body.textContent = "";
+  report.topGames.forEach((game) => {
+    const row = document.createElement("tr");
+    cell(row, game.title);
+    cell(row, game.downloads);
+    cell(row, game.distinctUsers);
+    cell(row, bytes(game.bytesPlanned));
+    body.appendChild(row);
+  });
+}
+
+$("days").addEventListener("change", loadAnalytics);
+
+// --- audit -----------------------------------------------------------------
+
+async function loadAudit() {
+  const parameters = new URLSearchParams();
+  if ($("audit-action").value) parameters.set("action", $("audit-action").value);
+
+  let page;
+  try {
+    page = await api("/admin/api/audit?" + parameters.toString());
+  } catch (error) { return notice(error.message); }
+
+  const body = $("audit-table").querySelector("tbody");
+  body.textContent = "";
+  page.items.forEach((entry) => {
+    const row = document.createElement("tr");
+    cell(row, entry.createdAt.replace("T", " ").replace("Z", ""));
+    // A null actor is the command line, which is how the first administrator is granted.
+    cell(row, entry.actorEmail || "command line");
+    cell(row, entry.action);
+    cell(row, entry.entityId.slice(0, 8));
+    cell(row, Object.entries(entry.metadata || {})
+                    .map(([name, value]) => name + "=" + value).join(", "));
+    body.appendChild(row);
+  });
+}
+
+$("audit-reload").addEventListener("click", loadAudit);
+</script>
+</body>
+</html>
