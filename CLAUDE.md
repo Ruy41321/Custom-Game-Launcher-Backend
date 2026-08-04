@@ -327,7 +327,7 @@ curl -s http://localhost:8080/api/v1/health
 | **A range-for over `bodyOf(response)["items"]` walks freed memory** | The helper returns a `Json::Value` by value; `["items"]` is a reference into that temporary, and C++20 does not extend its lifetime for the loop (P2718 fixes this in C++23). It cost a debugging cycle presenting as "the endpoint returns nothing" when the endpoint was correct. Bind the body to a named local first |
 | **`.env` sets `DB_PASSWORD=change-me`, not the compose default** | `LAUNCHER_TEST_DB_PASSWORD` must match it, or every integration test *skips itself* with "LAUNCHER_TEST_DB_HOST is not set" — the connection error is printed once, before gtest's output, and is easy to scroll past. `docker compose --profile tools run` reads `.env` for you; a bare `docker run` does not |
 | **A failed request in the integration harness used to segfault the test** | `AppHarness::send` returned the null response of a transport failure, and every caller immediately dereferenced it. In CI this presented as `***Exception: SegFault` in two unrelated tests, with the real cause — `Bad server address`, the client never connecting — buried above it. It now retries that one result, fails loudly otherwise, and never returns null. If a test ever crashes in CI again, read the lines *above* the crash first |
-| **Git Bash rewrites container paths in `docker run`** | `-v "$(pwd):/work" -w /work` becomes `C:/Program Files/Git/work` and the run fails. Use `MSYS_NO_PATHCONV=1`, `$(pwd -W)` for the source side and `//work` for `-w`. `docker compose` is unaffected, which is why this only bites the fast build loop |
+| **Git Bash rewrites container paths in `docker run`** | `-v "$(pwd):/work" -w /work` becomes `C:/Program Files/Git/work` and the run fails. Use `MSYS_NO_PATHCONV=1`, `$(pwd -W)` for the source side and `//work` for `-w`. **It bites `docker compose exec` too**, wherever an argument looks like an absolute path: `docker compose exec api /app/launcher-api --migrate` fails with `stat C:/Program Files/Git/app/launcher-api`, which reads like a broken image rather than a mangled argument. Prefix that with `MSYS_NO_PATHCONV=1` as well. PowerShell is unaffected throughout |
 | **Tampering with `expires` in a signed URL gives 403, not 410** | The expiry is part of what the signature covers, so changing it invalidates the signature and nginx reports "bad signature" before it ever looks at the clock. To see the 410 path, sign a URL whose expiry is already in the past |
 | **MD5 is in OpenSSL 3's *default* provider** | `EVP_md5()` works with no legacy-provider setup, unlike MD4/MD2. `secure_link` needs MD5 and there is nothing to configure |
 | **A fake hash in a test must still be valid hex** | Verification checks the shape of what a client reports before comparing anything, so a filler like `std::string(64, 'x')` is rejected as malformed and the assertion under test never runs. Build test hashes out of `0-9a-f` |
@@ -554,6 +554,15 @@ the admin GUI.
 ### Verified on 2026-08-04
 - 507/507 tests green (340 unit, 167 integration against a real PostgreSQL)
 - `clang-format` clean across `src/` and `tests/`
+- End to end against `docker compose up -d --build` with `ADMIN_ENABLED=true`: the console is
+  200 on `:9090/admin` and 404 on `:8080/admin`, and `/admin/api/users` on the public listener
+  returns the ordinary not-found envelope. `--grant-role` refused an unknown role, reported an
+  already-held one without failing, and turned a 403 sign-in into a 200
+- **Loaded in a real browser**, which no test reaches: the login form, the user table, the
+  daily chart and the audit trail all render, with **no console errors** — so the
+  `default-src 'none'` policy does not block the page's own `fetch`. The trail showed the
+  command-line grant with no actor, rendered as "command line", alongside the two changes made
+  through the console by a named operator
 
 ### Next up
 - ⬜ **M10** `Documentation/` for artwork and the devlog, security hardening, GDPR erasure
