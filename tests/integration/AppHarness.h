@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <string>
 #include <thread>
@@ -57,6 +58,13 @@ class AppHarness : public ::testing::Environment {
 
     drogon::HttpResponsePtr remove(const std::string& path, const std::string& bearerToken = {});
 
+    /// Raw-body POST with query parameters, as a media upload arrives: the body is the image
+    /// itself and everything describing it travels in the query string.
+    drogon::HttpResponsePtr postBinary(const std::string& path,
+                                       const std::map<std::string, std::string>& parameters,
+                                       const std::string& body,
+                                       const std::string& bearerToken = {});
+
     /// Raw-body PATCH, as an upload chunk arrives. `uploadOffset` below zero omits the header
     /// entirely, which is how the "offset is mandatory" rule is exercised.
     drogon::HttpResponsePtr patchBinary(const std::string& path,
@@ -73,6 +81,10 @@ class AppHarness : public ::testing::Environment {
     /// Where uploaded blobs land for this run. Removed with the harness.
     const std::filesystem::path& blobRoot() const { return blobRoot_.path(); }
 
+    /// Where uploaded artwork lands. A different root from the blobs, exactly as a deployment
+    /// keeps them apart — the file server publishes this one without a signature.
+    const std::filesystem::path& mediaRoot() const { return mediaRoot_.path(); }
+
     /// Clears the shared auth throttle so one test's attempts cannot affect the next.
     void resetRateLimiter();
 
@@ -81,6 +93,7 @@ class AppHarness : public ::testing::Environment {
                                  const std::string& bearerToken);
 
     TemporaryDirectory blobRoot_{"launcher-blobs"};
+    TemporaryDirectory mediaRoot_{"launcher-media"};
     std::unique_ptr<TestDatabase> database_;
     std::thread serverThread_;
     bool started_{false};

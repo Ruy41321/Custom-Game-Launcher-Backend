@@ -33,6 +33,12 @@
     "signedUrlTtlSeconds": 3600
   },
 
+  "media": {
+    "root": "${MEDIA_ROOT:-./data/media}",
+    "publicBaseUrl": "${MEDIA_PUBLIC_BASE_URL:-http://localhost:8081/media}",
+    "maxBytes": ${MEDIA_MAX_BYTES:-5242880}
+  },
+
   "auth": {
     "jwtSecret": "${JWT_SECRET:-dev-insecure-jwt-secret-do-not-deploy}",
     "issuer": "custom-game-launcher",

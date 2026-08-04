@@ -37,12 +37,18 @@ drogon::HttpResponsePtr transportFailure() {
     return response;
 }
 
-app::AppConfig testConfig(const std::filesystem::path& blobRoot) {
+app::AppConfig testConfig(const std::filesystem::path& blobRoot,
+                          const std::filesystem::path& mediaRoot) {
     app::AppConfig config;
     config.environment = "development";
     config.auth.jwtSecret = "0123456789abcdef0123456789abcdef";
     config.auth.requireVerifiedEmail = true;
     config.storage.blobRoot = blobRoot.string();
+    config.media.root = mediaRoot.string();
+    config.media.publicBaseUrl = "http://files.test/media";
+
+    // Small enough that a test can send an oversized image without allocating megabytes.
+    config.media.maxBytes = 4096;
 
     // Small enough that a test can send a "too large" chunk without allocating megabytes, and
     // still large enough for every fixture in the suite.
@@ -85,7 +91,7 @@ void AppHarness::SetUp() {
         }
     }
 
-    const auto config = testConfig(blobRoot_.path());
+    const auto config = testConfig(blobRoot_.path(), mediaRoot_.path());
     app::AppContext::instance().initialize(
         config, database_ ? database_->client() : drogon::orm::DbClientPtr{});
 
@@ -205,6 +211,23 @@ drogon::HttpResponsePtr AppHarness::remove(const std::string& path,
     auto request = drogon::HttpRequest::newHttpRequest();
     request->setMethod(drogon::Delete);
     request->setPath(path);
+    return send(request, bearerToken);
+}
+
+drogon::HttpResponsePtr AppHarness::postBinary(const std::string& path,
+                                               const std::map<std::string, std::string>& parameters,
+                                               const std::string& body,
+                                               const std::string& bearerToken) {
+    auto request = drogon::HttpRequest::newHttpRequest();
+    request->setMethod(drogon::Post);
+    request->setPath(path);
+    for (const auto& [name, value] : parameters) {
+        request->setParameter(name, value);
+    }
+    // Deliberately a type the server does not consult: what the body is gets decided by
+    // looking at the bytes, and a test that sent image/png would be proving nothing.
+    request->setContentTypeString("application/octet-stream");
+    request->setBody(body);
     return send(request, bearerToken);
 }
 

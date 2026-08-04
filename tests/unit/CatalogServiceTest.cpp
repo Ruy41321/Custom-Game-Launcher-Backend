@@ -27,6 +27,7 @@ using launcher::testing::FakeBuildRepository;
 using launcher::testing::FakeGameRepository;
 using launcher::testing::FakeGameVersionRepository;
 using launcher::testing::FakeLibraryRepository;
+using launcher::testing::FakeMediaRepository;
 
 namespace permissions = launcher::domain::permissions;
 
@@ -57,12 +58,13 @@ Actor administrator() {
 /// Keeps every fake alive for the whole test so the service's references stay valid.
 struct CatalogFixture {
     CatalogFixture()
-        : service(games, versions, builds, library) {}
+        : service(games, versions, builds, library, media) {}
 
     FakeGameRepository games;
     FakeGameVersionRepository versions;
     FakeBuildRepository builds;
     FakeLibraryRepository library;
+    FakeMediaRepository media;
     CatalogService service;
 
     Game seedGame(GameVisibility visibility, const std::string& owner = PUBLISHER) {

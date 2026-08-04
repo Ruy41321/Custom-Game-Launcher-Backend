@@ -44,6 +44,17 @@ struct StorageConfig {
     uint32_t signedUrlTtlSeconds{3600};
 };
 
+struct MediaConfig {
+    /// Deliberately a different root from storage.blobRoot: media is served from a public,
+    /// unsigned location, and a public location over the build blobs would hand out every
+    /// game's files to anyone who learned a hash.
+    std::string root{"/data/media"};
+    std::string publicBaseUrl{"http://localhost:8081/media"};
+    /// A cover, not a texture pack. Enforced before any byte is written, and mirrored into
+    /// Drogon's own body limit so an oversized upload is refused rather than buffered.
+    int64_t maxBytes{5LL * 1024 * 1024};
+};
+
 struct AuthConfig {
     std::string jwtSecret;
     std::string issuer{"custom-game-launcher"};
@@ -92,6 +103,7 @@ struct AppConfig {
     DatabaseConfig database;
     LoggingConfig logging;
     StorageConfig storage;
+    MediaConfig media;
     AuthConfig auth;
     RateLimitConfig rateLimit;
     UpdateConfig updates;

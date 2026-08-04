@@ -25,14 +25,11 @@ constexpr const char* NO_SUCH_GAME = "no such game";
 constexpr const char* NOT_YOURS = "this game belongs to another publisher";
 
 bool isVisibleTo(const Game& game, const Actor& actor) {
-    if (game.visibility != domain::GameVisibility::Draft) {
-        return true;
-    }
-    return actor.owns(game.publisherUserId) || actor.managesAnyGame();
+    return domain::mayViewGame(game, actor);
 }
 
 bool mayEdit(const Game& game, const Actor& actor) {
-    return actor.owns(game.publisherUserId) || actor.managesAnyGame();
+    return domain::mayEditGame(game, actor);
 }
 
 VoidResult checkLength(std::string_view value, std::size_t limit, const char* field) {
@@ -69,11 +66,13 @@ repositories::GameQuery clamped(repositories::GameQuery query) {
 CatalogService::CatalogService(const repositories::IGameRepository& games,
                                const repositories::IGameVersionRepository& versions,
                                const repositories::IBuildRepository& builds,
-                               const repositories::ILibraryRepository& library)
+                               const repositories::ILibraryRepository& library,
+                               const repositories::IMediaRepository& media)
     : games_(games),
       versions_(versions),
       builds_(builds),
-      library_(library) {}
+      library_(library),
+      media_(media) {}
 
 drogon::Task<Result<Game>> CatalogService::createGame(Actor actor,
                                                       CreateGameCommand command) const {
@@ -212,6 +211,7 @@ drogon::Task<Result<domain::GameDetail>> CatalogService::gameDetail(Actor actor,
         versionIds.push_back(version.id);
     }
     detail.builds = co_await builds_.listForVersions(std::move(versionIds));
+    detail.media = co_await media_.listForGame(detail.game.id);
 
     detail.inLibrary = co_await library_.contains(actor.userId, detail.game.id);
     co_return Result<domain::GameDetail>::success(std::move(detail));

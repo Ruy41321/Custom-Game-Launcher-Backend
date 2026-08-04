@@ -12,6 +12,7 @@
 #include "repositories/IGameRepository.h"
 #include "repositories/IGameVersionRepository.h"
 #include "repositories/ILibraryRepository.h"
+#include "repositories/IMediaRepository.h"
 #include "repositories/IRefreshTokenRepository.h"
 #include "repositories/IRoleRepository.h"
 #include "repositories/IUploadSessionRepository.h"
@@ -20,6 +21,7 @@
 #include "services/AuthService.h"
 #include "services/CatalogService.h"
 #include "services/DownloadService.h"
+#include "services/MediaService.h"
 #include "services/PasswordHasher.h"
 #include "services/TokenService.h"
 #include "services/UploadService.h"
@@ -50,6 +52,8 @@ class AppContext {
     const services::ITokenService& tokenService() const;
 
     const services::CatalogService& catalogService() const;
+
+    const services::MediaService& mediaService() const;
 
     const services::UploadService& uploadService() const;
 
@@ -85,6 +89,7 @@ class AppContext {
     std::unique_ptr<repositories::IGameVersionRepository> gameVersions_;
     std::unique_ptr<repositories::IBuildRepository> builds_;
     std::unique_ptr<repositories::ILibraryRepository> library_;
+    std::unique_ptr<repositories::IMediaRepository> media_;
     std::unique_ptr<repositories::IBlobRepository> blobs_;
     std::unique_ptr<repositories::IUploadSessionRepository> uploadSessions_;
     std::unique_ptr<repositories::IDownloadRepository> downloads_;
@@ -93,6 +98,7 @@ class AppContext {
     std::unique_ptr<services::ITokenService> tokenService_;
     std::unique_ptr<services::AuthService> authService_;
     std::unique_ptr<services::CatalogService> catalogService_;
+    std::unique_ptr<services::MediaService> mediaService_;
     std::unique_ptr<services::UploadService> uploadService_;
     std::unique_ptr<services::DownloadService> downloadService_;
 

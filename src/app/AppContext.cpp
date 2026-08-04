@@ -27,6 +27,7 @@ void AppContext::initialize(AppConfig config, drogon::orm::DbClientPtr database)
     gameVersions_ = std::make_unique<repositories::postgres::PgGameVersionRepository>(database_);
     builds_ = std::make_unique<repositories::postgres::PgBuildRepository>(database_);
     library_ = std::make_unique<repositories::postgres::PgLibraryRepository>(database_);
+    media_ = std::make_unique<repositories::postgres::PgMediaRepository>(database_);
     blobs_ = std::make_unique<repositories::postgres::PgBlobRepository>(database_);
     uploadSessions_ =
         std::make_unique<repositories::postgres::PgUploadSessionRepository>(database_);
@@ -57,8 +58,14 @@ void AppContext::initialize(AppConfig config, drogon::orm::DbClientPtr database)
                                                            *tokenService_,
                                                            std::move(authSettings));
 
-    catalogService_ =
-        std::make_unique<services::CatalogService>(*games_, *gameVersions_, *builds_, *library_);
+    catalogService_ = std::make_unique<services::CatalogService>(
+        *games_, *gameVersions_, *builds_, *library_, *media_);
+
+    mediaService_ = std::make_unique<services::MediaService>(
+        *games_,
+        *media_,
+        storage::MediaStore{std::filesystem::path{config_.media.root}},
+        services::MediaLimits{config_.media.maxBytes});
 
     services::UploadSettings uploadSettings;
     uploadSettings.maxBlobBytes = config_.uploads.maxBlobBytes;
@@ -126,6 +133,11 @@ const services::CatalogService& AppContext::catalogService() const {
     return *catalogService_;
 }
 
+const services::MediaService& AppContext::mediaService() const {
+    requireInitialized();
+    return *mediaService_;
+}
+
 const services::UploadService& AppContext::uploadService() const {
     requireInitialized();
     return *uploadService_;
@@ -146,6 +158,7 @@ void AppContext::reset() {
     authRateLimiter_.reset();
     downloadService_.reset();
     uploadService_.reset();
+    mediaService_.reset();
     catalogService_.reset();
     authService_.reset();
     tokenService_.reset();
@@ -153,6 +166,7 @@ void AppContext::reset() {
     downloads_.reset();
     uploadSessions_.reset();
     blobs_.reset();
+    media_.reset();
     library_.reset();
     builds_.reset();
     gameVersions_.reset();

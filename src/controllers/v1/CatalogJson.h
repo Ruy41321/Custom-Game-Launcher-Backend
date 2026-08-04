@@ -24,6 +24,8 @@ drogon::HttpResponsePtr jsonResponse(const drogon::HttpRequestPtr& request,
 
 Json::Value gameToJson(const domain::Game& game);
 
+Json::Value mediaToJson(const domain::GameMedia& media);
+
 Json::Value versionToJson(const domain::GameVersion& version);
 
 Json::Value buildToJson(const domain::Build& build);

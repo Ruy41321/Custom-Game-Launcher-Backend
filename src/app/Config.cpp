@@ -101,6 +101,11 @@ Result<AppConfig> AppConfig::parse(std::string_view json, const common::EnvLooku
     config.storage.signedUrlTtlSeconds =
         readInt<uint32_t>(storage, "signedUrlTtlSeconds", config.storage.signedUrlTtlSeconds);
 
+    const auto& media = root["media"];
+    config.media.root = readString(media, "root", config.media.root);
+    config.media.publicBaseUrl = readString(media, "publicBaseUrl", config.media.publicBaseUrl);
+    config.media.maxBytes = readInt<int64_t>(media, "maxBytes", config.media.maxBytes);
+
     const auto& auth = root["auth"];
     config.auth.jwtSecret = readString(auth, "jwtSecret", config.auth.jwtSecret);
     config.auth.issuer = readString(auth, "issuer", config.auth.issuer);

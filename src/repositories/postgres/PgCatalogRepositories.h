@@ -6,6 +6,7 @@
 #include "repositories/IGameRepository.h"
 #include "repositories/IGameVersionRepository.h"
 #include "repositories/ILibraryRepository.h"
+#include "repositories/IMediaRepository.h"
 
 namespace launcher::repositories::postgres {
 
@@ -69,6 +70,29 @@ class PgBuildRepository : public IBuildRepository {
                                                         FinalizedManifest manifest) const override;
 
     drogon::Task<bool> markFailed(std::string buildId) const override;
+
+  private:
+    drogon::orm::DbClientPtr database_;
+};
+
+class PgMediaRepository : public IMediaRepository {
+  public:
+    explicit PgMediaRepository(drogon::orm::DbClientPtr database);
+
+    drogon::Task<common::Result<Stored>> create(domain::NewGameMedia media) const override;
+
+    drogon::Task<std::vector<domain::GameMedia>> listForGame(std::string gameId) const override;
+
+    drogon::Task<std::optional<domain::GameMedia>> findById(std::string id) const override;
+
+    drogon::Task<std::optional<domain::GameMedia>>
+    update(std::string id, domain::GameMediaUpdate changes) const override;
+
+    drogon::Task<std::optional<domain::GameMedia>> remove(std::string id) const override;
+
+    drogon::Task<int> countForGame(std::string gameId, domain::MediaKind kind) const override;
+
+    drogon::Task<bool> isStorageKeyReferenced(std::string storageKey) const override;
 
   private:
     drogon::orm::DbClientPtr database_;

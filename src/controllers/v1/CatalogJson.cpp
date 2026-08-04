@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <charconv>
 
+#include "app/AppContext.h"
 #include "app/HttpError.h"
 #include "filters/JwtAuthFilter.h"
 
@@ -20,6 +21,21 @@ int parseInt(const std::string& text, int fallback) {
         return fallback;
     }
     return value;
+}
+
+/// A media URL is the configured public base plus the storage key. Composed here rather than
+/// in the domain because a base URL is deployment configuration, and for the same reason D22
+/// gives about signed links: the stored key survives the deployment moving behind another
+/// hostname, and a stored absolute URL would not.
+std::string mediaUrlFor(const std::string& storageKey) {
+    if (storageKey.empty()) {
+        return {};
+    }
+    auto base = app::AppContext::instance().config().media.publicBaseUrl;
+    if (!base.empty() && base.back() == '/') {
+        base.pop_back();
+    }
+    return base + "/" + storageKey;
 }
 
 } // namespace
@@ -51,11 +67,28 @@ Json::Value gameToJson(const domain::Game& game) {
     json["visibility"] = domain::toString(game.visibility);
     json["createdAt"] = game.createdAt;
     json["updatedAt"] = game.updatedAt;
+    // Empty rather than absent when there is no cover: a client that reads the field either
+    // way is one branch simpler than one that has to check the key exists first.
+    json["coverUrl"] = mediaUrlFor(game.coverStorageKey);
 
     Json::Value publisher;
     publisher["id"] = game.publisherUserId;
     publisher["displayName"] = game.publisherDisplayName;
     json["publisher"] = publisher;
+    return json;
+}
+
+Json::Value mediaToJson(const domain::GameMedia& media) {
+    Json::Value json;
+    json["id"] = media.id;
+    json["gameId"] = media.gameId;
+    json["kind"] = domain::toString(media.kind);
+    json["url"] = mediaUrlFor(media.storageKey);
+    json["contentType"] = media.contentType;
+    json["sizeBytes"] = static_cast<Json::Int64>(media.sizeBytes);
+    json["altText"] = media.altText;
+    json["sortOrder"] = media.sortOrder;
+    json["createdAt"] = media.createdAt;
     return json;
 }
 
@@ -105,6 +138,12 @@ Json::Value gameDetailToJson(const domain::GameDetail& detail) {
         builds.append(buildToJson(build));
     }
     json["builds"] = builds;
+
+    Json::Value media(Json::arrayValue);
+    for (const auto& item : detail.media) {
+        media.append(mediaToJson(item));
+    }
+    json["media"] = media;
     return json;
 }
 

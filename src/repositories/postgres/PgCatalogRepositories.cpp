@@ -18,7 +18,12 @@ constexpr const char* GAME_COLUMNS = R"(
     COALESCE(to_char(g.release_date, 'YYYY-MM-DD'), '') AS release_date,
     g.visibility::text AS visibility,
     to_char(g.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at,
-    to_char(g.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS updated_at
+    to_char(g.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS updated_at,
+    -- A correlated subquery rather than a join, so that every existing query picks the cover
+    -- up by including these columns, including the two that select from a CTE. A game has at
+    -- most one cover (game_media_single_kind_unique), so this cannot multiply rows either way.
+    COALESCE((SELECT m.storage_key FROM game_media m
+              WHERE m.game_id = g.id AND m.kind = 'cover'), '') AS cover_storage_key
 )";
 
 constexpr const char* VERSION_COLUMNS = R"(
@@ -38,6 +43,28 @@ constexpr const char* BUILD_COLUMNS = R"(
     COALESCE(to_char(ready_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '') AS ready_at
 )";
 
+constexpr const char* MEDIA_COLUMNS = R"(
+    m.id, m.game_id, m.kind::text AS kind, m.storage_key, m.sha256, m.content_type,
+    m.size_bytes, m.alt_text, m.sort_order,
+    to_char(m.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at
+)";
+
+domain::GameMedia mapMedia(const drogon::orm::Row& row) {
+    domain::GameMedia media;
+    media.id = row["id"].as<std::string>();
+    media.gameId = row["game_id"].as<std::string>();
+    media.kind = domain::parseMediaKind(row["kind"].as<std::string>())
+                     .value_or(domain::MediaKind::Screenshot);
+    media.storageKey = row["storage_key"].as<std::string>();
+    media.sha256 = row["sha256"].as<std::string>();
+    media.contentType = row["content_type"].as<std::string>();
+    media.sizeBytes = row["size_bytes"].as<int64_t>();
+    media.altText = row["alt_text"].as<std::string>();
+    media.sortOrder = row["sort_order"].as<int>();
+    media.createdAt = row["created_at"].as<std::string>();
+    return media;
+}
+
 domain::Game mapGame(const drogon::orm::Row& row) {
     domain::Game game;
     game.id = row["id"].as<std::string>();
@@ -52,6 +79,7 @@ domain::Game mapGame(const drogon::orm::Row& row) {
                           .value_or(domain::GameVisibility::Draft);
     game.createdAt = row["created_at"].as<std::string>();
     game.updatedAt = row["updated_at"].as<std::string>();
+    game.coverStorageKey = row["cover_storage_key"].as<std::string>();
     return game;
 }
 
@@ -475,6 +503,151 @@ drogon::Task<bool> PgBuildRepository::markFailed(std::string buildId) const {
         "UPDATE builds SET status = 'failed' WHERE id = $1::uuid AND status <> 'ready' "
         "RETURNING id",
         buildId);
+
+    co_return !rows.empty();
+}
+
+// ---------------------------------------------------------------------------
+// Media
+// ---------------------------------------------------------------------------
+
+PgMediaRepository::PgMediaRepository(drogon::orm::DbClientPtr database)
+    : database_(std::move(database)) {}
+
+drogon::Task<Result<IMediaRepository::Stored>>
+PgMediaRepository::create(domain::NewGameMedia media) const {
+    // One statement, for the reason D15 gives about upload offsets: a publisher replacing a
+    // cover must never observe a game with none, and a read-then-write leaves exactly that
+    // window. `previous` reads the pre-command snapshot, so it names the file the upsert is
+    // about to displace even though RETURNING can only describe the row that survives.
+    const auto rows = co_await database_->execSqlCoro(
+        std::string(R"(
+            WITH previous AS (
+                SELECT storage_key FROM game_media
+                WHERE game_id = $1::uuid AND kind = $2::game_media_kind AND kind <> 'screenshot'
+            ),
+            upserted AS (
+                INSERT INTO game_media
+                    (game_id, kind, storage_key, sha256, content_type, size_bytes,
+                     alt_text, sort_order)
+                VALUES ($1::uuid, $2::game_media_kind, $3, $4, $5, $6, $7, $8)
+                ON CONFLICT (game_id, kind) WHERE kind <> 'screenshot'
+                DO UPDATE SET storage_key  = excluded.storage_key,
+                              sha256       = excluded.sha256,
+                              content_type = excluded.content_type,
+                              size_bytes   = excluded.size_bytes,
+                              alt_text     = excluded.alt_text,
+                              sort_order   = excluded.sort_order
+                RETURNING *
+            )
+            SELECT )") +
+            MEDIA_COLUMNS +
+            R"(, COALESCE((SELECT storage_key FROM previous), '') AS replaced_storage_key
+               FROM upserted m)",
+        media.gameId,
+        std::string(domain::toString(media.kind)),
+        media.storageKey,
+        media.sha256,
+        media.contentType,
+        number(media.sizeBytes),
+        media.altText,
+        number(media.sortOrder));
+
+    if (rows.empty()) {
+        co_return Result<Stored>::failure(ErrorCode::NotFound, "no such game");
+    }
+
+    Stored stored;
+    stored.media = mapMedia(rows[0]);
+    stored.replacedStorageKey = rows[0]["replaced_storage_key"].as<std::string>();
+    // Replacing an image with itself is a no-op on disk, and reporting the key as displaced
+    // would make the caller delete the file the surviving row points at.
+    if (stored.replacedStorageKey == stored.media.storageKey) {
+        stored.replacedStorageKey.clear();
+    }
+    co_return Result<Stored>::success(std::move(stored));
+}
+
+drogon::Task<std::vector<domain::GameMedia>>
+PgMediaRepository::listForGame(std::string gameId) const {
+    const auto rows =
+        co_await database_->execSqlCoro(std::string("SELECT ") + MEDIA_COLUMNS +
+                                            R"( FROM game_media m WHERE m.game_id = $1::uuid
+                ORDER BY m.kind, m.sort_order, m.created_at, m.id)",
+                                        gameId);
+
+    std::vector<domain::GameMedia> media;
+    media.reserve(rows.size());
+    for (const auto& row : rows) {
+        media.push_back(mapMedia(row));
+    }
+    co_return media;
+}
+
+drogon::Task<std::optional<domain::GameMedia>> PgMediaRepository::findById(std::string id) const {
+    const auto rows = co_await database_->execSqlCoro(
+        std::string("SELECT ") + MEDIA_COLUMNS + " FROM game_media m WHERE m.id = $1::uuid", id);
+
+    if (rows.empty()) {
+        co_return std::nullopt;
+    }
+    co_return mapMedia(rows[0]);
+}
+
+drogon::Task<std::optional<domain::GameMedia>>
+PgMediaRepository::update(std::string id, domain::GameMediaUpdate changes) const {
+    std::optional<std::string> sortOrder;
+    if (changes.sortOrder.has_value()) {
+        sortOrder = number(*changes.sortOrder);
+    }
+
+    const auto rows = co_await database_->execSqlCoro(std::string(R"(
+            WITH updated AS (
+                UPDATE game_media SET
+                    alt_text   = COALESCE($2, alt_text),
+                    sort_order = COALESCE($3::integer, sort_order)
+                WHERE id = $1::uuid
+                RETURNING *
+            )
+            SELECT )") + MEDIA_COLUMNS + " FROM updated m",
+                                                      id,
+                                                      changes.altText,
+                                                      sortOrder);
+
+    if (rows.empty()) {
+        co_return std::nullopt;
+    }
+    co_return mapMedia(rows[0]);
+}
+
+drogon::Task<std::optional<domain::GameMedia>> PgMediaRepository::remove(std::string id) const {
+    const auto rows = co_await database_->execSqlCoro(std::string(R"(
+            WITH deleted AS (
+                DELETE FROM game_media WHERE id = $1::uuid RETURNING *
+            )
+            SELECT )") + MEDIA_COLUMNS + " FROM deleted m",
+                                                      id);
+
+    if (rows.empty()) {
+        co_return std::nullopt;
+    }
+    co_return mapMedia(rows[0]);
+}
+
+drogon::Task<int> PgMediaRepository::countForGame(std::string gameId,
+                                                  domain::MediaKind kind) const {
+    const auto rows =
+        co_await database_->execSqlCoro("SELECT count(*) AS total FROM game_media "
+                                        "WHERE game_id = $1::uuid AND kind = $2::game_media_kind",
+                                        gameId,
+                                        std::string(domain::toString(kind)));
+
+    co_return static_cast<int>(rows[0]["total"].as<int64_t>());
+}
+
+drogon::Task<bool> PgMediaRepository::isStorageKeyReferenced(std::string storageKey) const {
+    const auto rows = co_await database_->execSqlCoro(
+        "SELECT 1 FROM game_media WHERE storage_key = $1 LIMIT 1", storageKey);
 
     co_return !rows.empty();
 }

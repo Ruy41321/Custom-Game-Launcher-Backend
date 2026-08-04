@@ -13,6 +13,7 @@
 #include "repositories/IGameRepository.h"
 #include "repositories/IGameVersionRepository.h"
 #include "repositories/ILibraryRepository.h"
+#include "repositories/IMediaRepository.h"
 
 namespace launcher::services {
 
@@ -48,7 +49,8 @@ class CatalogService {
     CatalogService(const repositories::IGameRepository& games,
                    const repositories::IGameVersionRepository& versions,
                    const repositories::IBuildRepository& builds,
-                   const repositories::ILibraryRepository& library);
+                   const repositories::ILibraryRepository& library,
+                   const repositories::IMediaRepository& media);
 
     drogon::Task<common::Result<domain::Game>> createGame(domain::Actor actor,
                                                           CreateGameCommand command) const;
@@ -95,6 +97,9 @@ class CatalogService {
     const repositories::IGameVersionRepository& versions_;
     const repositories::IBuildRepository& builds_;
     const repositories::ILibraryRepository& library_;
+    /// Read-only here: the detail page is where a game's artwork is listed, but everything
+    /// that *changes* artwork lives in MediaService, which also owns the files.
+    const repositories::IMediaRepository& media_;
 };
 
 } // namespace launcher::services

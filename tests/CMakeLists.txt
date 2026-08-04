@@ -17,6 +17,9 @@ add_executable(launcher_unit_tests
     unit/RateLimiterTest.cpp
     unit/CatalogDomainTest.cpp
     unit/BlobStoreTest.cpp
+    unit/MediaDomainTest.cpp
+    unit/MediaStoreTest.cpp
+    unit/MediaServiceTest.cpp
     unit/CatalogServiceTest.cpp
     unit/UploadServiceTest.cpp
     unit/DeltaTest.cpp
@@ -50,6 +53,7 @@ add_executable(launcher_integration_tests
     integration/HealthEndpointTest.cpp
     integration/AuthEndpointTest.cpp
     integration/CatalogEndpointTest.cpp
+    integration/MediaEndpointTest.cpp
     integration/UploadEndpointTest.cpp
     integration/DownloadEndpointTest.cpp
 )

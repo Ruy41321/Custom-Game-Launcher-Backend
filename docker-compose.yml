@@ -57,6 +57,11 @@ services:
       ADMIN_PORT: 9090
 
       BLOB_ROOT: /data/blobs
+      # A separate root from the blobs, because the file server publishes this one without a
+      # signature. See docker/fileserver/templates/default.conf.template.
+      MEDIA_ROOT: /data/media
+      MEDIA_PUBLIC_BASE_URL: ${MEDIA_PUBLIC_BASE_URL:-http://localhost:8081/media}
+      MEDIA_MAX_BYTES: ${MEDIA_MAX_BYTES:-5242880}
       FILE_PUBLIC_BASE_URL: ${FILE_PUBLIC_BASE_URL:-http://localhost:8081/files}
       FILE_SECURE_LINK_SECRET: ${FILE_SECURE_LINK_SECRET:-dev-insecure-secure-link-secret}
       SIGNED_URL_TTL: ${SIGNED_URL_TTL:-3600}
@@ -71,6 +76,7 @@ services:
       - "127.0.0.1:${ADMIN_HOST_PORT:-9090}:9090"
     volumes:
       - blob-data:/data/blobs
+      - media-data:/data/media
       - api-logs:/var/log/launcher
     restart: unless-stopped
 
@@ -83,9 +89,11 @@ services:
       - "${FILESERVER_HOST_PORT:-8081}:80"
     volumes:
       - blob-data:/data/blobs:ro
+      - media-data:/data/media:ro
     restart: unless-stopped
 
 volumes:
   db-data:
   blob-data:
+  media-data:
   api-logs:

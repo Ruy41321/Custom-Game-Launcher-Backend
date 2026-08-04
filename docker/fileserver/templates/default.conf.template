@@ -45,6 +45,28 @@ server {
         autoindex          off;
     }
 
+    # Game artwork. Public and unsigned on purpose: a cover is public content, and signing it
+    # would mean one expiring signature per card in an Explore grid, none of which any cache
+    # could ever reuse. This is safe only because it serves a *different* root — a public
+    # location over /data/blobs would hand out every build to anyone who learned a hash.
+    #
+    # A regex location rather than a prefix one, so the only paths that resolve at all are the
+    # ones the API can actually have written: two levels of hex fan-out, a hashed name, and one
+    # of the three formats it stores. Anything else falls through to the 404 below.
+    location ~ "^/media/([0-9a-f]{2})/([0-9a-f]{2})/([0-9a-f]{64}\.(?:png|jpg|webp))$" {
+        alias /data/media/$1/$2/$3;
+
+        # Named after the hash of its own contents, so it can never change.
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        # Nothing stored here is ever a document, and this is what keeps a browser from being
+        # talked into treating one as one.
+        add_header Content-Security-Policy "default-src 'none'; sandbox" always;
+
+        sendfile   on;
+        tcp_nopush on;
+    }
+
     location / {
         return 404;
     }

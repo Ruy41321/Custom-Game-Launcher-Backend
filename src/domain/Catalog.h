@@ -8,6 +8,7 @@
 
 #include "common/Result.h"
 #include "domain/Actor.h"
+#include "domain/Media.h"
 #include "domain/Semver.h"
 
 namespace launcher::domain {
@@ -64,6 +65,10 @@ struct Game {
     GameVisibility visibility{GameVisibility::Draft};
     std::string createdAt;
     std::string updatedAt;
+    /// Storage key of the cover image, empty when the publisher has not uploaded one. Carried
+    /// on the game itself because Explore needs one picture per card and nothing else; the
+    /// full media list is only worth a query on the detail page.
+    std::string coverStorageKey;
 };
 
 struct NewGame {
@@ -87,6 +92,17 @@ struct GameUpdate {
 
     bool empty() const { return !title && !summary && !description && !releaseDate && !visibility; }
 };
+
+/// May see that a game exists. A draft is visible only to its publisher and to an operator,
+/// and to everybody else it is reported missing rather than forbidden — a 403 would confirm
+/// an unreleased title exists.
+bool mayViewGame(const Game& game, const Actor& actor);
+
+/// May change a game and everything hanging off it: versions, builds, artwork, patch notes.
+///
+/// Here rather than in a service for the reason D26 gives about builds: more than one service
+/// now asks this question, and two copies of an authorization rule is one copy too many.
+bool mayEditGame(const Game& game, const Actor& actor);
 
 struct GameVersion {
     std::string id;
@@ -158,6 +174,7 @@ struct GameDetail {
     Game game;
     std::vector<GameVersion> versions;
     std::vector<Build> builds;
+    std::vector<GameMedia> media;
     bool inLibrary{false};
 };
 

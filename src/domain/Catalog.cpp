@@ -236,6 +236,14 @@ VoidResult validateReleaseDate(std::string_view date) {
     return VoidResult::success();
 }
 
+bool mayEditGame(const Game& game, const Actor& actor) {
+    return actor.owns(game.publisherUserId) || actor.managesAnyGame();
+}
+
+bool mayViewGame(const Game& game, const Actor& actor) {
+    return game.visibility != GameVisibility::Draft || mayEditGame(game, actor);
+}
+
 bool mayPublishBuild(const BuildOwnership& ownership, const Actor& actor) {
     return actor.owns(ownership.publisherUserId) || actor.managesAnyGame();
 }
