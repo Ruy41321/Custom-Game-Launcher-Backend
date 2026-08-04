@@ -65,6 +65,37 @@ domain::GameMedia mapMedia(const drogon::orm::Row& row) {
     return media;
 }
 
+constexpr const char* PATCH_NOTE_COLUMNS = R"(
+    n.id, n.game_id, COALESCE(n.game_version_id::text, '') AS game_version_id,
+    n.title, n.body_markdown,
+    COALESCE(n.author_user_id::text, '') AS author_user_id,
+    COALESCE(a.display_name, '') AS author_display_name,
+    COALESCE(to_char(n.published_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '')
+        AS published_at,
+    to_char(n.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at,
+    to_char(n.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS updated_at
+)";
+
+/// The author is a LEFT JOIN because author_user_id is ON DELETE SET NULL: a devlog outlives
+/// the account that wrote it, and a note whose author has gone is still worth reading.
+constexpr const char* PATCH_NOTE_SOURCE =
+    " FROM patch_notes n LEFT JOIN users a ON a.id = n.author_user_id ";
+
+domain::PatchNote mapPatchNote(const drogon::orm::Row& row) {
+    domain::PatchNote note;
+    note.id = row["id"].as<std::string>();
+    note.gameId = row["game_id"].as<std::string>();
+    note.gameVersionId = row["game_version_id"].as<std::string>();
+    note.title = row["title"].as<std::string>();
+    note.bodyMarkdown = row["body_markdown"].as<std::string>();
+    note.authorUserId = row["author_user_id"].as<std::string>();
+    note.authorDisplayName = row["author_display_name"].as<std::string>();
+    note.publishedAt = row["published_at"].as<std::string>();
+    note.createdAt = row["created_at"].as<std::string>();
+    note.updatedAt = row["updated_at"].as<std::string>();
+    return note;
+}
+
 domain::Game mapGame(const drogon::orm::Row& row) {
     domain::Game game;
     game.id = row["id"].as<std::string>();
@@ -664,6 +695,124 @@ drogon::Task<int> PgMediaRepository::countForGame(std::string gameId,
 drogon::Task<bool> PgMediaRepository::isStorageKeyReferenced(std::string storageKey) const {
     const auto rows = co_await database_->execSqlCoro(
         "SELECT 1 FROM game_media WHERE storage_key = $1 LIMIT 1", storageKey);
+
+    co_return !rows.empty();
+}
+
+// ---------------------------------------------------------------------------
+// Patch notes
+// ---------------------------------------------------------------------------
+
+PgPatchNoteRepository::PgPatchNoteRepository(drogon::orm::DbClientPtr database)
+    : database_(std::move(database)) {}
+
+drogon::Task<Result<domain::PatchNote>>
+PgPatchNoteRepository::create(domain::NewPatchNote note) const {
+    // The author's display name comes from a join, which INSERT ... RETURNING cannot do, so
+    // the insert feeds a CTE the outer query joins as usual - the same shape games use.
+    const auto rows = co_await database_->execSqlCoro(
+        std::string(R"(
+            WITH inserted AS (
+                INSERT INTO patch_notes
+                    (game_id, game_version_id, title, body_markdown, author_user_id, published_at)
+                VALUES ($1::uuid, NULLIF($2, '')::uuid, $3, $4, $5::uuid,
+                        CASE WHEN $6::boolean THEN now() ELSE NULL END)
+                RETURNING *
+            )
+            SELECT )") +
+            PATCH_NOTE_COLUMNS + " FROM inserted n LEFT JOIN users a ON a.id = n.author_user_id",
+        note.gameId,
+        note.gameVersionId,
+        note.title,
+        note.bodyMarkdown,
+        note.authorUserId,
+        note.publish ? "true" : "false");
+
+    if (rows.empty()) {
+        co_return Result<domain::PatchNote>::failure(ErrorCode::NotFound, "no such game");
+    }
+    co_return Result<domain::PatchNote>::success(mapPatchNote(rows[0]));
+}
+
+drogon::Task<std::optional<domain::PatchNote>>
+PgPatchNoteRepository::findById(std::string id) const {
+    const auto rows = co_await database_->execSqlCoro(
+        std::string("SELECT ") + PATCH_NOTE_COLUMNS + PATCH_NOTE_SOURCE + " WHERE n.id = $1::uuid",
+        id);
+
+    if (rows.empty()) {
+        co_return std::nullopt;
+    }
+    co_return mapPatchNote(rows[0]);
+}
+
+drogon::Task<PatchNotePage> PgPatchNoteRepository::search(PatchNoteQuery query) const {
+    const std::string filter =
+        " WHERE n.game_id = $1::uuid AND ($2::boolean OR n.published_at IS NOT NULL) ";
+
+    const auto rows = co_await database_->execSqlCoro(
+        std::string("SELECT ") + PATCH_NOTE_COLUMNS + PATCH_NOTE_SOURCE + filter +
+            // Newest first, and a draft has no publication date, so it is ordered by when it
+            // was written instead of sinking to the end of the publisher's own list.
+            " ORDER BY COALESCE(n.published_at, n.created_at) DESC, n.id LIMIT $3 OFFSET $4",
+        query.gameId,
+        query.includeUnpublished ? "true" : "false",
+        number(query.limit),
+        number(query.offset));
+
+    PatchNotePage page;
+    page.items.reserve(rows.size());
+    for (const auto& row : rows) {
+        page.items.push_back(mapPatchNote(row));
+    }
+
+    const auto totals = co_await database_->execSqlCoro(
+        std::string("SELECT count(*) AS total FROM patch_notes n ") + filter,
+        query.gameId,
+        query.includeUnpublished ? "true" : "false");
+    page.total = totals[0]["total"].as<int64_t>();
+    co_return page;
+}
+
+drogon::Task<std::optional<domain::PatchNote>>
+PgPatchNoteRepository::update(std::string id, domain::PatchNoteUpdate changes) const {
+    std::optional<std::string> published;
+    if (changes.published.has_value()) {
+        published = *changes.published ? "true" : "false";
+    }
+
+    const auto rows = co_await database_->execSqlCoro(
+        std::string(R"(
+            WITH updated AS (
+                UPDATE patch_notes SET
+                    title           = COALESCE($2, title),
+                    body_markdown   = COALESCE($3, body_markdown),
+                    game_version_id = CASE WHEN $4::text IS NULL THEN game_version_id
+                                           WHEN $4 = '' THEN NULL
+                                           ELSE $4::uuid END,
+                    published_at    = CASE WHEN $5::boolean IS NULL THEN published_at
+                                           WHEN $5::boolean THEN COALESCE(published_at, now())
+                                           ELSE NULL END
+                WHERE id = $1::uuid
+                RETURNING *
+            )
+            SELECT )") +
+            PATCH_NOTE_COLUMNS + " FROM updated n LEFT JOIN users a ON a.id = n.author_user_id",
+        id,
+        changes.title,
+        changes.bodyMarkdown,
+        changes.gameVersionId,
+        published);
+
+    if (rows.empty()) {
+        co_return std::nullopt;
+    }
+    co_return mapPatchNote(rows[0]);
+}
+
+drogon::Task<bool> PgPatchNoteRepository::remove(std::string id) const {
+    const auto rows = co_await database_->execSqlCoro(
+        "DELETE FROM patch_notes WHERE id = $1::uuid RETURNING id", id);
 
     co_return !rows.empty();
 }

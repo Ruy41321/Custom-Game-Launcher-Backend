@@ -26,6 +26,7 @@ add_executable(launcher_unit_tests
     unit/DownloadUrlSignerTest.cpp
     unit/DownloadServiceTest.cpp
     unit/RetentionServiceTest.cpp
+    unit/PatchNoteServiceTest.cpp
 )
 
 target_include_directories(launcher_unit_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -58,6 +59,7 @@ add_executable(launcher_integration_tests
     integration/UploadEndpointTest.cpp
     integration/DownloadEndpointTest.cpp
     integration/RetentionEndpointTest.cpp
+    integration/PatchNoteEndpointTest.cpp
 )
 
 target_include_directories(launcher_integration_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")

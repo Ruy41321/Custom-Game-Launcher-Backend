@@ -13,6 +13,7 @@
 #include "repositories/IGameVersionRepository.h"
 #include "repositories/ILibraryRepository.h"
 #include "repositories/IMediaRepository.h"
+#include "repositories/IPatchNoteRepository.h"
 
 namespace launcher::testing {
 
@@ -338,6 +339,102 @@ class FakeBuildRepository : public repositories::IBuildRepository {
             ownerships.end());
         files.erase(buildId);
         co_return builds.size() != before;
+    }
+};
+
+class FakePatchNoteRepository : public repositories::IPatchNoteRepository {
+  public:
+    mutable std::vector<domain::PatchNote> notes;
+
+    drogon::Task<common::Result<domain::PatchNote>>
+    create(domain::NewPatchNote candidate) const override {
+        domain::PatchNote note;
+        note.id = common::randomUuid();
+        note.gameId = candidate.gameId;
+        note.gameVersionId = candidate.gameVersionId;
+        note.title = candidate.title;
+        note.bodyMarkdown = candidate.bodyMarkdown;
+        note.authorUserId = candidate.authorUserId;
+        note.authorDisplayName = "Publisher";
+        note.publishedAt = candidate.publish ? "2026-01-01T00:00:00Z" : "";
+        note.createdAt = "2026-01-01T00:00:00Z";
+        note.updatedAt = note.createdAt;
+        notes.push_back(note);
+        co_return common::Result<domain::PatchNote>::success(note);
+    }
+
+    drogon::Task<std::optional<domain::PatchNote>> findById(std::string id) const override {
+        for (const auto& note : notes) {
+            if (note.id == id) {
+                co_return note;
+            }
+        }
+        co_return std::nullopt;
+    }
+
+    drogon::Task<repositories::PatchNotePage>
+    search(repositories::PatchNoteQuery query) const override {
+        std::vector<domain::PatchNote> matched;
+        for (const auto& note : notes) {
+            if (note.gameId != query.gameId) {
+                continue;
+            }
+            if (!query.includeUnpublished && !note.published()) {
+                continue;
+            }
+            matched.push_back(note);
+        }
+
+        repositories::PatchNotePage page;
+        page.total = static_cast<int64_t>(matched.size());
+
+        const auto begin =
+            std::min<std::size_t>(static_cast<std::size_t>(query.offset), matched.size());
+        const auto end =
+            std::min<std::size_t>(begin + static_cast<std::size_t>(query.limit), matched.size());
+        page.items.assign(matched.begin() + static_cast<std::ptrdiff_t>(begin),
+                          matched.begin() + static_cast<std::ptrdiff_t>(end));
+        co_return page;
+    }
+
+    drogon::Task<std::optional<domain::PatchNote>>
+    update(std::string id, domain::PatchNoteUpdate changes) const override {
+        for (auto& note : notes) {
+            if (note.id != id) {
+                continue;
+            }
+            if (changes.title) {
+                note.title = *changes.title;
+            }
+            if (changes.bodyMarkdown) {
+                note.bodyMarkdown = *changes.bodyMarkdown;
+            }
+            if (changes.gameVersionId) {
+                note.gameVersionId = *changes.gameVersionId;
+            }
+            if (changes.published) {
+                // Re-publishing keeps the original date, as the real statement does: the date
+                // is when readers saw it, not when it was last edited.
+                if (*changes.published) {
+                    if (note.publishedAt.empty()) {
+                        note.publishedAt = "2026-02-01T00:00:00Z";
+                    }
+                } else {
+                    note.publishedAt.clear();
+                }
+            }
+            co_return note;
+        }
+        co_return std::nullopt;
+    }
+
+    drogon::Task<bool> remove(std::string id) const override {
+        const auto before = notes.size();
+        notes.erase(std::remove_if(notes.begin(),
+                                   notes.end(),
+                                   [&](const auto& note) { return note.id == id; }),
+                    notes.end());
+        co_return notes.size() != before;
     }
 };
 

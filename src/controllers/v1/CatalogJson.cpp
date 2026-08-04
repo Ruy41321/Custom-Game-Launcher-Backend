@@ -131,6 +131,41 @@ Json::Value buildToJson(const domain::Build& build) {
     return json;
 }
 
+Json::Value patchNoteToJson(const domain::PatchNote& note) {
+    Json::Value json;
+    json["id"] = note.id;
+    json["gameId"] = note.gameId;
+    json["versionId"] = note.gameVersionId;
+    json["title"] = note.title;
+    json["bodyMarkdown"] = note.bodyMarkdown;
+    json["publishedAt"] = note.publishedAt;
+    // Both, for the same reason versions carry both: a client that only wants to know whether
+    // to show the note should not have to know that an empty date means draft.
+    json["published"] = note.published();
+    json["createdAt"] = note.createdAt;
+    json["updatedAt"] = note.updatedAt;
+
+    Json::Value author;
+    author["id"] = note.authorUserId;
+    author["displayName"] = note.authorDisplayName;
+    json["author"] = author;
+    return json;
+}
+
+Json::Value patchNotePageToJson(const repositories::PatchNotePage& page, int limit, int offset) {
+    Json::Value items(Json::arrayValue);
+    for (const auto& note : page.items) {
+        items.append(patchNoteToJson(note));
+    }
+
+    Json::Value json;
+    json["items"] = items;
+    json["total"] = static_cast<Json::Int64>(page.total);
+    json["limit"] = limit;
+    json["offset"] = offset;
+    return json;
+}
+
 Json::Value gameDetailToJson(const domain::GameDetail& detail) {
     Json::Value json;
     json["game"] = gameToJson(detail.game);

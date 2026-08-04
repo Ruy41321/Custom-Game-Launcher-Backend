@@ -28,6 +28,7 @@ void AppContext::initialize(AppConfig config, drogon::orm::DbClientPtr database)
     builds_ = std::make_unique<repositories::postgres::PgBuildRepository>(database_);
     library_ = std::make_unique<repositories::postgres::PgLibraryRepository>(database_);
     media_ = std::make_unique<repositories::postgres::PgMediaRepository>(database_);
+    patchNotes_ = std::make_unique<repositories::postgres::PgPatchNoteRepository>(database_);
     blobs_ = std::make_unique<repositories::postgres::PgBlobRepository>(database_);
     uploadSessions_ =
         std::make_unique<repositories::postgres::PgUploadSessionRepository>(database_);
@@ -60,6 +61,9 @@ void AppContext::initialize(AppConfig config, drogon::orm::DbClientPtr database)
 
     catalogService_ = std::make_unique<services::CatalogService>(
         *games_, *gameVersions_, *builds_, *library_, *media_);
+
+    patchNoteService_ =
+        std::make_unique<services::PatchNoteService>(*games_, *gameVersions_, *patchNotes_);
 
     mediaService_ = std::make_unique<services::MediaService>(
         *games_,
@@ -148,6 +152,11 @@ const services::RetentionService& AppContext::retentionService() const {
     return *retentionService_;
 }
 
+const services::PatchNoteService& AppContext::patchNoteService() const {
+    requireInitialized();
+    return *patchNoteService_;
+}
+
 const services::MediaService& AppContext::mediaService() const {
     requireInitialized();
     return *mediaService_;
@@ -174,6 +183,7 @@ void AppContext::reset() {
     retentionService_.reset();
     downloadService_.reset();
     uploadService_.reset();
+    patchNoteService_.reset();
     mediaService_.reset();
     catalogService_.reset();
     authService_.reset();
@@ -182,6 +192,7 @@ void AppContext::reset() {
     downloads_.reset();
     uploadSessions_.reset();
     blobs_.reset();
+    patchNotes_.reset();
     media_.reset();
     library_.reset();
     builds_.reset();

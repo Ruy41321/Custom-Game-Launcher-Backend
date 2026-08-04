@@ -10,6 +10,7 @@
 #include "domain/Actor.h"
 #include "domain/Catalog.h"
 #include "repositories/IGameRepository.h"
+#include "repositories/IPatchNoteRepository.h"
 
 namespace launcher::controllers::v1 {
 
@@ -34,6 +35,10 @@ Json::Value mediaToJson(const domain::GameMedia& media);
 Json::Value versionToJson(const domain::GameVersion& version);
 
 Json::Value buildToJson(const domain::Build& build);
+
+Json::Value patchNoteToJson(const domain::PatchNote& note);
+
+Json::Value patchNotePageToJson(const repositories::PatchNotePage& page, int limit, int offset);
 
 Json::Value gameDetailToJson(const domain::GameDetail& detail);
 

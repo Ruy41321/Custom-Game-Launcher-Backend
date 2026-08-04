@@ -7,6 +7,7 @@
 #include "repositories/IGameVersionRepository.h"
 #include "repositories/ILibraryRepository.h"
 #include "repositories/IMediaRepository.h"
+#include "repositories/IPatchNoteRepository.h"
 
 namespace launcher::repositories::postgres {
 
@@ -97,6 +98,26 @@ class PgMediaRepository : public IMediaRepository {
     drogon::Task<int> countForGame(std::string gameId, domain::MediaKind kind) const override;
 
     drogon::Task<bool> isStorageKeyReferenced(std::string storageKey) const override;
+
+  private:
+    drogon::orm::DbClientPtr database_;
+};
+
+class PgPatchNoteRepository : public IPatchNoteRepository {
+  public:
+    explicit PgPatchNoteRepository(drogon::orm::DbClientPtr database);
+
+    drogon::Task<common::Result<domain::PatchNote>>
+    create(domain::NewPatchNote note) const override;
+
+    drogon::Task<std::optional<domain::PatchNote>> findById(std::string id) const override;
+
+    drogon::Task<PatchNotePage> search(PatchNoteQuery query) const override;
+
+    drogon::Task<std::optional<domain::PatchNote>>
+    update(std::string id, domain::PatchNoteUpdate changes) const override;
+
+    drogon::Task<bool> remove(std::string id) const override;
 
   private:
     drogon::orm::DbClientPtr database_;
