@@ -127,6 +127,36 @@ void AppHarness::SetUp() {
     if (!started_) {
         throw std::runtime_error("the Drogon application did not start in time");
     }
+
+    // The beginning advice fires when the event loop starts running, which is *not* the same
+    // moment the listeners begin accepting. With one listener the gap was small enough to lose
+    // in the noise; with two it is wide enough that on a slow machine the first request of a
+    // test can beat the accept loop, and all three transport retries fit inside the window. So
+    // the harness waits for each listener to answer for real before any test runs.
+    awaitListener(TEST_PORT);
+    awaitListener(TEST_ADMIN_PORT);
+}
+
+void AppHarness::awaitListener(uint16_t port) {
+    constexpr int ATTEMPTS = 100;
+    constexpr auto PAUSE = std::chrono::milliseconds(50);
+
+    for (int attempt = 0; attempt < ATTEMPTS; ++attempt) {
+        auto client = drogon::HttpClient::newHttpClient(std::string("http://") + TEST_HOST + ":" +
+                                                        std::to_string(port));
+        auto request = drogon::HttpRequest::newHttpRequest();
+        request->setMethod(drogon::Get);
+        request->setPath("/api/v1/health");
+
+        auto [result, response] = client->sendRequest(request, 5.0);
+        if (result == drogon::ReqResult::Ok && response != nullptr) {
+            return;
+        }
+        std::this_thread::sleep_for(PAUSE);
+    }
+
+    throw std::runtime_error("the listener on port " + std::to_string(port) +
+                             " never accepted a connection");
 }
 
 void AppHarness::TearDown() {
@@ -316,9 +346,18 @@ Json::Value AppHarness::createVerifiedSession(const std::string& email) {
     registration["displayName"] = "Test User";
 
     const auto registered = postJson("/api/v1/auth/register", registration);
-    EXPECT_EQ(registered->statusCode(), drogon::k201Created);
+    EXPECT_EQ(registered->statusCode(), drogon::k201Created) << registered->body();
     const auto registeredBody = registered->getJsonObject();
-    EXPECT_NE(registeredBody, nullptr);
+
+    // Returning rather than reporting and carrying on. EXPECT_NE does not stop the function,
+    // so dereferencing afterwards turned any transport hiccup into a SegFault in a test that
+    // had nothing to do with the cause — which is how this presented in CI: an unreadable
+    // crash in the quota test, with the real failure three lines above it. A helper that
+    // cannot produce a session has to say so and stop.
+    if (registeredBody == nullptr) {
+        ADD_FAILURE() << "registration produced no session for " << email;
+        return {};
+    }
 
     Json::Value verify;
     verify["token"] = (*registeredBody)["devEmailVerificationToken"].asString();
@@ -338,11 +377,20 @@ Json::Value AppHarness::createSessionWithRole(const std::string& email,
                                               const std::string& roleKey) {
     const auto session = createVerifiedSession(email);
 
-    // The devlist is role membership, and the server operator maintains it by hand, so there
-    // is no endpoint to call: the grant goes straight into the table.
-    database().exec("INSERT INTO user_roles (user_id, role_id) SELECT '" +
-                    session["user"]["id"].asString() + "'::uuid, id FROM roles WHERE key = '" +
-                    roleKey + "' ON CONFLICT DO NOTHING");
+    // Same reasoning as above: without this the empty session reaches the statement below as a
+    // blank uuid literal, and PostgreSQL raises somewhere that looks nothing like the cause.
+    const auto userId = session["user"]["id"].asString();
+    if (userId.empty()) {
+        ADD_FAILURE() << "cannot grant '" << roleKey << "': no session for " << email;
+        return {};
+    }
+
+    // The grant goes straight into the table. There is an endpoint for it now, on the admin
+    // surface, but reaching it would need an operator this helper does not have — and a test
+    // fixture that had to bootstrap an administrator to create a publisher would be testing
+    // the wrong thing.
+    database().exec("INSERT INTO user_roles (user_id, role_id) SELECT '" + userId +
+                    "'::uuid, id FROM roles WHERE key = '" + roleKey + "' ON CONFLICT DO NOTHING");
 
     // The permissions live in the access token, so a token minted before the grant does not
     // carry it; refreshing is what a real client would do.

@@ -107,6 +107,13 @@ class AppHarness : public ::testing::Environment {
     void resetRateLimiter();
 
   private:
+    /// Blocks until the given listener answers a real request, or throws.
+    ///
+    /// Drogon's beginning advice fires when the event loop starts running, which is not the
+    /// moment the listeners begin accepting: on a slow machine a test's first request can beat
+    /// the accept loop and exhaust its transport retries inside that window.
+    static void awaitListener(uint16_t port);
+
     drogon::HttpResponsePtr
     send(const drogon::HttpRequestPtr& request, const std::string& bearerToken, uint16_t port);
 
