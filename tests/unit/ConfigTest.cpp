@@ -102,6 +102,47 @@ TEST(ConfigTest, RejectsANonPositiveUploadQuota) {
     EXPECT_NE(result.error().detail.find("defaultQuotaBytes"), std::string::npos);
 }
 
+// What separates the administrative routes from the public ones is the listener a request
+// arrived on. Collapse the two onto one port and that check passes for everybody, which turns
+// user management into a public endpoint — so the configuration is refused rather than served.
+TEST(ConfigTest, RejectsAnAdminPortEqualToThePublicOne) {
+    constexpr const char* document = R"({
+      "environment": "development",
+      "server": { "port": 8080, "adminPort": 8080, "adminEnabled": true },
+      "database": { "name": "launcher", "user": "launcher" }
+    })";
+
+    const auto result = AppConfig::parse(document, lookupFrom({}));
+
+    ASSERT_FALSE(result.ok());
+    EXPECT_NE(result.error().detail.find("adminPort"), std::string::npos);
+}
+
+TEST(ConfigTest, ToleratesAnAdminPortEqualToThePublicOneWhileDisabled) {
+    // Nothing is listening, so nothing is exposed. Refusing here would make the default
+    // document unloadable the moment somebody set both ports to the same value in a template.
+    constexpr const char* document = R"({
+      "environment": "development",
+      "server": { "port": 8080, "adminPort": 8080, "adminEnabled": false },
+      "database": { "name": "launcher", "user": "launcher" }
+    })";
+
+    EXPECT_TRUE(AppConfig::parse(document, lookupFrom({})).ok());
+}
+
+TEST(ConfigTest, RejectsAZeroAdminPortWhileEnabled) {
+    constexpr const char* document = R"({
+      "environment": "development",
+      "server": { "port": 8080, "adminPort": 0, "adminEnabled": true },
+      "database": { "name": "launcher", "user": "launcher" }
+    })";
+
+    const auto result = AppConfig::parse(document, lookupFrom({}));
+
+    ASSERT_FALSE(result.ok());
+    EXPECT_NE(result.error().detail.find("adminPort"), std::string::npos);
+}
+
 // Development boots with no setup; anything deployed must not.
 TEST(ConfigTest, DevelopmentToleratesBlankSecrets) {
     const auto result = AppConfig::parse(MINIMAL_DEVELOPMENT_CONFIG, lookupFrom({}));

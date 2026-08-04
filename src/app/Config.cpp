@@ -180,6 +180,20 @@ common::VoidResult AppConfig::validate() const {
     if (server.port == 0) {
         return common::VoidResult::failure(ErrorCode::InvalidInput, "server.port must be non-zero");
     }
+    if (server.adminEnabled && server.adminPort == server.port) {
+        // The administrative routes are hidden from the public surface by the port a request
+        // arrived on. Give them the same port and that check passes for everybody, which turns
+        // user management into a public endpoint guarded by nothing but a permission claim.
+        return common::VoidResult::failure(
+            ErrorCode::InvalidInput,
+            "server.adminPort must differ from server.port: the admin surface is separated by "
+            "the listener a request arrives on");
+    }
+    if (server.adminEnabled && server.adminPort == 0) {
+        return common::VoidResult::failure(ErrorCode::InvalidInput,
+                                           "server.adminPort must be non-zero when the admin "
+                                           "surface is enabled");
+    }
     if (database.name.empty() || database.user.empty()) {
         return common::VoidResult::failure(ErrorCode::InvalidInput,
                                            "database.name and database.user are required");

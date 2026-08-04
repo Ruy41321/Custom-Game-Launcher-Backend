@@ -72,6 +72,22 @@ class AppHarness : public ::testing::Environment {
                                         int64_t uploadOffset,
                                         const std::string& bearerToken = {});
 
+    /// The same requests against the *administrative* listener, which the harness binds on a
+    /// second port exactly as a deployment does. Everything reachable there has to be
+    /// unreachable on the public port, so both halves of that rule are testable.
+    drogon::HttpResponsePtr adminGet(const std::string& path, const std::string& bearerToken = {});
+
+    drogon::HttpResponsePtr adminPostJson(const std::string& path,
+                                          const Json::Value& body,
+                                          const std::string& bearerToken = {});
+
+    drogon::HttpResponsePtr adminPatchJson(const std::string& path,
+                                           const Json::Value& body,
+                                           const std::string& bearerToken = {});
+
+    drogon::HttpResponsePtr adminRemove(const std::string& path,
+                                        const std::string& bearerToken = {});
+
     /// Registers an account, confirms its address and logs in. Returns the session body.
     Json::Value createVerifiedSession(const std::string& email);
 
@@ -89,6 +105,9 @@ class AppHarness : public ::testing::Environment {
     void resetRateLimiter();
 
   private:
+    drogon::HttpResponsePtr
+    send(const drogon::HttpRequestPtr& request, const std::string& bearerToken, uint16_t port);
+
     drogon::HttpResponsePtr send(const drogon::HttpRequestPtr& request,
                                  const std::string& bearerToken);
 

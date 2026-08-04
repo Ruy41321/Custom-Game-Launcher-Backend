@@ -24,6 +24,11 @@ namespace {
 constexpr const char* TEST_HOST = "127.0.0.1";
 constexpr uint16_t TEST_PORT = 18080;
 
+/// The administrative listener. Bound for real rather than simulated, because the rule under
+/// test — that admin routes answer here and nowhere else — is a property of which socket a
+/// request arrived on, and nothing short of a second socket exercises it.
+constexpr uint16_t TEST_ADMIN_PORT = 18090;
+
 AppHarness* HARNESS = nullptr;
 
 /// How many times a request that never reached the server is sent again before giving up.
@@ -46,6 +51,10 @@ app::AppConfig testConfig(const std::filesystem::path& blobRoot,
     config.storage.blobRoot = blobRoot.string();
     config.media.root = mediaRoot.string();
     config.media.publicBaseUrl = "http://files.test/media";
+    config.server.port = TEST_PORT;
+    config.server.adminEnabled = true;
+    config.server.adminListenAddress = TEST_HOST;
+    config.server.adminPort = TEST_ADMIN_PORT;
 
     // Small enough that a test can send an oversized image without allocating megabytes.
     config.media.maxBytes = 4096;
@@ -105,6 +114,7 @@ void AppHarness::SetUp() {
     // reject upload chunks the deployed server accepts.
     app::configureUploadLimits(config.uploads);
     drogon::app().addListener(TEST_HOST, TEST_PORT);
+    drogon::app().addListener(TEST_HOST, TEST_ADMIN_PORT);
     drogon::app().setThreadNum(1);
 
     std::promise<void> started;
@@ -141,6 +151,12 @@ TestDatabase& AppHarness::database() {
 
 drogon::HttpResponsePtr AppHarness::send(const drogon::HttpRequestPtr& request,
                                          const std::string& bearerToken) {
+    return send(request, bearerToken, TEST_PORT);
+}
+
+drogon::HttpResponsePtr AppHarness::send(const drogon::HttpRequestPtr& request,
+                                         const std::string& bearerToken,
+                                         uint16_t port) {
     if (!bearerToken.empty()) {
         request->addHeader("Authorization", "Bearer " + bearerToken);
     }
@@ -151,7 +167,7 @@ drogon::HttpResponsePtr AppHarness::send(const drogon::HttpRequestPtr& request,
     // that had nothing to do with the change under review.
     for (int attempt = 0; attempt < TRANSPORT_ATTEMPTS; ++attempt) {
         auto client = drogon::HttpClient::newHttpClient(std::string("http://") + TEST_HOST + ":" +
-                                                        std::to_string(TEST_PORT));
+                                                        std::to_string(port));
         auto [result, response] = client->sendRequest(request, 20.0);
         if (result == drogon::ReqResult::Ok && response != nullptr) {
             return response;
@@ -217,6 +233,40 @@ drogon::HttpResponsePtr AppHarness::remove(const std::string& path,
     request->setMethod(drogon::Delete);
     request->setPath(path);
     return send(request, bearerToken);
+}
+
+drogon::HttpResponsePtr AppHarness::adminGet(const std::string& path,
+                                             const std::string& bearerToken) {
+    auto request = drogon::HttpRequest::newHttpRequest();
+    request->setMethod(drogon::Get);
+    request->setPath(path);
+    return send(request, bearerToken, TEST_ADMIN_PORT);
+}
+
+drogon::HttpResponsePtr AppHarness::adminPostJson(const std::string& path,
+                                                  const Json::Value& body,
+                                                  const std::string& bearerToken) {
+    auto request = drogon::HttpRequest::newHttpJsonRequest(body);
+    request->setMethod(drogon::Post);
+    request->setPath(path);
+    return send(request, bearerToken, TEST_ADMIN_PORT);
+}
+
+drogon::HttpResponsePtr AppHarness::adminPatchJson(const std::string& path,
+                                                   const Json::Value& body,
+                                                   const std::string& bearerToken) {
+    auto request = drogon::HttpRequest::newHttpJsonRequest(body);
+    request->setMethod(drogon::Patch);
+    request->setPath(path);
+    return send(request, bearerToken, TEST_ADMIN_PORT);
+}
+
+drogon::HttpResponsePtr AppHarness::adminRemove(const std::string& path,
+                                                const std::string& bearerToken) {
+    auto request = drogon::HttpRequest::newHttpRequest();
+    request->setMethod(drogon::Delete);
+    request->setPath(path);
+    return send(request, bearerToken, TEST_ADMIN_PORT);
 }
 
 drogon::HttpResponsePtr AppHarness::postBinary(const std::string& path,
