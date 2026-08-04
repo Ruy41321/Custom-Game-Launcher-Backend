@@ -85,6 +85,8 @@ class AppHarness : public ::testing::Environment {
                                            const Json::Value& body,
                                            const std::string& bearerToken = {});
 
+    drogon::HttpResponsePtr adminPut(const std::string& path, const std::string& bearerToken = {});
+
     drogon::HttpResponsePtr adminRemove(const std::string& path,
                                         const std::string& bearerToken = {});
 

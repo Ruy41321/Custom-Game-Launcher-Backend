@@ -6,6 +6,8 @@
 
 #include "app/Config.h"
 #include "common/RateLimiter.h"
+#include "repositories/IAdminUserRepository.h"
+#include "repositories/IAuditRepository.h"
 #include "repositories/IBlobRepository.h"
 #include "repositories/IBuildRepository.h"
 #include "repositories/IDownloadRepository.h"
@@ -19,6 +21,7 @@
 #include "repositories/IUploadSessionRepository.h"
 #include "repositories/IUserRepository.h"
 #include "repositories/IUserTokenRepository.h"
+#include "services/AdminUserService.h"
 #include "services/AuthService.h"
 #include "services/CatalogService.h"
 #include "services/DownloadService.h"
@@ -55,6 +58,8 @@ class AppContext {
     const services::ITokenService& tokenService() const;
 
     const services::CatalogService& catalogService() const;
+
+    const services::AdminUserService& adminUserService() const;
 
     const services::MediaService& mediaService() const;
 
@@ -98,6 +103,8 @@ class AppContext {
     std::unique_ptr<repositories::ILibraryRepository> library_;
     std::unique_ptr<repositories::IMediaRepository> media_;
     std::unique_ptr<repositories::IPatchNoteRepository> patchNotes_;
+    std::unique_ptr<repositories::IAdminUserRepository> adminUsers_;
+    std::unique_ptr<repositories::IAuditRepository> audit_;
     std::unique_ptr<repositories::IBlobRepository> blobs_;
     std::unique_ptr<repositories::IUploadSessionRepository> uploadSessions_;
     std::unique_ptr<repositories::IDownloadRepository> downloads_;
@@ -106,6 +113,7 @@ class AppContext {
     std::unique_ptr<services::ITokenService> tokenService_;
     std::unique_ptr<services::AuthService> authService_;
     std::unique_ptr<services::CatalogService> catalogService_;
+    std::unique_ptr<services::AdminUserService> adminUserService_;
     std::unique_ptr<services::MediaService> mediaService_;
     std::unique_ptr<services::PatchNoteService> patchNoteService_;
     std::unique_ptr<services::UploadService> uploadService_;

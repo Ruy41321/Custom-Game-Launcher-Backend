@@ -261,6 +261,14 @@ drogon::HttpResponsePtr AppHarness::adminPatchJson(const std::string& path,
     return send(request, bearerToken, TEST_ADMIN_PORT);
 }
 
+drogon::HttpResponsePtr AppHarness::adminPut(const std::string& path,
+                                             const std::string& bearerToken) {
+    auto request = drogon::HttpRequest::newHttpRequest();
+    request->setMethod(drogon::Put);
+    request->setPath(path);
+    return send(request, bearerToken, TEST_ADMIN_PORT);
+}
+
 drogon::HttpResponsePtr AppHarness::adminRemove(const std::string& path,
                                                 const std::string& bearerToken) {
     auto request = drogon::HttpRequest::newHttpRequest();

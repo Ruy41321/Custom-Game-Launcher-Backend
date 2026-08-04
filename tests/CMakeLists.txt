@@ -28,6 +28,7 @@ add_executable(launcher_unit_tests
     unit/RetentionServiceTest.cpp
     unit/PatchNoteServiceTest.cpp
     unit/AdminDomainTest.cpp
+    unit/AdminUserServiceTest.cpp
 )
 
 target_include_directories(launcher_unit_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -62,6 +63,7 @@ add_executable(launcher_integration_tests
     integration/RetentionEndpointTest.cpp
     integration/PatchNoteEndpointTest.cpp
     integration/AdminAuthEndpointTest.cpp
+    integration/AdminUserEndpointTest.cpp
 )
 
 target_include_directories(launcher_integration_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")

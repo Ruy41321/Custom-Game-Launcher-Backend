@@ -3,6 +3,7 @@
 #include <stdexcept>
 #include <utility>
 
+#include "repositories/postgres/PgAdminRepositories.h"
 #include "repositories/postgres/PgCatalogRepositories.h"
 #include "repositories/postgres/PgDownloadRepositories.h"
 #include "repositories/postgres/PgRepositories.h"
@@ -29,6 +30,8 @@ void AppContext::initialize(AppConfig config, drogon::orm::DbClientPtr database)
     library_ = std::make_unique<repositories::postgres::PgLibraryRepository>(database_);
     media_ = std::make_unique<repositories::postgres::PgMediaRepository>(database_);
     patchNotes_ = std::make_unique<repositories::postgres::PgPatchNoteRepository>(database_);
+    adminUsers_ = std::make_unique<repositories::postgres::PgAdminUserRepository>(database_);
+    audit_ = std::make_unique<repositories::postgres::PgAuditRepository>(database_);
     blobs_ = std::make_unique<repositories::postgres::PgBlobRepository>(database_);
     uploadSessions_ =
         std::make_unique<repositories::postgres::PgUploadSessionRepository>(database_);
@@ -64,6 +67,7 @@ void AppContext::initialize(AppConfig config, drogon::orm::DbClientPtr database)
 
     patchNoteService_ =
         std::make_unique<services::PatchNoteService>(*games_, *gameVersions_, *patchNotes_);
+    adminUserService_ = std::make_unique<services::AdminUserService>(*adminUsers_, *audit_);
 
     mediaService_ = std::make_unique<services::MediaService>(
         *games_,
@@ -152,6 +156,11 @@ const services::RetentionService& AppContext::retentionService() const {
     return *retentionService_;
 }
 
+const services::AdminUserService& AppContext::adminUserService() const {
+    requireInitialized();
+    return *adminUserService_;
+}
+
 const services::PatchNoteService& AppContext::patchNoteService() const {
     requireInitialized();
     return *patchNoteService_;
@@ -185,6 +194,7 @@ void AppContext::reset() {
     uploadService_.reset();
     patchNoteService_.reset();
     mediaService_.reset();
+    adminUserService_.reset();
     catalogService_.reset();
     authService_.reset();
     tokenService_.reset();
@@ -192,6 +202,8 @@ void AppContext::reset() {
     downloads_.reset();
     uploadSessions_.reset();
     blobs_.reset();
+    audit_.reset();
+    adminUsers_.reset();
     patchNotes_.reset();
     media_.reset();
     library_.reset();
