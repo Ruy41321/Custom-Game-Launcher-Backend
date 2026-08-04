@@ -144,6 +144,13 @@ layout accepts it later as an additional blob kind, with no schema change.
 | D30 | **`mayViewGame` / `mayEditGame` are pure functions in `domain/`** | Three services now ask the same two questions about a game — the catalog, artwork and the devlog — and the answer to "may this caller see it" decides between 404 and 403 for all of them. Same reasoning as D26 for builds: a copy per service is a security rule with three places to be wrong in. | A copy in each service; a shared service base class (inheritance for what is two free functions) |
 | D31 | **Unreferenced blobs are collected on a timer, with a grace period, row before file, and a quota refund** | `build_files` is `ON DELETE RESTRICT`, so a referenced blob was never at risk; the gap was the other half, where an upload that was never finalised and the content of a deleted build were stored and paid for forever. Three parts are load-bearing. The **grace period** is correctness, not tuning: every blob of a build is uploaded *before* the manifest that names them, so during a publish live content is referenced by nothing, and a sweep with no grace eats builds in flight. The **row goes first and the file second**, because the other order cannot be recovered from — a file removed while the delete loses a race leaves a live manifest pointing at nothing, whereas a crash between the two steps leaves only a file nothing references. The delete **repeats the unreferenced condition** inside the statement, so that race is a no-op rather than a RESTRICT violation. And it **refunds**: quota is charged at upload completion, so without this it is a lifetime cap rather than an allowance. | Deleting the file first (a live build with missing bytes); no grace period (collects builds mid-publish); trusting the listing (turns a race into a database error); no refund (deleting a build frees disk but not quota) |
 | D32 | **A patch note is not a version's release notes** | `game_versions.release_notes` describes exactly one version. A devlog entry may name a version or none at all — "what we are working on this month" is a legitimate post — and it needs its own publication state so a draft can be written before the build it talks about exists. Publishing and unpublishing are one field because a note that went out by mistake has to come back, and re-publishing keeps the original date, since the date is when readers saw it and not when it was last edited. It is its own paged surface rather than a field of the game detail, which is a fixed-size description of one game. | Reusing `releaseNotes` (cannot express a post about no version, or a draft); embedding the devlog in the detail response (an unbounded list inside a fixed one) |
+| D33 | **The administrative surface is separated by the listener a request arrived on, and the peer address is deliberately not checked** | Drogon registers routes on the application rather than on a listener, so without a filter every admin controller answers on the public :8080 as readily as on :9090 and the second listener is decoration. `AdminSurfaceFilter` compares `localAddr().toPort()` against `server.adminPort`. It does *not* check the peer, because the compose file binds this listener to `0.0.0.0` inside the container and publishes it as `127.0.0.1:9090:9090` — every legitimate request arrives from the bridge gateway, so a loopback check would reject the documented deployment. The network restriction stays on the network side, and `validate()` refuses `adminPort == port` so the two can never collapse. | Binding 127.0.0.1 inside the container (unreachable even through the published port); a peer-address check (rejects the deployed stack); a path prefix alone (one nginx location away from public) |
+| D34 | **A hidden admin route answers 404, word for word the framework's own page** | From the public listener the surface does not exist, and that is the honest answer as well as the safe one: a 403 confirms the route is there to anyone who guessed the path, and any difference in wording between "hidden here" and "never existed" is a way to enumerate the surface from outside. The same 404-not-403 rule the catalog applies to drafts, applied to the surface itself. | 403 (confirms the path); a distinct message (enumerable) |
+| D35 | **The admin surface mints its own tokens, and re-checks the operator on every rotation** | An operator reaches the server through `ssh -L 9090:127.0.0.1:9090`, which forwards one port: a page loaded from :9090 has no route to :8080 to log in through. It is the same AuthService and the same signing key — a token from the public listener works here — plus the requirement that the account hold some `admin.*` permission. Checked at refresh too, because permissions live in the access token and revoking a role cannot reach one already issued; without it a demoted operator renews an administrative session forever. A refused sign-in retires the session the correct password just opened. | Logging in on :8080 (unreachable through the tunnel); checking only at sign-in (a revoked role never takes effect) |
+| D36 | **An audit entry is written by the same statement as the change it describes** | An entry appended afterwards can fail on its own, and what it leaves behind is a change nobody can attribute — the one outcome an obligatory trail exists to rule out. A CTE whose audit arm selects from the modifying arm makes that impossible and gives three properties for free: a change that matched no row, a change already in effect, and a refused change all record nothing, with no code deciding it. This is why `IAdminUserRepository` is separate from `IUserRepository`: its mutations take the audit entry, which registration and a password reset have no business carrying. Note the final SELECT reads the UPDATE's own RETURNING — a data-modifying CTE's effects are invisible to the rest of the statement, so re-selecting the table returns the row as it was before. | A second INSERT after the change (a change with no record); a transaction (Drogon commits asynchronously on destruction — see §8); best-effort logging (an audit trail that is allowed to miss things is not one) |
+| D37 | **While an account is the only active holder of `admin.users.manage`, none of its roles or its active flag may change** | Deliberately blunt: it refuses to change *any* role on that account, not only the one carrying the permission. A finer rule would have to reason about which permissions the particular role grants, and being wrong once costs the operator every route back, because nothing but the command line repairs an empty administrator list. Deactivated accounts do not count as a way back in. Paired with a flat refusal to deactivate one's own account. | Checking only the role being revoked (one wrong answer locks everybody out); no guard at all (an operator can empty the list in two clicks) |
+| D38 | **The first administrator is granted from the command line** | Granting a role through the surface needs `admin.roles.manage`, which on a fresh deployment nobody holds, so something outside the permission system has to hand out the first one. The authority that makes sense is shell access to the machine — already the authority that reaches the loopback listener at all. `--grant-role` also retires the manual `INSERT INTO user_roles` the setup notes carried since M4, and unlike that statement it leaves an audit row, with a null actor and `metadata.via = "command-line"`. Talks to libpq directly, like the migration runner: no event loop for a coroutine, and destroying a DbClient can abort the process. | An endpoint (cannot bootstrap itself); a seeded admin account with a default password (a credential every deployment shares); leaving it to hand-written SQL (no audit row, and easy to get wrong) |
+| D39 | **The console is one self-contained page, embedded in the binary** | The deployed image then has no path to mount, the page cannot get out of step with the API it talks to, and the integration tests exercise the same bytes a deployment serves. The source stays a real `.html`; CMake configures it into a string literal, with `CMAKE_CONFIGURE_DEPENDS` so an edit is not left stale. Vanilla JavaScript and no build step, because adding npm to a C++ repository to render three tables costs more than the console is worth. The access token lives in a variable — no browser storage, no cookie — since the page is reached over a tunnel from somebody's desktop and a token that survives the tab outlives its reason. The CSP is `default-src 'none'`, which the page needs none of relaxed, so a later edit reaching for a CDN fails loudly. | A document root (a mount to keep in step, and untested bytes); an SPA with a build step (npm in a C++ repo); a token in browser storage (outlives the tunnel) |
 
 ---
 
@@ -239,12 +246,15 @@ docker compose exec api /app/launcher-api --migrate
 # psql is not installed on the host — go through the container
 docker compose exec db psql -U launcher -d launcher -c "\dt"
 
-# Grant the devlist. There is no endpoint for this by design (D8), and it is the first thing
-# any manual publishing walkthrough needs. Note the column is roles.key, not roles.name.
-docker compose exec -T db psql -U launcher -d launcher -c \
-    "INSERT INTO user_roles (user_id, role_id)
-     SELECT u.id, r.id FROM users u, roles r WHERE u.email = 'you@example.com' AND r.key = 'dev'
-     ON CONFLICT DO NOTHING;"
+# Grant a role. This is how the first administrator is created, because granting one through
+# the admin surface needs a permission nobody holds yet (D38). It replaces the hand-written
+# INSERT INTO user_roles these notes used to carry, and unlike it leaves an audit row.
+docker compose exec api /app/launcher-api --grant-role you@example.com admin
+docker compose exec api /app/launcher-api --grant-role friend@example.com dev
+
+# The admin console, once ADMIN_ENABLED=true. From anywhere but the server itself it is
+# reached through a tunnel and nothing more.
+ssh -L 9090:127.0.0.1:9090 user@your-vps    # then open http://localhost:9090/admin
 
 # Tests. `api-build` is the toolchain image and sits behind the `tools` profile, so it is
 # not started by `up`; the --profile flag is required.
@@ -324,6 +334,12 @@ curl -s http://localhost:8080/api/v1/health
 | **A `CHECK (expires_at > created_at)` on upload sessions blocks force-expiry** | Moving an expiry into the past is a legitimate administrative action, and it is how the expiry path is tested. The constraint was removed from migration 0002 before it was merged |
 | **A `string_view` built from a string literal containing a NUL stops there** | `sniffImageFormat("RIFF\x24\x00\x00\x00WEBP…")` receives five bytes, not sixteen, so the WebP check can never match. The test failed while the production code was correct, which is the confusing direction. Any test body carrying binary has to be a `std::string` with an explicit length |
 | **Do not pipe the dev scripts through `2>&1` in Windows PowerShell 5.1** | `docker compose` writes progress to stderr; under a redirect the shell wraps each line in an ErrorRecord, `$?` becomes false, and a run that succeeded reports `NativeCommandError`. Pipe to `Select-String` without redirecting, which is what the scripts assume |
+| **Drogon routes belong to the application, not to a listener** | A controller registered anywhere answers on *every* port the server binds. The second listener enables nothing on its own and hides nothing on its own; `AdminSurfaceFilter` is what makes it mean something. Any admin route added without that filter is a public route |
+| **GCC 13 crashes on a braced initialiser passed directly as a coroutine argument** | `internal compiler error: in build_special_member_call` — no line of the expression is wrong. Build the value into a named local before the `co_await`, which the by-value rule for coroutine parameters wants anyway |
+| **A data-modifying CTE's effects are invisible to the rest of its own statement** | `WITH updated AS (UPDATE ... RETURNING *) SELECT ... FROM users` returns the row as it was *before* the update, silently. Select from the CTE (`FROM updated u`); a join to a different table is fine, which is why the patch-note insert works the way it does |
+| **`$1::uuid` is evaluated even in a branch that cannot be reached** | `WHERE ($1 = '' OR col = $1::uuid)` raises on an empty parameter rather than short-circuiting. Use `NULLIF($1, '')::uuid IS NULL OR col = NULLIF($1, '')::uuid`, and reject a malformed id above the repository so a typo is a 404 rather than a 500 |
+| **`nameFor(ErrorCode)` spells codes `snake_case`** | The error envelope carries `"code": "not_found"`, not `NotFound`. A test asserting on the enum's C++ spelling fails while the endpoint is correct |
+| **The integration binary shares one database across every test** | `TestDatabase::createOrNull()` runs once in the harness environment, not per test. Any assertion on a global count — total accounts, total downloads, how many operators exist — is affected by every other test in the binary. Assert on rows you seeded, or as a lower bound |
 | **Negotiating an upload for content the server already holds is a 409, not a session** | It is the deduplication working, and it is what makes a second build carrying the same file cost nothing. A test helper that publishes twice has to expect it rather than trying to `PATCH` a session that was never created |
 
 ---
@@ -517,13 +533,36 @@ the admin GUI.
 - ✅ 425/425 tests green (285 unit, 140 integration against a real PostgreSQL), `clang-format`
   clean
 
+### Milestone 9 — Localhost admin GUI ✅
+- ✅ `AdminSurfaceFilter`: routes answer on the admin listener and nowhere else, as a 404 that
+  is word for word the ordinary one. `AdminOperatorFilter` requires an `admin.*` permission, as
+  a filter so no route added later can forget it
+- ✅ Its own sign-in on the admin listener, because a tunnel forwards one port; the operator
+  check runs on rotation too, so a revoked role ends the session
+- ✅ Users, roles and quotas, with every change and its audit entry written by one statement —
+  `audit_log` had been in the schema since 0001 and read by nothing
+- ✅ Two rules that keep the surface reachable: no self-deactivation, and the last active
+  administrator is frozen
+- ✅ Download analytics over `download_events`, which the planner had been filling since M5 and
+  nothing had ever read
+- ✅ `launcher-api --grant-role <email> <role>`, the only way to create the first administrator,
+  and the retirement of the hand-written devlist INSERT
+- ✅ The console itself: one self-contained page, embedded in the binary from
+  `src/admin/ui/index.html`
+- ✅ [Documentation/administration.md](Documentation/administration.md)
+
+### Verified on 2026-08-04
+- 507/507 tests green (340 unit, 167 integration against a real PostgreSQL)
+- `clang-format` clean across `src/` and `tests/`
+
 ### Next up
-- ⬜ **M9** Localhost admin web GUI
-- ⬜ **M10** `Documentation/` per module, security hardening, GDPR erasure
+- ⬜ **M10** `Documentation/` for artwork and the devlog, security hardening, GDPR erasure
 
 Still deliberately absent, and worth stating so a later session does not assume otherwise:
 there is no `Documentation/` page for artwork or the devlog yet, and no automatic retention
 policy — nothing deletes an *old* build on its own, only what a publisher deletes by hand.
+The admin surface has no content-moderation screen and no settings screen; deleting a *game*
+is still impossible, and belongs with account erasure because it is the same question.
 
 ---
 
