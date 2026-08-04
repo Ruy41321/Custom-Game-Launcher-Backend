@@ -164,6 +164,43 @@ Json::Value auditPageToJson(const repositories::AuditPage& page, int limit, int 
     return json;
 }
 
+Json::Value downloadReportToJson(const repositories::DownloadReport& report) {
+    Json::Value totals;
+    totals["downloads"] = static_cast<Json::Int64>(report.totals.downloads);
+    totals["distinctUsers"] = static_cast<Json::Int64>(report.totals.distinctUsers);
+    totals["bytesPlanned"] = static_cast<Json::Int64>(report.totals.bytesPlanned);
+    totals["fullDownloads"] = static_cast<Json::Int64>(report.totals.fullDownloads);
+    totals["deltaDownloads"] = static_cast<Json::Int64>(report.totals.deltaDownloads);
+
+    Json::Value daily(Json::arrayValue);
+    for (const auto& day : report.daily) {
+        Json::Value entry;
+        entry["day"] = day.day;
+        entry["downloads"] = static_cast<Json::Int64>(day.downloads);
+        entry["bytesPlanned"] = static_cast<Json::Int64>(day.bytesPlanned);
+        daily.append(entry);
+    }
+
+    Json::Value games(Json::arrayValue);
+    for (const auto& game : report.topGames) {
+        Json::Value entry;
+        entry["gameId"] = game.gameId;
+        entry["slug"] = game.slug;
+        entry["title"] = game.title;
+        entry["downloads"] = static_cast<Json::Int64>(game.downloads);
+        entry["bytesPlanned"] = static_cast<Json::Int64>(game.bytesPlanned);
+        entry["distinctUsers"] = static_cast<Json::Int64>(game.distinctUsers);
+        games.append(entry);
+    }
+
+    Json::Value json;
+    json["days"] = report.days;
+    json["totals"] = totals;
+    json["daily"] = daily;
+    json["topGames"] = games;
+    return json;
+}
+
 repositories::AdminUserQuery userQueryOf(const drogon::HttpRequestPtr& request) {
     const auto [limit, offset] = pagingOf(request,
                                           repositories::DEFAULT_ADMIN_USER_PAGE_SIZE,

@@ -3,6 +3,7 @@
 #include <drogon/orm/DbClient.h>
 
 #include "repositories/IAdminUserRepository.h"
+#include "repositories/IAnalyticsRepository.h"
 #include "repositories/IAuditRepository.h"
 
 namespace launcher::repositories::postgres {
@@ -38,6 +39,16 @@ class PgAdminUserRepository : public IAdminUserRepository {
 
     drogon::Task<int64_t> countOtherHoldersOf(std::string permissionKey,
                                               std::string excludingUserId) const override;
+
+  private:
+    drogon::orm::DbClientPtr database_;
+};
+
+class PgAnalyticsRepository : public IAnalyticsRepository {
+  public:
+    explicit PgAnalyticsRepository(drogon::orm::DbClientPtr database);
+
+    drogon::Task<DownloadReport> downloadReport(int days, int topGames) const override;
 
   private:
     drogon::orm::DbClientPtr database_;

@@ -299,6 +299,96 @@ PgAdminUserRepository::countOtherHoldersOf(std::string permissionKey,
 }
 
 // ---------------------------------------------------------------------------
+// Download analytics
+// ---------------------------------------------------------------------------
+
+PgAnalyticsRepository::PgAnalyticsRepository(drogon::orm::DbClientPtr database)
+    : database_(std::move(database)) {}
+
+drogon::Task<DownloadReport> PgAnalyticsRepository::downloadReport(int days, int topGames) const {
+    // The window is one text parameter turned into an interval, rather than a value
+    // interpolated into the statement: the days come from a query string.
+    const std::string window = number(days) + " days";
+
+    const auto totals = co_await database_->execSqlCoro(
+        R"(
+            SELECT count(*)                                      AS downloads,
+                   count(DISTINCT user_id)                       AS distinct_users,
+                   COALESCE(sum(bytes_planned), 0)               AS bytes_planned,
+                   count(*) FILTER (WHERE kind = 'full')         AS full_downloads,
+                   count(*) FILTER (WHERE kind = 'delta')        AS delta_downloads
+            FROM download_events
+            WHERE created_at >= now() - $1::interval
+        )",
+        window);
+
+    DownloadReport report;
+    report.days = days;
+    report.totals.downloads = totals[0]["downloads"].as<int64_t>();
+    report.totals.distinctUsers = totals[0]["distinct_users"].as<int64_t>();
+    report.totals.bytesPlanned = totals[0]["bytes_planned"].as<int64_t>();
+    report.totals.fullDownloads = totals[0]["full_downloads"].as<int64_t>();
+    report.totals.deltaDownloads = totals[0]["delta_downloads"].as<int64_t>();
+
+    // generate_series supplies the days, so a day with no downloads is a zero rather than a
+    // gap. A chart that skipped empty days would draw a busier picture than the truth.
+    const auto daily = co_await database_->execSqlCoro(
+        R"(
+            SELECT to_char(d.day, 'YYYY-MM-DD')            AS day,
+                   count(e.id)                             AS downloads,
+                   COALESCE(sum(e.bytes_planned), 0)       AS bytes_planned
+            FROM generate_series((now() AT TIME ZONE 'UTC')::date - $1::interval,
+                                 (now() AT TIME ZONE 'UTC')::date,
+                                 '1 day') AS d(day)
+            LEFT JOIN download_events e
+                   ON (e.created_at AT TIME ZONE 'UTC')::date = d.day::date
+            GROUP BY d.day
+            ORDER BY d.day
+        )",
+        window);
+
+    report.daily.reserve(daily.size());
+    for (const auto& row : daily) {
+        DownloadDay entry;
+        entry.day = row["day"].as<std::string>();
+        entry.downloads = row["downloads"].as<int64_t>();
+        entry.bytesPlanned = row["bytes_planned"].as<int64_t>();
+        report.daily.push_back(std::move(entry));
+    }
+
+    const auto games = co_await database_->execSqlCoro(
+        R"(
+            SELECT g.id::text                              AS game_id,
+                   g.slug, g.title,
+                   count(*)                                AS downloads,
+                   COALESCE(sum(e.bytes_planned), 0)       AS bytes_planned,
+                   count(DISTINCT e.user_id)               AS distinct_users
+            FROM download_events e
+            JOIN games g ON g.id = e.game_id
+            WHERE e.created_at >= now() - $1::interval
+            GROUP BY g.id, g.slug, g.title
+            ORDER BY downloads DESC, g.title
+            LIMIT $2
+        )",
+        window,
+        number(topGames));
+
+    report.topGames.reserve(games.size());
+    for (const auto& row : games) {
+        GameDownloads entry;
+        entry.gameId = row["game_id"].as<std::string>();
+        entry.slug = row["slug"].as<std::string>();
+        entry.title = row["title"].as<std::string>();
+        entry.downloads = row["downloads"].as<int64_t>();
+        entry.bytesPlanned = row["bytes_planned"].as<int64_t>();
+        entry.distinctUsers = row["distinct_users"].as<int64_t>();
+        report.topGames.push_back(std::move(entry));
+    }
+
+    co_return report;
+}
+
+// ---------------------------------------------------------------------------
 // Audit trail
 // ---------------------------------------------------------------------------
 

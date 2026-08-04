@@ -10,6 +10,7 @@
 #include "domain/Actor.h"
 #include "domain/Role.h"
 #include "repositories/IAdminUserRepository.h"
+#include "repositories/IAnalyticsRepository.h"
 #include "repositories/IAuditRepository.h"
 #include "services/AuthService.h"
 
@@ -42,6 +43,8 @@ Json::Value roleToJson(const domain::Role& role);
 Json::Value auditEntryToJson(const domain::AuditEntry& entry);
 
 Json::Value auditPageToJson(const repositories::AuditPage& page, int limit, int offset);
+
+Json::Value downloadReportToJson(const repositories::DownloadReport& report);
 
 /// Reads `search`, `inactive`, `page` and `pageSize` from the query string.
 repositories::AdminUserQuery userQueryOf(const drogon::HttpRequestPtr& request);

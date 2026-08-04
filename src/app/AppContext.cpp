@@ -31,6 +31,7 @@ void AppContext::initialize(AppConfig config, drogon::orm::DbClientPtr database)
     media_ = std::make_unique<repositories::postgres::PgMediaRepository>(database_);
     patchNotes_ = std::make_unique<repositories::postgres::PgPatchNoteRepository>(database_);
     adminUsers_ = std::make_unique<repositories::postgres::PgAdminUserRepository>(database_);
+    analytics_ = std::make_unique<repositories::postgres::PgAnalyticsRepository>(database_);
     audit_ = std::make_unique<repositories::postgres::PgAuditRepository>(database_);
     blobs_ = std::make_unique<repositories::postgres::PgBlobRepository>(database_);
     uploadSessions_ =
@@ -68,6 +69,7 @@ void AppContext::initialize(AppConfig config, drogon::orm::DbClientPtr database)
     patchNoteService_ =
         std::make_unique<services::PatchNoteService>(*games_, *gameVersions_, *patchNotes_);
     adminUserService_ = std::make_unique<services::AdminUserService>(*adminUsers_, *audit_);
+    analyticsService_ = std::make_unique<services::AnalyticsService>(*analytics_);
 
     mediaService_ = std::make_unique<services::MediaService>(
         *games_,
@@ -156,6 +158,11 @@ const services::RetentionService& AppContext::retentionService() const {
     return *retentionService_;
 }
 
+const services::AnalyticsService& AppContext::analyticsService() const {
+    requireInitialized();
+    return *analyticsService_;
+}
+
 const services::AdminUserService& AppContext::adminUserService() const {
     requireInitialized();
     return *adminUserService_;
@@ -194,6 +201,7 @@ void AppContext::reset() {
     uploadService_.reset();
     patchNoteService_.reset();
     mediaService_.reset();
+    analyticsService_.reset();
     adminUserService_.reset();
     catalogService_.reset();
     authService_.reset();
@@ -203,6 +211,7 @@ void AppContext::reset() {
     uploadSessions_.reset();
     blobs_.reset();
     audit_.reset();
+    analytics_.reset();
     adminUsers_.reset();
     patchNotes_.reset();
     media_.reset();
