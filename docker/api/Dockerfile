@@ -104,9 +104,13 @@ COPY migrations /app/migrations
 COPY config /app/config
 COPY docker/api/entrypoint.sh /app/entrypoint.sh
 
+# Every path a named volume is mounted on has to exist here and be owned by `launcher`.
+# Docker creates a missing mount point as root, and the API runs unprivileged, so a directory
+# left out of this line is one the server cannot write to — which is how artwork uploads failed
+# on every fresh deployment with "cannot create the media directory: Permission denied".
 RUN chmod +x /app/entrypoint.sh \
-    && mkdir -p /data/blobs /var/log/launcher \
-    && chown -R launcher:launcher /app /data/blobs /var/log/launcher
+    && mkdir -p /data/blobs /data/media /var/log/launcher \
+    && chown -R launcher:launcher /app /data/blobs /data/media /var/log/launcher
 
 USER launcher
 

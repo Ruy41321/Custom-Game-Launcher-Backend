@@ -343,6 +343,8 @@ curl -s http://localhost:8080/api/v1/health
 | **`$1::uuid` is evaluated even in a branch that cannot be reached** | `WHERE ($1 = '' OR col = $1::uuid)` raises on an empty parameter rather than short-circuiting. Use `NULLIF($1, '')::uuid IS NULL OR col = NULLIF($1, '')::uuid`, and reject a malformed id above the repository so a typo is a 404 rather than a 500 |
 | **`nameFor(ErrorCode)` spells codes `snake_case`** | The error envelope carries `"code": "not_found"`, not `NotFound`. A test asserting on the enum's C++ spelling fails while the endpoint is correct |
 | **The integration binary shares one database across every test** | `TestDatabase::createOrNull()` runs once in the harness environment, not per test. Any assertion on a global count — total accounts, total downloads, how many operators exist — is affected by every other test in the binary. Assert on rows you seeded, or as a lower bound |
+| **A named volume mounted where the image has no directory is created owned by root** | And the API runs as `launcher`, so it cannot write there. `/data/media` was added to `docker-compose.yml` with the artwork feature and never added to the `mkdir`/`chown` in `docker/api/Dockerfile`, so **every fresh deployment refused artwork uploads** with "cannot create the media directory: Permission denied". Nothing caught it: the suite has no file server and mounts no volumes, and no client uploaded an image until the launcher's dashboard did. Rebuilding the image is not enough on a machine that already has the volume — Docker sets ownership only when it creates an empty one, so the volume has to be removed too. The `docker` CI job now mounts an empty volume at each data path and asserts the owner |
+| **`docker run <image> <cmd>` does not replace an ENTRYPOINT** | The API image's entrypoint runs the migrations, so `docker run launcher-api stat -c '%U' /data` runs the *migrations* with `stat` as an argument and reports a database it cannot reach — which reads like a broken image rather than a misused flag. Use `--entrypoint`. And from Git Bash prefix the whole thing with `MSYS_NO_PATHCONV=1`, or `/data/media` becomes `C:/Program Files/Git/data/media` |
 | **Negotiating an upload for content the server already holds is a 409, not a session** | It is the deduplication working, and it is what makes a second build carrying the same file cost nothing. A test helper that publishes twice has to expect it rather than trying to `PATCH` a session that was never created |
 
 ---
@@ -591,6 +593,23 @@ client cannot work without (D40); the launcher reads it at startup and stops gue
   including that no configured secret can reach the document
 - ✅ [Documentation/architecture.md](Documentation/architecture.md) §Configuration
 - ✅ 518/518 tests green (347 unit, 171 integration)
+
+### The artwork routes, exercised by a real client for the first time — 2026-08-05
+
+The launcher's developer dashboard started calling the media and patch-note write routes, and
+driving them against this stack found a bug **no test here could have caught**.
+
+- ✅ **`/data/media` was never created or chowned in `docker/api/Dockerfile`.** Docker creates a
+  missing mount point as root, the API runs as `launcher`, and so *every fresh deployment
+  refused artwork uploads* — since the feature shipped on 2026-08-04. The suite has no file
+  server and mounts no volumes, and until now no client uploaded an image, so nothing looked
+- ✅ The `docker` CI job now mounts an empty volume at `/data/blobs`, `/data/media` and
+  `/var/log/launcher` and asserts each is owned by `launcher`. Verified in both directions: it
+  reports `root` on the pre-fix image and `launcher` on the fixed one
+- ✅ Everything else on those routes behaved: the raw body sniffed as PNG, a content-addressed
+  URL with its extension, **nginx serving it byte for byte to a tokenless client**, gallery
+  ordering and reordering, SVG refused with 422, deleting one row leaving a shared file alone,
+  re-publishing a patch note keeping its original date, and a second delete answering 404
 
 ### Next up
 - ⬜ **M10** security hardening, GDPR erasure, client crash reporting

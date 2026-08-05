@@ -120,8 +120,30 @@ jobs:
           file: docker/api/Dockerfile
           target: runtime
           push: false
+          load: true
+          tags: launcher-api:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Docker creates a missing mount point as root, and the API runs unprivileged, so a data
+      # directory left out of the Dockerfile's chown is one the server cannot write to. That is
+      # invisible to every test here — the suite has no file server and no volumes — and it
+      # shipped: artwork upload failed on every fresh deployment with "cannot create the media
+      # directory: Permission denied". Mounting empty volumes reproduces exactly that.
+      - name: Every data volume is writable by the account the API runs as
+        run: |
+          # --entrypoint, because the image's own entrypoint runs the migrations and would
+          # take `stat` as an argument rather than being replaced by it.
+          for path in /data/blobs /data/media /var/log/launcher; do
+            owner=$(docker run --rm --entrypoint stat -v "ci-vol-check:$path" \
+              launcher-api:ci -c '%U' "$path")
+            echo "$path -> $owner"
+            if [ "$owner" != "launcher" ]; then
+              echo "::error::$path is owned by '$owner'; add it to the mkdir/chown in docker/api/Dockerfile"
+              exit 1
+            fi
+            docker volume rm ci-vol-check >/dev/null
+          done
 
       - name: Build the file server image
         uses: docker/build-push-action@v7
