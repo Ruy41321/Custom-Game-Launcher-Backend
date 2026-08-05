@@ -30,6 +30,8 @@ add_executable(launcher_unit_tests
     unit/RetentionServiceTest.cpp
     unit/PatchNoteServiceTest.cpp
     unit/AdminDomainTest.cpp
+    unit/CrashReportDomainTest.cpp
+    unit/CrashReportServiceTest.cpp
     unit/AdminUserServiceTest.cpp
 )
 
@@ -71,6 +73,7 @@ add_executable(launcher_integration_tests
     integration/AdminAnalyticsEndpointTest.cpp
     integration/RoleGrantIntegrationTest.cpp
     integration/AdminUiEndpointTest.cpp
+    integration/CrashReportEndpointTest.cpp
 )
 
 target_include_directories(launcher_integration_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")

@@ -96,6 +96,21 @@ struct UploadConfig {
     uint32_t sweepIntervalSeconds{600};
 };
 
+struct CrashReportConfig {
+    /// Whether launchers may send crash reports at all. On by default: a deployment that does
+    /// not want them turns the route off rather than relying on nobody opting in.
+    bool enabled{true};
+    /// Reports allowed per client address before the bucket empties, and the window it refills
+    /// over. The route is unauthenticated, so this is the only thing standing between it and a
+    /// stranger filling the table.
+    uint32_t submitAttempts{20};
+    uint32_t submitWindowSeconds{600};
+    /// How long a report is kept. Long enough to notice a crash that only happens on Tuesdays,
+    /// short enough that a deployment is not hoarding diagnostics about a version nobody runs.
+    uint32_t retentionSeconds{30U * 24 * 3600};
+    uint32_t sweepIntervalSeconds{3600};
+};
+
 struct RetentionConfig {
     /// How long a blob must have existed before the collector may take it.
     ///
@@ -123,6 +138,7 @@ struct AppConfig {
     UpdateConfig updates;
     UploadConfig uploads;
     RetentionConfig retention;
+    CrashReportConfig crashReports;
 
     bool isProduction() const;
 

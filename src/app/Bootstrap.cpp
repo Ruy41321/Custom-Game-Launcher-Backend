@@ -54,6 +54,21 @@ void scheduleBlobCollector(uint32_t intervalSeconds) {
     });
 }
 
+void scheduleCrashReportSweeper(uint32_t intervalSeconds) {
+    // Crash reports are the only thing here nobody ever deletes by hand: a launcher sends one
+    // and forgets it, and an operator reads a list rather than pruning it. Without this the
+    // table grows for the life of the deployment.
+    drogon::app().getLoop()->runEvery(static_cast<double>(intervalSeconds), []() {
+        drogon::async_run([]() -> drogon::Task<> {
+            try {
+                co_await AppContext::instance().crashReportService().sweepExpired();
+            } catch (const std::exception& e) {
+                spdlog::warn("crash report sweep failed: {}", common::escapeJson(e.what()));
+            }
+        });
+    });
+}
+
 } // namespace
 
 void configureUploadLimits(const UploadConfig& uploads) {
@@ -99,6 +114,9 @@ int runServer(const AppConfig& config) {
         configureUploadLimits(config.uploads);
         scheduleUploadSweeper(config.uploads.sweepIntervalSeconds);
         scheduleBlobCollector(config.retention.sweepIntervalSeconds);
+        if (config.crashReports.enabled) {
+            scheduleCrashReportSweeper(config.crashReports.sweepIntervalSeconds);
+        }
 
         if (config.server.adminEnabled) {
             // Loopback only, by design: the admin surface is reached over an SSH tunnel and

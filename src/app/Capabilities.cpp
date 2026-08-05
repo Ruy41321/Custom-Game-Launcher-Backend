@@ -1,5 +1,6 @@
 #include "app/Capabilities.h"
 
+#include "domain/CrashReport.h"
 #include "domain/Manifest.h"
 #include "domain/Media.h"
 #include "launcher/Version.h"
@@ -52,6 +53,15 @@ Json::Value capabilitiesDocument(const AppConfig& config) {
     catalog["defaultPageSize"] = repositories::DEFAULT_GAME_PAGE_SIZE;
     catalog["maxPatchNotePageSize"] = repositories::MAX_PATCH_NOTE_PAGE_SIZE;
     json["catalog"] = catalog;
+
+    Json::Value crashReports;
+    // Whether sending them is worth attempting at all. A launcher that reads false here stops
+    // rather than posting into a 404 after every crash — and a deployment that turns the route
+    // off is telling its users something, not hiding it.
+    crashReports["enabled"] = config.crashReports.enabled;
+    crashReports["maxMessageLength"] = static_cast<Json::Int64>(domain::MAX_CRASH_MESSAGE_LENGTH);
+    crashReports["maxStackLength"] = static_cast<Json::Int64>(domain::MAX_CRASH_STACK_LENGTH);
+    json["crashReports"] = crashReports;
 
     Json::Value updates;
     // Advisory, and worth publishing: it is why a client that asked for a delta is sometimes

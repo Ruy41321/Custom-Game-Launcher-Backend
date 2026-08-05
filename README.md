@@ -145,6 +145,7 @@ server has and, more usefully, why each one works the way it does.
 | [artwork-and-devlog.md](Documentation/artwork-and-devlog.md) | Covers and screenshots, and a game's devlog |
 | [storage-lifecycle.md](Documentation/storage-lifecycle.md) | Deleting builds, collecting unreferenced blobs, quota refunds |
 | [administration.md](Documentation/administration.md) | The loopback operator console, roles, quotas, audit |
+| [crash-reports.md](Documentation/crash-reports.md) | Receiving launcher crashes, fingerprinting and grouping them |
 
 ## Project layout
 

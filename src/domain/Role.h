@@ -26,6 +26,9 @@ inline constexpr const char* ADMIN_USERS_MANAGE = "admin.users.manage";
 inline constexpr const char* ADMIN_ROLES_MANAGE = "admin.roles.manage";
 inline constexpr const char* ADMIN_GAMES_MANAGE = "admin.games.manage";
 inline constexpr const char* ADMIN_SETTINGS_MANAGE = "admin.settings.manage";
+/// Seeded by migration 0004, not 0001: a permission added later has to be granted to the
+/// admin role by its own migration, because 0001's cross join ran before it existed.
+inline constexpr const char* ADMIN_CRASHES_READ = "admin.crashes.read";
 } // namespace permissions
 
 struct Role {

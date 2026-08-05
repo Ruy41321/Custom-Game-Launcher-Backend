@@ -12,6 +12,7 @@
 #include "repositories/IAuditRepository.h"
 #include "repositories/IBlobRepository.h"
 #include "repositories/IBuildRepository.h"
+#include "repositories/ICrashReportRepository.h"
 #include "repositories/IDownloadRepository.h"
 #include "repositories/IGameRepository.h"
 #include "repositories/IGameVersionRepository.h"
@@ -28,6 +29,7 @@
 #include "services/AnalyticsService.h"
 #include "services/AuthService.h"
 #include "services/CatalogService.h"
+#include "services/CrashReportService.h"
 #include "services/DownloadService.h"
 #include "services/MediaService.h"
 #include "services/PasswordHasher.h"
@@ -79,9 +81,16 @@ class AppContext {
 
     const services::RetentionService& retentionService() const;
 
+    const services::CrashReportService& crashReportService() const;
+
     /// Shared by the authentication endpoints; see common::RateLimiter for why it is
     /// in-process.
     common::RateLimiter& authRateLimiter() const;
+
+    /// A second bucket, for the unauthenticated crash-report route. Separate from the auth one
+    /// on purpose: the two exist for different reasons and want different numbers, and sharing
+    /// would let a burst of crash reports lock somebody out of signing in.
+    common::RateLimiter& crashRateLimiter() const;
 
     /// Test hook: drops all wiring so a fresh context can be installed.
     void reset();
@@ -118,6 +127,7 @@ class AppContext {
     std::unique_ptr<repositories::IBlobRepository> blobs_;
     std::unique_ptr<repositories::IUploadSessionRepository> uploadSessions_;
     std::unique_ptr<repositories::IDownloadRepository> downloads_;
+    std::unique_ptr<repositories::ICrashReportRepository> crashReports_;
 
     std::unique_ptr<services::IPasswordHasher> passwordHasher_;
     std::unique_ptr<services::ITokenService> tokenService_;
@@ -131,8 +141,10 @@ class AppContext {
     std::unique_ptr<services::UploadService> uploadService_;
     std::unique_ptr<services::DownloadService> downloadService_;
     std::unique_ptr<services::RetentionService> retentionService_;
+    std::unique_ptr<services::CrashReportService> crashReportService_;
 
     std::unique_ptr<common::RateLimiter> authRateLimiter_;
+    std::unique_ptr<common::RateLimiter> crashRateLimiter_;
 };
 
 } // namespace launcher::app

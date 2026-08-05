@@ -12,6 +12,7 @@
 #include "repositories/IAdminUserRepository.h"
 #include "repositories/IAnalyticsRepository.h"
 #include "repositories/IAuditRepository.h"
+#include "repositories/ICrashReportRepository.h"
 #include "services/AuthService.h"
 
 namespace launcher::controllers::admin {
@@ -45,6 +46,24 @@ Json::Value auditEntryToJson(const domain::AuditEntry& entry);
 Json::Value auditPageToJson(const repositories::AuditPage& page, int limit, int offset);
 
 Json::Value downloadReportToJson(const repositories::DownloadReport& report);
+
+/// One distinct bug. Carries the newest report's id so the console can open it without a
+/// second query to find one.
+Json::Value crashGroupToJson(const domain::CrashGroup& group);
+
+Json::Value crashGroupPageToJson(const repositories::CrashGroupPage& page, int limit, int offset);
+
+Json::Value crashReportToJson(const domain::CrashReport& report);
+
+Json::Value crashPageToJson(const repositories::CrashPage& page, int limit, int offset);
+
+/// Reads `fingerprint`, `page` and `pageSize`. A malformed fingerprint is refused rather than
+/// ignored, for the reason `auditQueryOf` gives: a dropped filter answers a question nobody
+/// asked, and the whole page looks like the answer.
+repositories::CrashQuery crashQueryOf(const drogon::HttpRequestPtr& request);
+
+/// The paging a crash listing uses, so the two crash routes cannot disagree about it.
+std::pair<int, int> crashPagingOf(const drogon::HttpRequestPtr& request);
 
 /// Reads `search`, `inactive`, `page` and `pageSize` from the query string.
 repositories::AdminUserQuery userQueryOf(const drogon::HttpRequestPtr& request);

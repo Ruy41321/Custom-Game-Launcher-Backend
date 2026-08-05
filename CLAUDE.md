@@ -156,6 +156,9 @@ layout accepts it later as an additional blob kind, with no schema change.
 | D42 | **Deleting a game returns the storage keys of the artwork it cascaded away, out of the same statement, and one `MediaReclaimer` decides what actually leaves the disk** | Images are content-addressed, so a row going away says nothing about whether the bytes are still in use, and two services now delete artwork. The rule is three lines long, which is exactly why it has one implementation: a rule with two copies stops being a rule the first time one is edited. The keys have to come out of the *deleting* statement — a sub-query on the pre-command snapshot — because reading them afterwards finds nothing, and reading them in a separate statement first opens a window in which a new cover can be uploaded and then have its file deleted from under it. | Deleting the files unconditionally (blanks another game's cover); a second SELECT before the delete (a real window); duplicating the check in CatalogService (the same rule in two places) |
 | D43 | **GDPR erasure is immediate and irreversible, and it anonymises the account rather than deleting it** | `account_deletion_requests` has carried a `pending` status and a one-open-request index since migration 0001, and that shape was deliberately not taken up: a window needs something to close it, something to cancel it, and a ruling on whether signing in during it is a change of mind — and for its whole length the account is *not yet erased* while its owner has been told it will be. Immediate is simpler and impossible to regret; the row is still written, `completed`, so the record exists and a later session that wants the deferred form inherits the table. Anonymising rather than deleting is not a preference either: `games.publisher_user_id` is `ON DELETE RESTRICT`, so a `DELETE` on anybody who ever published would be refused by the database, and other people's installs update from those builds. The placeholder address is derived from the account's own id, because `users.email` is `citext UNIQUE` and a fixed one would make the *second* erasure on a deployment fail on the index. Sessions, reset links and the library are emptied by hand, since the cascades that would have done it hang off a `DELETE` that never happens; `download_events.user_id` goes null, which the first migration's own comment anticipated. | A grace period (needs a closer, a canceller, and a login rule, and leaves the account un-erased meanwhile); deleting the row (refused by RESTRICT, and it would take other people's updates with it); a fixed placeholder address (unique-index failure on the second erasure); deleting the user's games too (a separate, deliberate act — which now exists, see D41) |
 | D44 | **The erasure re-asks for the password, refuses the last operator, and writes its audit entry in the same statement** | A valid access token says who is asking, not that the owner is the one at the keyboard, and this is the request with no undo — so re-authentication, not the token, is the gate. The last active holder of `admin.users.manage` is refused for the reason D37 gives about deactivation, only more so: nothing but the command line repairs an empty administrator list, and unlike a revoked role this cannot be handed back. And the audit arm rides inside the erasing statement (D36) because this is the change where an entry written afterwards, and failing, leaves something irreversible that nobody can attribute. The statement's own `WHERE email <> $2` makes a second erasure a no-op rather than a second row. `POST /api/v1/me/deletion` rather than `DELETE /api/v1/me`, because the password needs a body and a body on DELETE is the one thing HTTP declines to promise. | Token alone (an unlocked machine erases an account); letting the last operator leave (an unreachable surface, permanently); an audit row written after (an unattributable erasure); `DELETE` with a body (intermediaries may drop it) |
+| D45 | **A crash report names no account, and there is no column for one** | The obvious design attaches the sender, and it is the wrong one. A crash report is a diagnostic about a *program*; the moment it names an account it becomes personal data, and then the erasure of D43 has one more table to reason about and a later session has one more thing to remember. Here there is nothing to remember: `crash_reports` has no `user_id`, no installation id and no foreign key at all, so a future addition has to be a deliberate migration rather than an accident. The client does the other half — it strips its own profile, data and install directories out of the text *before writing the file*, so the copy on disk is the copy that travels — and the two measures fail differently on purpose rather than one being trusted. The cost is real and accepted: an operator cannot ask which of their testers hit a bug. | Recording the account when a token happens to be present (personal data, and inconsistent — the same crash is attributed or not depending on whether somebody was signed in); an installation id (a pseudonym is still a person once two reports are joined); trusting the client's redaction alone (a message can carry anything a caller put in it) |
+| D46 | **Submitting a crash report needs no account; reading them needs `admin.crashes.read`** | A launcher crashes on the sign-in screen as readily as anywhere else — more readily, since that is where a broken configuration shows — so a route only a signed-in client could reach would be missing exactly the failures worth having, and requiring a token would make the report be *about* an account (D45). What stands in for one is a per-address bucket with its own numbers, a field-by-field size cap, and `enabled` answering **404** rather than a refusal so a deployment that does not collect them looks like one too old to have the route. The bucket is separate from the authentication one because they want different numbers — auth is tight because each attempt costs an Argon2id hash, this is loose because a launcher that crashed five times overnight legitimately sends five — and because sharing would let a burst of crash reports lock somebody out of signing in. Reading is an operator permission because a stack trace is a map of the program and a list of them is a list of ways to break it. | An authenticated route (loses the crashes worth having, and attributes the rest); reusing the auth rate limiter (one of the two numbers is then wrong, and reports can lock out sign-in); answering a refusal when disabled (tells a client the route exists and is being withheld) |
+| D47 | **The fingerprint is computed server-side from the exception type and the *shape* of the stack, and never from the message** | It decides what counts as one bug, so it cannot be the client's to choose: two client versions would disagree about what one crash is, and a caller could hide a report among a thousand distinct ones. Normalising the stack — keeping names, dropping digits, offsets and addresses — is what makes a rebuild the same bug rather than a brand-new one, which a fingerprint over the raw text would get wrong on every release. Leaving the message out is the same argument from the other side: "could not open D:.pak" and "could not open C:\....pak" are one failure, and folding the message in would split it into as many bugs as there are machines. The group's summary comes from the *most recent* report via `DISTINCT ON`, because that is the one an operator is about to open. | A client-supplied fingerprint (disagreement, and a grouping a caller controls); hashing the raw stack (every rebuild is a new bug); including the message (one bug per machine); no grouping at all (a thousand rows of one crash, which answers neither question an operator has) |
 
 ---
 
@@ -618,10 +621,11 @@ driving them against this stack found a bug **no test here could have caught**.
   ordering and reordering, SVG refused with 422, deleting one row leaving a shared file alone,
   re-publishing a patch note keeping its original date, and a second delete answering 404
 
-### Milestone 10 — GDPR erasure and deleting a game 🚧
+### Milestone 10 — GDPR erasure, deleting a game, and crash reports 🚧
 
-The middle third of M10, together with open debt 15 of `HANDOFF.md`, because they are one
-question: what survives whom.
+Two of the three parts. The middle one went with open debt 15 of `HANDOFF.md`, because they
+are one question — what survives whom — and the third is the receiving side of the crash
+reports the launcher has been writing to disk since milestone 1.
 
 - ✅ `DELETE /api/v1/games/{idOrSlug}`: the game and, by cascade, its versions, builds, manifest
   rows, artwork rows, patch notes, library entries and download history. Allowed while other
@@ -640,12 +644,29 @@ question: what survives whom.
 - ✅ 552/552 tests green (366 unit, 186 integration against a real PostgreSQL), `clang-format`
   clean
 
+#### Crash reports — 2026-08-06
+
+The last third of M10 that is a feature. `crash_reports` is new in migration 0004, and with it
+the first permission seeded outside 0001.
+
+- ✅ `POST /api/v1/crash-reports`, **unauthenticated** (D46), behind its own rate-limit bucket
+  and a field-by-field size cap; `enabled: false` answers 404 rather than a refusal
+- ✅ **No account is recorded, and there is no column for one** (D45). The launcher strips its
+  own directories out of the text before writing the file, so the copy on disk is the copy
+  that travels
+- ✅ A server-computed fingerprint over the exception type and the *shape* of the stack, so a
+  rebuild is the same bug and two machines failing on two paths are one (D47)
+- ✅ Three operator routes behind `admin.crashes.read`: the distinct bugs, the reports behind
+  one of them, and one report in full
+- ✅ A retention sweep on the existing timer machinery — nobody deletes these by hand
+- ✅ [Documentation/crash-reports.md](Documentation/crash-reports.md)
+- ✅ 589/589 tests green (390 unit, 199 integration), `clang-format` clean
+
 ### Next up
-- ⬜ **M10**, the other two thirds: security hardening (rate limiting exists on the auth
-  endpoints; HTTPS and the rest do not) and receiving client crash reports — the launcher already
-  carries an inert `SendCrashReports` flag and no uploader
-- ⬜ The client half of this work: a "delete my account" screen in Settings, and a delete button
-  on the developer dashboard
+- ⬜ **M10**, the third that is left: security hardening. Rate limiting exists on the auth
+  endpoints and now on crash submission; HTTPS, security headers and everything else do not
+- ⬜ No console screen for crash reports: the three routes answer, and `src/admin/ui/index.html`
+  has no tab that calls them
 
 Still deliberately absent, and worth stating so a later session does not assume otherwise:
 there is no automatic retention policy — nothing deletes an *old* build on its own, only what a

@@ -5,6 +5,7 @@
 
 #include "repositories/postgres/PgAdminRepositories.h"
 #include "repositories/postgres/PgCatalogRepositories.h"
+#include "repositories/postgres/PgCrashReportRepository.h"
 #include "repositories/postgres/PgDownloadRepositories.h"
 #include "repositories/postgres/PgRepositories.h"
 #include "repositories/postgres/PgUploadRepositories.h"
@@ -38,6 +39,7 @@ void AppContext::initialize(AppConfig config, drogon::orm::DbClientPtr database)
     uploadSessions_ =
         std::make_unique<repositories::postgres::PgUploadSessionRepository>(database_);
     downloads_ = std::make_unique<repositories::postgres::PgDownloadRepository>(database_);
+    crashReports_ = std::make_unique<repositories::postgres::PgCrashReportRepository>(database_);
 
     passwordHasher_ =
         std::make_unique<services::Argon2idPasswordHasher>(services::PasswordHashingSettings{
@@ -124,6 +126,13 @@ void AppContext::initialize(AppConfig config, drogon::orm::DbClientPtr database)
         storage::BlobStore{std::filesystem::path{config_.storage.blobRoot}},
         retentionSettings);
 
+    crashReportService_ = std::make_unique<services::CrashReportService>(
+        *crashReports_, services::CrashReportSettings{config_.crashReports.retentionSeconds});
+
+    crashRateLimiter_ = std::make_unique<common::RateLimiter>(
+        config_.crashReports.submitAttempts,
+        std::chrono::seconds{config_.crashReports.submitWindowSeconds});
+
     authRateLimiter_ = std::make_unique<common::RateLimiter>(
         config_.rateLimit.authAttempts, std::chrono::seconds{config_.rateLimit.authWindowSeconds});
 
@@ -205,14 +214,26 @@ const services::DownloadService& AppContext::downloadService() const {
     return *downloadService_;
 }
 
+const services::CrashReportService& AppContext::crashReportService() const {
+    requireInitialized();
+    return *crashReportService_;
+}
+
 common::RateLimiter& AppContext::authRateLimiter() const {
     requireInitialized();
     return *authRateLimiter_;
 }
 
+common::RateLimiter& AppContext::crashRateLimiter() const {
+    requireInitialized();
+    return *crashRateLimiter_;
+}
+
 void AppContext::reset() {
     initialized_ = false;
     authRateLimiter_.reset();
+    crashRateLimiter_.reset();
+    crashReportService_.reset();
     retentionService_.reset();
     downloadService_.reset();
     uploadService_.reset();
@@ -225,6 +246,7 @@ void AppContext::reset() {
     accountService_.reset();
     tokenService_.reset();
     passwordHasher_.reset();
+    crashReports_.reset();
     downloads_.reset();
     uploadSessions_.reset();
     blobs_.reset();

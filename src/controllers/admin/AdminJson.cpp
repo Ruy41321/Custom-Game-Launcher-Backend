@@ -6,6 +6,7 @@
 
 #include "app/HttpError.h"
 #include "common/Error.h"
+#include "domain/Manifest.h"
 #include "domain/Validation.h"
 #include "filters/JwtAuthFilter.h"
 
@@ -228,6 +229,80 @@ repositories::AuditQuery auditQueryOf(const drogon::HttpRequestPtr& request) {
     query.action = request->getParameter("action");
     query.entityType = request->getParameter("entityType");
     query.entityId = request->getParameter("entityId");
+    query.limit = limit;
+    query.offset = offset;
+    return query;
+}
+
+Json::Value crashGroupToJson(const domain::CrashGroup& group) {
+    Json::Value json;
+    json["fingerprint"] = group.fingerprint;
+    json["exceptionType"] = group.exceptionType;
+    json["message"] = group.message;
+    json["occurrences"] = static_cast<Json::Int64>(group.occurrences);
+    json["firstSeenAt"] = group.firstSeenAt;
+    json["lastSeenAt"] = group.lastSeenAt;
+    json["latestReportId"] = group.latestReportId;
+    return json;
+}
+
+Json::Value crashGroupPageToJson(const repositories::CrashGroupPage& page, int limit, int offset) {
+    Json::Value items(Json::arrayValue);
+    for (const auto& group : page.items) {
+        items.append(crashGroupToJson(group));
+    }
+
+    Json::Value json;
+    json["items"] = items;
+    json["total"] = static_cast<Json::Int64>(page.total);
+    json["pageSize"] = limit;
+    json["page"] = limit > 0 ? (offset / limit) + 1 : 1;
+    return json;
+}
+
+Json::Value crashReportToJson(const domain::CrashReport& report) {
+    Json::Value json;
+    json["id"] = report.id;
+    json["kind"] = report.kind;
+    json["occurredAt"] = report.occurredAt;
+    json["receivedAt"] = report.receivedAt;
+    json["launcherVersion"] = report.launcherVersion;
+    json["platform"] = report.platform;
+    json["exceptionType"] = report.exceptionType;
+    json["message"] = report.message;
+    json["stackTrace"] = report.stackTrace;
+    json["fingerprint"] = report.fingerprint;
+    return json;
+}
+
+Json::Value crashPageToJson(const repositories::CrashPage& page, int limit, int offset) {
+    Json::Value items(Json::arrayValue);
+    for (const auto& report : page.items) {
+        items.append(crashReportToJson(report));
+    }
+
+    Json::Value json;
+    json["items"] = items;
+    json["total"] = static_cast<Json::Int64>(page.total);
+    json["pageSize"] = limit;
+    json["page"] = limit > 0 ? (offset / limit) + 1 : 1;
+    return json;
+}
+
+std::pair<int, int> crashPagingOf(const drogon::HttpRequestPtr& request) {
+    return pagingOf(
+        request, repositories::DEFAULT_CRASH_PAGE_SIZE, repositories::MAX_CRASH_PAGE_SIZE);
+}
+
+repositories::CrashQuery crashQueryOf(const drogon::HttpRequestPtr& request) {
+    const auto [limit, offset] = crashPagingOf(request);
+
+    repositories::CrashQuery query;
+    query.fingerprint = request->getParameter("fingerprint");
+    if (!query.fingerprint.empty() && !domain::isSha256Hex(query.fingerprint)) {
+        throw common::ApiException(common::ErrorCode::InvalidInput,
+                                   "fingerprint must be a SHA-256 digest");
+    }
     query.limit = limit;
     query.offset = offset;
     return query;

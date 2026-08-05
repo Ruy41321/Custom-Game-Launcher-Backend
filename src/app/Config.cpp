@@ -114,6 +114,17 @@ Result<AppConfig> AppConfig::parse(std::string_view json, const common::EnvLooku
     config.retention.sweepBatchSize =
         readInt<int32_t>(retention, "sweepBatchSize", config.retention.sweepBatchSize);
 
+    const auto& crashReports = root["crashReports"];
+    config.crashReports.enabled = readBool(crashReports, "enabled", config.crashReports.enabled);
+    config.crashReports.submitAttempts =
+        readInt<uint32_t>(crashReports, "submitAttempts", config.crashReports.submitAttempts);
+    config.crashReports.submitWindowSeconds = readInt<uint32_t>(
+        crashReports, "submitWindowSeconds", config.crashReports.submitWindowSeconds);
+    config.crashReports.retentionSeconds =
+        readInt<uint32_t>(crashReports, "retentionSeconds", config.crashReports.retentionSeconds);
+    config.crashReports.sweepIntervalSeconds = readInt<uint32_t>(
+        crashReports, "sweepIntervalSeconds", config.crashReports.sweepIntervalSeconds);
+
     const auto& auth = root["auth"];
     config.auth.jwtSecret = readString(auth, "jwtSecret", config.auth.jwtSecret);
     config.auth.issuer = readString(auth, "issuer", config.auth.issuer);
