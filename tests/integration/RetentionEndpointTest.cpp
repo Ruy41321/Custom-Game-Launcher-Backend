@@ -207,6 +207,114 @@ TEST(RetentionEndpointTest, AVersionOfAnotherGameIsMissingRatherThanRefused) {
 }
 
 // ---------------------------------------------------------------------------
+// Deleting a game
+// ---------------------------------------------------------------------------
+
+/// Uploads a cover and returns the path the file server would serve it from.
+std::filesystem::path uploadCover(const Publication& publication, const std::string& suffix) {
+    const std::string body = std::string("\x89PNG\r\n\x1a\n", 8) + suffix;
+    const auto response = harness().postBinary("/api/v1/games/" + publication.gameId + "/media",
+                                               {{"kind", "cover"}},
+                                               body,
+                                               publication.token());
+    EXPECT_EQ(response->statusCode(), drogon::k201Created) << response->body();
+
+    const auto url = bodyOf(response)["url"].asString();
+    const std::string base = "http://files.test/media/";
+    EXPECT_EQ(url.rfind(base, 0), 0u) << "unexpected media URL: " << url;
+    return harness().mediaRoot() / url.substr(base.size());
+}
+
+TEST(RetentionEndpointTest, DeletingAGameTakesEverythingUnderItAndItsArtwork) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto publication = publishedBuild("Deletable Game", "a whole game");
+    const auto cover = uploadCover(publication, "deletable game");
+    ASSERT_TRUE(std::filesystem::exists(cover));
+
+    const auto response =
+        harness().remove("/api/v1/games/" + publication.gameId, publication.token());
+
+    ASSERT_EQ(response->statusCode(), drogon::k204NoContent) << response->body();
+    EXPECT_EQ(
+        harness().get("/api/v1/games/" + publication.gameId, publication.token())->statusCode(),
+        drogon::k404NotFound);
+    // The build went with it, so the manifest an installed copy would update from is gone too.
+    EXPECT_EQ(harness()
+                  .get("/api/v1/builds/" + publication.buildId + "/manifest", publication.token())
+                  ->statusCode(),
+              drogon::k404NotFound);
+    EXPECT_FALSE(std::filesystem::exists(cover))
+        << "no row points at the picture any more, so the file should not survive either";
+}
+
+TEST(RetentionEndpointTest, ASecondDeleteOfAGameIsMissingRatherThanForbidden) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto publication = publishedBuild("Twice Deleted", "gone once");
+    ASSERT_EQ(
+        harness().remove("/api/v1/games/" + publication.gameId, publication.token())->statusCode(),
+        drogon::k204NoContent);
+
+    const auto again = harness().remove("/api/v1/games/" + publication.gameId, publication.token());
+
+    EXPECT_EQ(again->statusCode(), drogon::k404NotFound) << again->body();
+}
+
+TEST(RetentionEndpointTest, RefusesToDeleteAGameBelongingToAnotherPublisher) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto publication = publishedBuild("Not Yours To Delete", "still theirs");
+    const auto stranger = harness().createSessionWithRole(uniqueEmail("stranger"), "dev");
+
+    const auto response =
+        harness().remove("/api/v1/games/" + publication.gameId, tokenOf(stranger));
+
+    EXPECT_EQ(response->statusCode(), drogon::k403Forbidden) << response->body();
+    EXPECT_EQ(
+        harness().get("/api/v1/games/" + publication.gameId, publication.token())->statusCode(),
+        drogon::k200OK);
+}
+
+TEST(RetentionEndpointTest, DeletesAGameThatSomebodyElseHasInTheirLibrary) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto publication = publishedBuild("Somebody Elses Shelf", "shelved");
+    const auto player = harness().createVerifiedSession(uniqueEmail("shelf"));
+    ASSERT_EQ(harness().put("/api/v1/library/" + publication.gameId, tokenOf(player))->statusCode(),
+              drogon::k200OK);
+
+    // A library entry is a bookmark, not a licence: refusing here would let one stranger stop a
+    // publisher from ever withdrawing their own work.
+    ASSERT_EQ(
+        harness().remove("/api/v1/games/" + publication.gameId, publication.token())->statusCode(),
+        drogon::k204NoContent);
+
+    const auto library = bodyOf(harness().get("/api/v1/library", tokenOf(player)));
+    for (const auto& game : library["items"]) {
+        EXPECT_NE(game["id"].asString(), publication.gameId);
+    }
+}
+
+TEST(RetentionEndpointTest, TheSweepReclaimsTheBlobsOfADeletedGame) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const std::string content = "bytes that outlive their game";
+    const auto publication = publishedBuild("Collected Game", content);
+    const auto digest = sha256Hex(content);
+    const BlobStore store(harness().blobRoot());
+    ASSERT_TRUE(store.contains(digest));
+
+    ASSERT_EQ(
+        harness().remove("/api/v1/games/" + publication.gameId, publication.token())->statusCode(),
+        drogon::k204NoContent);
+
+    // Deleting the rows never touches a blob: another build may hold the same bytes, and that
+    // question belongs to the collector, one grace period later. The harness runs with none.
+    EXPECT_TRUE(store.contains(digest));
+    const auto swept = drogon::sync_wait(
+        launcher::app::AppContext::instance().retentionService().collectUnreferencedBlobs());
+
+    EXPECT_GE(swept.collected, 1u);
+    EXPECT_FALSE(store.contains(digest));
+}
+
+// ---------------------------------------------------------------------------
 // Collecting what deletion left behind
 // ---------------------------------------------------------------------------
 

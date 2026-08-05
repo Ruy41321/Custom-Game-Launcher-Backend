@@ -29,6 +29,8 @@ class PgGameRepository : public IGameRepository {
 
     drogon::Task<GamePage> search(GameQuery query) const override;
 
+    drogon::Task<std::optional<RemovedGame>> remove(std::string id) const override;
+
   private:
     drogon::orm::DbClientPtr database_;
 };

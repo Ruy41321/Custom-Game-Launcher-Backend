@@ -27,6 +27,7 @@ MediaService::MediaService(const repositories::IGameRepository& games,
     : games_(games),
       media_(media),
       store_(std::move(store)),
+      reclaimer_(media, store_),
       limits_(limits) {}
 
 drogon::Task<Result<std::vector<domain::GameMedia>>>
@@ -113,7 +114,7 @@ MediaService::upload(Actor actor, std::string gameId, UploadMediaCommand command
 
     const auto& result = created.value();
     if (!result.replacedStorageKey.empty()) {
-        co_await removeUnreferencedFile(result.replacedStorageKey);
+        co_await reclaimer_.reclaim(result.replacedStorageKey);
     }
     co_return Uploaded::success(result.media);
 }
@@ -153,7 +154,7 @@ drogon::Task<VoidResult> MediaService::remove(Actor actor, std::string mediaId) 
         co_return VoidResult::failure(ErrorCode::NotFound, NO_SUCH_MEDIA);
     }
 
-    co_await removeUnreferencedFile(removed->storageKey);
+    co_await reclaimer_.reclaim(removed->storageKey);
     co_return VoidResult::success();
 }
 
@@ -178,17 +179,6 @@ drogon::Task<Result<domain::GameMedia>> MediaService::editableMedia(Actor actor,
         co_return Found::failure(ErrorCode::Forbidden, NOT_YOURS);
     }
     co_return Found::success(std::move(*media));
-}
-
-drogon::Task<> MediaService::removeUnreferencedFile(std::string storageKey) const {
-    // Content addresses are shared: two games with the same cover are one file, and the row
-    // going away says nothing about whether the picture is still in use. Asking first is what
-    // keeps a delete on one game from blanking the artwork on another.
-    const bool stillUsed = co_await media_.isStorageKeyReferenced(storageKey);
-    if (!stillUsed) {
-        store_.remove(storageKey);
-    }
-    co_return;
 }
 
 } // namespace launcher::services

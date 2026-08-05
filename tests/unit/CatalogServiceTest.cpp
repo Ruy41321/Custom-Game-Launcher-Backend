@@ -10,6 +10,7 @@
 #include "domain/Role.h"
 #include "services/CatalogService.h"
 #include "support/FakeCatalogRepositories.h"
+#include "support/TemporaryDirectory.h"
 
 namespace {
 
@@ -23,11 +24,14 @@ using launcher::services::CatalogService;
 using launcher::services::CreateBuildCommand;
 using launcher::services::CreateGameCommand;
 using launcher::services::CreateVersionCommand;
+using launcher::services::MediaReclaimer;
+using launcher::storage::MediaStore;
 using launcher::testing::FakeBuildRepository;
 using launcher::testing::FakeGameRepository;
 using launcher::testing::FakeGameVersionRepository;
 using launcher::testing::FakeLibraryRepository;
 using launcher::testing::FakeMediaRepository;
+using launcher::testing::TemporaryDirectory;
 
 namespace permissions = launcher::domain::permissions;
 
@@ -58,14 +62,35 @@ Actor administrator() {
 /// Keeps every fake alive for the whole test so the service's references stay valid.
 struct CatalogFixture {
     CatalogFixture()
-        : service(games, versions, builds, library, media) {}
+        : service(games, versions, builds, library, media, MediaReclaimer{media, store()}) {
+        // Stands in for the cascade from games onto game_media, which the real delete relies on.
+        games.media = &media;
+    }
 
+    TemporaryDirectory mediaRoot;
     FakeGameRepository games;
     FakeGameVersionRepository versions;
     FakeBuildRepository builds;
     FakeLibraryRepository library;
     FakeMediaRepository media;
     CatalogService service;
+
+    MediaStore store() const { return MediaStore{mediaRoot.path()}; }
+
+    /// Writes a picture and hangs a row off the game, exactly as an upload would.
+    std::string seedArtwork(const std::string& gameId, const std::string& bytes) {
+        auto stored = store().store(bytes, launcher::domain::ImageFormat::Png);
+        EXPECT_TRUE(stored.ok()) << stored.error().detail;
+
+        launcher::domain::GameMedia row;
+        row.gameId = gameId;
+        row.kind = launcher::domain::MediaKind::Cover;
+        row.storageKey = stored.value();
+        media.seed(row);
+        return stored.value();
+    }
+
+    bool artworkExists(const std::string& storageKey) const { return store().contains(storageKey); }
 
     Game seedGame(GameVisibility visibility, const std::string& owner = PUBLISHER) {
         Game game;
@@ -354,6 +379,89 @@ TEST(CatalogServiceTest, RefusesABuildWithoutTheUploadPermission) {
 
     ASSERT_FALSE(created.ok());
     EXPECT_EQ(created.error().code, ErrorCode::Forbidden);
+}
+
+// ---------------------------------------------------------------------------
+// Deleting a game
+// ---------------------------------------------------------------------------
+
+TEST(CatalogServiceTest, DeletesAGameAndTheArtworkNobodyElseShares) {
+    CatalogFixture fixture;
+    const auto game = fixture.seedGame(GameVisibility::Public);
+    const auto cover = fixture.seedArtwork(game.id, "\x89PNG\r\n\x1a\n only mine");
+
+    const auto removed = drogon::sync_wait(fixture.service.deleteGame(publisher(), game.id));
+
+    ASSERT_TRUE(removed.ok()) << removed.error().detail;
+    EXPECT_TRUE(fixture.games.games.empty());
+    EXPECT_FALSE(fixture.artworkExists(cover));
+}
+
+TEST(CatalogServiceTest, DeletingAGameLeavesAPictureAnotherGameStillUses) {
+    CatalogFixture fixture;
+    const auto mine = fixture.seedGame(GameVisibility::Public);
+    const auto theirs = fixture.seedGame(GameVisibility::Public);
+    const std::string bytes = "\x89PNG\r\n\x1a\n shared";
+    const auto cover = fixture.seedArtwork(mine.id, bytes);
+    ASSERT_EQ(fixture.seedArtwork(theirs.id, bytes), cover) << "the same bytes are one file";
+
+    ASSERT_TRUE(drogon::sync_wait(fixture.service.deleteGame(publisher(), mine.id)).ok());
+
+    // Content addresses are shared, so removing the file here would blank the other cover.
+    EXPECT_TRUE(fixture.artworkExists(cover));
+}
+
+TEST(CatalogServiceTest, DeletesAGameOtherAccountsHoldInTheirLibrary) {
+    CatalogFixture fixture;
+    const auto game = fixture.seedGame(GameVisibility::Public);
+    ASSERT_TRUE(drogon::sync_wait(fixture.service.addToLibrary(player(), game.id)).ok());
+
+    const auto removed = drogon::sync_wait(fixture.service.deleteGame(publisher(), game.id));
+
+    // A library entry is a bookmark, not a licence. Refusing here would let one stranger stop a
+    // publisher from ever withdrawing their own work.
+    ASSERT_TRUE(removed.ok()) << removed.error().detail;
+}
+
+TEST(CatalogServiceTest, RefusesToDeleteSomebodyElsesGame) {
+    CatalogFixture fixture;
+    const auto game = fixture.seedGame(GameVisibility::Public);
+
+    const auto removed = drogon::sync_wait(
+        fixture.service.deleteGame(publisher(launcher::common::randomUuid()), game.id));
+
+    ASSERT_FALSE(removed.ok());
+    EXPECT_EQ(removed.error().code, ErrorCode::Forbidden);
+    EXPECT_EQ(fixture.games.games.size(), 1U);
+}
+
+TEST(CatalogServiceTest, ADraftOfAnotherPublisherIsMissingRatherThanRefused) {
+    CatalogFixture fixture;
+    const auto draft = fixture.seedGame(GameVisibility::Draft);
+
+    const auto removed = drogon::sync_wait(
+        fixture.service.deleteGame(publisher(launcher::common::randomUuid()), draft.id));
+
+    ASSERT_FALSE(removed.ok());
+    EXPECT_EQ(removed.error().code, ErrorCode::NotFound);
+}
+
+TEST(CatalogServiceTest, LetsAnAdministratorDeleteAnyGame) {
+    CatalogFixture fixture;
+    const auto game = fixture.seedGame(GameVisibility::Public);
+
+    EXPECT_TRUE(drogon::sync_wait(fixture.service.deleteGame(administrator(), game.id)).ok());
+}
+
+TEST(CatalogServiceTest, ASecondDeleteReportsTheGameAsMissing) {
+    CatalogFixture fixture;
+    const auto game = fixture.seedGame(GameVisibility::Public);
+    ASSERT_TRUE(drogon::sync_wait(fixture.service.deleteGame(publisher(), game.id)).ok());
+
+    const auto again = drogon::sync_wait(fixture.service.deleteGame(publisher(), game.id));
+
+    ASSERT_FALSE(again.ok());
+    EXPECT_EQ(again.error().code, ErrorCode::NotFound);
 }
 
 // ---------------------------------------------------------------------------

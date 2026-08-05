@@ -11,6 +11,7 @@
 #include "domain/Media.h"
 #include "repositories/IGameRepository.h"
 #include "repositories/IMediaRepository.h"
+#include "services/MediaReclaimer.h"
 #include "storage/MediaStore.h"
 
 namespace launcher::services {
@@ -59,12 +60,11 @@ class MediaService {
     drogon::Task<common::Result<domain::GameMedia>> editableMedia(domain::Actor actor,
                                                                   std::string mediaId) const;
 
-    /// Deletes the file behind a storage key, but only once no row points at it.
-    drogon::Task<> removeUnreferencedFile(std::string storageKey) const;
-
     const repositories::IGameRepository& games_;
     const repositories::IMediaRepository& media_;
     storage::MediaStore store_;
+    /// Declared after the store because it is built from it.
+    MediaReclaimer reclaimer_;
     MediaLimits limits_;
 };
 

@@ -158,6 +158,19 @@ GameController::updateGame(drogon::HttpRequestPtr request,
 }
 
 drogon::Task<>
+GameController::deleteGame(drogon::HttpRequestPtr request,
+                           std::function<void(const drogon::HttpResponsePtr&)> callback,
+                           std::string idOrSlug) {
+    auto removed = co_await catalog().deleteGame(actorOf(request), std::move(idOrSlug));
+    if (!removed.ok()) {
+        fail(removed.error());
+    }
+
+    callback(noContentResponse(request));
+    co_return;
+}
+
+drogon::Task<>
 GameController::createVersion(drogon::HttpRequestPtr request,
                               std::function<void(const drogon::HttpResponsePtr&)> callback,
                               std::string idOrSlug) {

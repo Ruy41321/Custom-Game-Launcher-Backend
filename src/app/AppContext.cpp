@@ -63,8 +63,13 @@ void AppContext::initialize(AppConfig config, drogon::orm::DbClientPtr database)
                                                            *tokenService_,
                                                            std::move(authSettings));
 
+    // One reclaimer, copied into both services that delete artwork, so the "ask before removing
+    // a shared file" rule has exactly one implementation.
+    const services::MediaReclaimer artworkReclaimer{
+        *media_, storage::MediaStore{std::filesystem::path{config_.media.root}}};
+
     catalogService_ = std::make_unique<services::CatalogService>(
-        *games_, *gameVersions_, *builds_, *library_, *media_);
+        *games_, *gameVersions_, *builds_, *library_, *media_, artworkReclaimer);
 
     patchNoteService_ =
         std::make_unique<services::PatchNoteService>(*games_, *gameVersions_, *patchNotes_);

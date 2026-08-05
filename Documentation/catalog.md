@@ -20,6 +20,7 @@ second set of visibility rules to keep correct for no gain. Every response carri
 | POST | `/api/v1/games` | `game.publish` | Create a game |
 | GET | `/api/v1/games/{idOrSlug}` | `game.read` | Game detail with versions and builds |
 | PATCH | `/api/v1/games/{idOrSlug}` | `game.publish` + ownership | Partial update |
+| DELETE | `/api/v1/games/{idOrSlug}` | ownership | Remove the game and everything under it — see [storage-lifecycle.md](storage-lifecycle.md) |
 | GET | `/api/v1/me/games` | `game.publish` | The publisher's own games, drafts included |
 | POST | `/api/v1/games/{id}/versions` | `game.publish` + ownership | Create a version |
 | POST | `/api/v1/games/{id}/versions/{versionId}/builds` | `build.upload` + ownership | Create a build |
@@ -100,6 +101,10 @@ fields. `releaseDate` is the one field where an explicit empty string clears the
 mutating path goes through it. Ownership is *publisher or `admin.games.manage`* — written that
 way rather than as a bare admin check, so a moderation permission never becomes a way to skip
 the ownership rule for ordinary publishers.
+
+`deleteGame` goes through the same helper, so the delete cannot disagree with the patch about
+who owns what. What it does with the rows, the files and other people's installs is in
+[storage-lifecycle.md](storage-lifecycle.md).
 
 Creating a build additionally checks that the version belongs to the game named in the path.
 Without that check a publisher could hang a build off somebody else's version by pairing it

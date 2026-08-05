@@ -71,12 +71,14 @@ CatalogService::CatalogService(const repositories::IGameRepository& games,
                                const repositories::IGameVersionRepository& versions,
                                const repositories::IBuildRepository& builds,
                                const repositories::ILibraryRepository& library,
-                               const repositories::IMediaRepository& media)
+                               const repositories::IMediaRepository& media,
+                               MediaReclaimer artwork)
     : games_(games),
       versions_(versions),
       builds_(builds),
       library_(library),
-      media_(media) {}
+      media_(media),
+      artwork_(std::move(artwork)) {}
 
 drogon::Task<Result<Game>> CatalogService::createGame(Actor actor,
                                                       CreateGameCommand command) const {
@@ -353,6 +355,30 @@ CatalogService::deleteVersion(Actor actor, std::string gameId, std::string versi
     if (!co_await versions_.remove(versionId)) {
         co_return VoidResult::failure(ErrorCode::NotFound, NO_SUCH_VERSION);
     }
+    co_return VoidResult::success();
+}
+
+drogon::Task<VoidResult> CatalogService::deleteGame(Actor actor, std::string idOrSlug) const {
+    auto game = co_await editableGame(actor, std::move(idOrSlug));
+    if (!game.ok()) {
+        co_return VoidResult::failure(game.error());
+    }
+
+    auto removed = co_await games_.remove(game.value().id);
+    // A game that was there a moment ago and is not now was deleted by somebody else holding
+    // the same permission. The end state is what was asked for, but reporting it as missing is
+    // the honest answer and matches every other delete on this surface.
+    if (!removed.has_value()) {
+        co_return VoidResult::failure(ErrorCode::NotFound, NO_SUCH_GAME);
+    }
+
+    // The rows are gone; the pictures may not be, because two games can share one. The blobs of
+    // the builds that went with it are a different question, answered later by the collector.
+    co_await artwork_.reclaimAll(std::move(removed->mediaStorageKeys));
+
+    spdlog::info("deleted game id={} by actor={}",
+                 common::escapeJson(game.value().id),
+                 common::escapeJson(actor.userId));
     co_return VoidResult::success();
 }
 

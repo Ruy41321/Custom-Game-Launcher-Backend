@@ -26,6 +26,143 @@ namespace launcher::testing {
 /// The interface methods are const because callers only read through them, so the recorded
 /// state is mutable.
 
+class FakeMediaRepository : public repositories::IMediaRepository {
+  public:
+    mutable std::vector<domain::GameMedia> media;
+
+    domain::GameMedia seed(domain::GameMedia row) const {
+        if (row.id.empty()) {
+            row.id = common::randomUuid();
+        }
+        media.push_back(row);
+        return row;
+    }
+
+    /// Drops every row of one game and reports the storage keys they held, as the cascade from
+    /// `games` does. Not part of the interface: nothing in production removes artwork this way,
+    /// because there the database does it.
+    std::vector<std::string> cascadeFromGame(const std::string& gameId) const {
+        std::vector<std::string> keys;
+        for (const auto& row : media) {
+            if (row.gameId == gameId) {
+                keys.push_back(row.storageKey);
+            }
+        }
+        media.erase(std::remove_if(media.begin(),
+                                   media.end(),
+                                   [&](const auto& row) { return row.gameId == gameId; }),
+                    media.end());
+        return keys;
+    }
+
+    drogon::Task<common::Result<Stored>> create(domain::NewGameMedia candidate) const override {
+        Stored stored;
+
+        // Models the partial unique index: a second cover replaces the first, a screenshot
+        // never does. A fake that let two covers coexist would let a service bug through.
+        if (domain::isSingletonKind(candidate.kind)) {
+            const auto existing = std::find_if(media.begin(), media.end(), [&](const auto& row) {
+                return row.gameId == candidate.gameId && row.kind == candidate.kind;
+            });
+            if (existing != media.end()) {
+                if (existing->storageKey != candidate.storageKey) {
+                    stored.replacedStorageKey = existing->storageKey;
+                }
+                existing->storageKey = candidate.storageKey;
+                existing->sha256 = candidate.sha256;
+                existing->contentType = candidate.contentType;
+                existing->sizeBytes = candidate.sizeBytes;
+                existing->altText = candidate.altText;
+                existing->sortOrder = candidate.sortOrder;
+                stored.media = *existing;
+                co_return common::Result<Stored>::success(std::move(stored));
+            }
+        }
+
+        domain::GameMedia row;
+        row.id = common::randomUuid();
+        row.gameId = candidate.gameId;
+        row.kind = candidate.kind;
+        row.storageKey = candidate.storageKey;
+        row.sha256 = candidate.sha256;
+        row.contentType = candidate.contentType;
+        row.sizeBytes = candidate.sizeBytes;
+        row.altText = candidate.altText;
+        row.sortOrder = candidate.sortOrder;
+        row.createdAt = "2026-01-01T00:00:00Z";
+        media.push_back(row);
+
+        stored.media = row;
+        co_return common::Result<Stored>::success(std::move(stored));
+    }
+
+    drogon::Task<std::vector<domain::GameMedia>> listForGame(std::string gameId) const override {
+        std::vector<domain::GameMedia> found;
+        for (const auto& row : media) {
+            if (row.gameId == gameId) {
+                found.push_back(row);
+            }
+        }
+        co_return found;
+    }
+
+    drogon::Task<std::optional<domain::GameMedia>> findById(std::string id) const override {
+        for (const auto& row : media) {
+            if (row.id == id) {
+                co_return row;
+            }
+        }
+        co_return std::nullopt;
+    }
+
+    drogon::Task<std::optional<domain::GameMedia>>
+    update(std::string id, domain::GameMediaUpdate changes) const override {
+        for (auto& row : media) {
+            if (row.id != id) {
+                continue;
+            }
+            if (changes.altText.has_value()) {
+                row.altText = *changes.altText;
+            }
+            if (changes.sortOrder.has_value()) {
+                row.sortOrder = *changes.sortOrder;
+            }
+            co_return row;
+        }
+        co_return std::nullopt;
+    }
+
+    drogon::Task<std::optional<domain::GameMedia>> remove(std::string id) const override {
+        const auto found =
+            std::find_if(media.begin(), media.end(), [&](const auto& row) { return row.id == id; });
+        if (found == media.end()) {
+            co_return std::nullopt;
+        }
+        const auto removed = *found;
+        media.erase(found);
+        co_return removed;
+    }
+
+    drogon::Task<int> countForGame(std::string gameId, domain::MediaKind kind) const override {
+        int total = 0;
+        for (const auto& row : media) {
+            if (row.gameId == gameId && row.kind == kind) {
+                ++total;
+            }
+        }
+        co_return total;
+    }
+
+    drogon::Task<bool> isStorageKeyReferenced(std::string storageKey) const override {
+        for (const auto& row : media) {
+            if (row.storageKey == storageKey) {
+                co_return true;
+            }
+        }
+        co_return false;
+    }
+};
+
 class FakeGameRepository : public repositories::IGameRepository {
   public:
     mutable std::vector<domain::Game> games;
@@ -132,6 +269,27 @@ class FakeGameRepository : public repositories::IGameRepository {
         page.items.assign(matched.begin() + static_cast<std::ptrdiff_t>(begin),
                           matched.begin() + static_cast<std::ptrdiff_t>(end));
         co_return page;
+    }
+
+    /// Stands in for the `ON DELETE CASCADE` from games onto game_media. Wired by a fixture
+    /// that also holds a media fake; left null, a delete simply reports no artwork. Without it
+    /// `isStorageKeyReferenced` would keep answering true after the game has gone, and the
+    /// tests about shared pictures would prove nothing.
+    mutable FakeMediaRepository* media{nullptr};
+
+    drogon::Task<std::optional<repositories::RemovedGame>> remove(std::string id) const override {
+        const auto found = std::find_if(
+            games.begin(), games.end(), [&](const auto& game) { return game.id == id; });
+        if (found == games.end()) {
+            co_return std::nullopt;
+        }
+        games.erase(found);
+
+        repositories::RemovedGame removed;
+        if (media != nullptr) {
+            removed.mediaStorageKeys = media->cascadeFromGame(id);
+        }
+        co_return removed;
     }
 };
 
@@ -473,126 +631,6 @@ class FakeLibraryRepository : public repositories::ILibraryRepository {
     drogon::Task<std::vector<domain::Game>> list(std::string userId) const override {
         const auto found = gamesByUser.find(userId);
         co_return found == gamesByUser.end() ? std::vector<domain::Game>{} : found->second;
-    }
-};
-
-class FakeMediaRepository : public repositories::IMediaRepository {
-  public:
-    mutable std::vector<domain::GameMedia> media;
-
-    domain::GameMedia seed(domain::GameMedia row) const {
-        if (row.id.empty()) {
-            row.id = common::randomUuid();
-        }
-        media.push_back(row);
-        return row;
-    }
-
-    drogon::Task<common::Result<Stored>> create(domain::NewGameMedia candidate) const override {
-        Stored stored;
-
-        // Models the partial unique index: a second cover replaces the first, a screenshot
-        // never does. A fake that let two covers coexist would let a service bug through.
-        if (domain::isSingletonKind(candidate.kind)) {
-            const auto existing = std::find_if(media.begin(), media.end(), [&](const auto& row) {
-                return row.gameId == candidate.gameId && row.kind == candidate.kind;
-            });
-            if (existing != media.end()) {
-                if (existing->storageKey != candidate.storageKey) {
-                    stored.replacedStorageKey = existing->storageKey;
-                }
-                existing->storageKey = candidate.storageKey;
-                existing->sha256 = candidate.sha256;
-                existing->contentType = candidate.contentType;
-                existing->sizeBytes = candidate.sizeBytes;
-                existing->altText = candidate.altText;
-                existing->sortOrder = candidate.sortOrder;
-                stored.media = *existing;
-                co_return common::Result<Stored>::success(std::move(stored));
-            }
-        }
-
-        domain::GameMedia row;
-        row.id = common::randomUuid();
-        row.gameId = candidate.gameId;
-        row.kind = candidate.kind;
-        row.storageKey = candidate.storageKey;
-        row.sha256 = candidate.sha256;
-        row.contentType = candidate.contentType;
-        row.sizeBytes = candidate.sizeBytes;
-        row.altText = candidate.altText;
-        row.sortOrder = candidate.sortOrder;
-        row.createdAt = "2026-01-01T00:00:00Z";
-        media.push_back(row);
-
-        stored.media = row;
-        co_return common::Result<Stored>::success(std::move(stored));
-    }
-
-    drogon::Task<std::vector<domain::GameMedia>> listForGame(std::string gameId) const override {
-        std::vector<domain::GameMedia> found;
-        for (const auto& row : media) {
-            if (row.gameId == gameId) {
-                found.push_back(row);
-            }
-        }
-        co_return found;
-    }
-
-    drogon::Task<std::optional<domain::GameMedia>> findById(std::string id) const override {
-        for (const auto& row : media) {
-            if (row.id == id) {
-                co_return row;
-            }
-        }
-        co_return std::nullopt;
-    }
-
-    drogon::Task<std::optional<domain::GameMedia>>
-    update(std::string id, domain::GameMediaUpdate changes) const override {
-        for (auto& row : media) {
-            if (row.id != id) {
-                continue;
-            }
-            if (changes.altText.has_value()) {
-                row.altText = *changes.altText;
-            }
-            if (changes.sortOrder.has_value()) {
-                row.sortOrder = *changes.sortOrder;
-            }
-            co_return row;
-        }
-        co_return std::nullopt;
-    }
-
-    drogon::Task<std::optional<domain::GameMedia>> remove(std::string id) const override {
-        const auto found =
-            std::find_if(media.begin(), media.end(), [&](const auto& row) { return row.id == id; });
-        if (found == media.end()) {
-            co_return std::nullopt;
-        }
-        const auto removed = *found;
-        media.erase(found);
-        co_return removed;
-    }
-
-    drogon::Task<int> countForGame(std::string gameId, domain::MediaKind kind) const override {
-        int total = 0;
-        for (const auto& row : media) {
-            if (row.gameId == gameId && row.kind == kind) {
-                ++total;
-            }
-        }
-        co_return total;
-    }
-
-    drogon::Task<bool> isStorageKeyReferenced(std::string storageKey) const override {
-        for (const auto& row : media) {
-            if (row.storageKey == storageKey) {
-                co_return true;
-            }
-        }
-        co_return false;
     }
 };
 

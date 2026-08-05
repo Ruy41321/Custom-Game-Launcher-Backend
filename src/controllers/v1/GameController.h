@@ -39,6 +39,10 @@ class GameController : public drogon::HttpController<GameController> {
                   "/api/v1/games/{1}",
                   drogon::Patch,
                   "launcher::filters::JwtAuthFilter");
+    ADD_METHOD_TO(GameController::deleteGame,
+                  "/api/v1/games/{1}",
+                  drogon::Delete,
+                  "launcher::filters::JwtAuthFilter");
     ADD_METHOD_TO(GameController::createVersion,
                   "/api/v1/games/{1}/versions",
                   drogon::Post,
@@ -67,6 +71,10 @@ class GameController : public drogon::HttpController<GameController> {
                               std::string idOrSlug);
 
     drogon::Task<> updateGame(drogon::HttpRequestPtr request,
+                              std::function<void(const drogon::HttpResponsePtr&)> callback,
+                              std::string idOrSlug);
+
+    drogon::Task<> deleteGame(drogon::HttpRequestPtr request,
                               std::function<void(const drogon::HttpResponsePtr&)> callback,
                               std::string idOrSlug);
 

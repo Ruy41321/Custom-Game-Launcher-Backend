@@ -14,6 +14,7 @@
 #include "repositories/IGameVersionRepository.h"
 #include "repositories/ILibraryRepository.h"
 #include "repositories/IMediaRepository.h"
+#include "services/MediaReclaimer.h"
 
 namespace launcher::services {
 
@@ -50,7 +51,8 @@ class CatalogService {
                    const repositories::IGameVersionRepository& versions,
                    const repositories::IBuildRepository& builds,
                    const repositories::ILibraryRepository& library,
-                   const repositories::IMediaRepository& media);
+                   const repositories::IMediaRepository& media,
+                   MediaReclaimer artwork);
 
     drogon::Task<common::Result<domain::Game>> createGame(domain::Actor actor,
                                                           CreateGameCommand command) const;
@@ -84,6 +86,16 @@ class CatalogService {
     drogon::Task<common::VoidResult>
     deleteVersion(domain::Actor actor, std::string gameId, std::string versionId) const;
 
+    /// Removes a game and everything that hangs off it: versions, builds, manifest rows,
+    /// artwork, patch notes, library entries and its download history.
+    ///
+    /// Allowed even when other accounts hold the game in their library. A library entry is a
+    /// bookmark, not a licence, and refusing would let one stranger freeze a publisher's ability
+    /// to withdraw their own work. What is already installed keeps working; what stops working
+    /// is updating and verifying it, and both answer 404 rather than 403 afterwards, because
+    /// from then on there is genuinely no such game.
+    drogon::Task<common::VoidResult> deleteGame(domain::Actor actor, std::string idOrSlug) const;
+
     drogon::Task<common::VoidResult> addToLibrary(domain::Actor actor, std::string gameId) const;
 
     drogon::Task<common::VoidResult> removeFromLibrary(domain::Actor actor,
@@ -106,8 +118,10 @@ class CatalogService {
     const repositories::IBuildRepository& builds_;
     const repositories::ILibraryRepository& library_;
     /// Read-only here: the detail page is where a game's artwork is listed, but everything
-    /// that *changes* artwork lives in MediaService, which also owns the files.
+    /// that *changes* artwork lives in MediaService — except the one case where a game goes and
+    /// takes its pictures with it, which is what the reclaimer below is for.
     const repositories::IMediaRepository& media_;
+    MediaReclaimer artwork_;
 };
 
 } // namespace launcher::services

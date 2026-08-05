@@ -39,6 +39,16 @@ struct GamePage {
     int64_t total{0};
 };
 
+/// What deleting a game left for the caller to finish.
+///
+/// Versions, builds, manifest rows, artwork rows, patch notes and library entries all go by
+/// cascade, and the blobs those manifests named are the collector's problem one grace period
+/// later. Artwork files are not: they are removed at delete time, so the keys the deleted rows
+/// held have to come back out of the statement that removed them.
+struct RemovedGame {
+    std::vector<std::string> mediaStorageKeys;
+};
+
 /// Persistence for the catalog. Every parameter is taken by value — a coroutine's reference
 /// parameters dangle as soon as it first suspends.
 class IGameRepository {
@@ -58,6 +68,9 @@ class IGameRepository {
                                                              domain::GameUpdate changes) const = 0;
 
     virtual drogon::Task<GamePage> search(GameQuery query) const = 0;
+
+    /// Nullopt when no game has that id, so a second delete is a 404 rather than a success.
+    virtual drogon::Task<std::optional<RemovedGame>> remove(std::string id) const = 0;
 };
 
 } // namespace launcher::repositories

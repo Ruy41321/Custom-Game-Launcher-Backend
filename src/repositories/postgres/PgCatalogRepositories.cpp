@@ -2,6 +2,7 @@
 
 #include <json/json.h>
 
+#include <sstream>
 #include <utility>
 
 #include "repositories/postgres/PgSupport.h"
@@ -148,6 +149,20 @@ domain::Build mapBuild(const drogon::orm::Row& row) {
     build.createdAt = row["created_at"].as<std::string>();
     build.readyAt = row["ready_at"].as<std::string>();
     return build;
+}
+
+/// Unpacks a `string_agg(..., ',')`. Safe for storage keys specifically: MediaStore mints them
+/// as `ab/cd/<64 hex>.<ext>`, so a comma cannot occur inside one.
+std::vector<std::string> splitStorageKeys(const std::string& packed) {
+    std::vector<std::string> keys;
+    std::istringstream stream(packed);
+    std::string key;
+    while (std::getline(stream, key, ',')) {
+        if (!key.empty()) {
+            keys.push_back(key);
+        }
+    }
+    return keys;
 }
 
 const char* orderByFor(GameSort sort) {
@@ -300,6 +315,34 @@ drogon::Task<GamePage> PgGameRepository::search(GameQuery query) const {
         page.items.push_back(mapGame(row));
     }
     co_return page;
+}
+
+drogon::Task<std::optional<RemovedGame>> PgGameRepository::remove(std::string id) const {
+    // `doomed` reads the pre-command snapshot, which is what makes it see the artwork rows the
+    // DELETE is about to cascade away — a statement's sub-queries never observe one another's
+    // effects. Reading them afterwards would find nothing, and reading them in a separate
+    // statement first would open a window in which a new picture could be uploaded and then
+    // have its file deleted from under it.
+    const auto rows = co_await database_->execSqlCoro(
+        R"(
+            WITH doomed AS (
+                SELECT storage_key FROM game_media WHERE game_id = $1::uuid
+            ),
+            deleted AS (
+                DELETE FROM games WHERE id = $1::uuid RETURNING id
+            )
+            SELECT (SELECT count(*) FROM deleted) AS removed,
+                   COALESCE((SELECT string_agg(storage_key, ',') FROM doomed), '') AS media_keys
+        )",
+        id);
+
+    if (rows.empty() || rows[0]["removed"].as<int64_t>() == 0) {
+        co_return std::nullopt;
+    }
+
+    RemovedGame removed;
+    removed.mediaStorageKeys = splitStorageKeys(rows[0]["media_keys"].as<std::string>());
+    co_return removed;
 }
 
 // ---------------------------------------------------------------------------

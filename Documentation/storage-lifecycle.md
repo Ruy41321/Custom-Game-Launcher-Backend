@@ -30,6 +30,7 @@ So deletion happens in two steps, deliberately far apart in time:
 |---|---|---|---|
 | DELETE | `/api/v1/builds/{buildId}` | `build.upload` + ownership | The build and its `build_files` rows |
 | DELETE | `/api/v1/games/{gameId}/versions/{versionId}` | `game.publish` + ownership | The version and, by cascade, every build under it |
+| DELETE | `/api/v1/games/{idOrSlug}` | ownership | The game and everything under it — see below |
 
 Both follow the catalog's 404-not-403 rule. A build whose game the caller cannot see is
 reported missing rather than refused, using the same `domain::mayReadBuild` /
@@ -41,8 +42,54 @@ Neither route touches the filesystem. That is not laziness, it is the only order
 safe with content-addressed storage: the same blob may still belong to three other builds, and
 the question of whether it does is asked once, later, by the collector.
 
-Deleting a *game* is not possible. It belongs with account erasure, because it is the same
-question — what survives whom — and is scheduled with the GDPR work.
+## Deleting a game
+
+One `DELETE` removes the game row, and the database removes everything hanging off it: versions,
+builds, `build_files`, artwork rows, patch notes, library entries, and the game's
+`download_events`. The blobs those manifests named are left where they are, for the collector to
+reclaim one grace period later — exactly as when a single build goes.
+
+Three decisions are worth stating, because none of them is forced by the schema.
+
+### It is allowed while other people hold the game in their library
+
+A library entry is a bookmark, not a licence. Nothing was paid for, and refusing while any
+entry exists would mean one stranger adding a game could permanently stop its publisher from
+withdrawing their own work. So `user_games` cascades away and the delete goes through.
+
+What was already **installed** keeps working: an install is a directory of files on somebody's
+machine, and this server never knew about it. What stops working is *updating* and *verifying*
+it, and both answer **404** rather than 403, because after the delete there genuinely is no such
+game. The client is expected to show that as "no longer available", never as a permissions
+problem — the same rule the catalog applies to drafts.
+
+A publisher who wants a title to stop being visible without destroying it has `visibility:
+"draft"` already, which is why this route does not need a softer form.
+
+### The artwork goes with it, the shared picture does not
+
+Images are content-addressed, so two games with the same cover are one file, and the row going
+away says nothing about whether the bytes are still in use. The delete therefore returns the
+storage keys of the rows it cascaded away and asks about each one before touching the disk —
+the same question `MediaService` asks when a publisher removes one picture, asked from the same
+place: `services::MediaReclaimer`, which both services hold.
+
+The keys come out of the *same statement* that removes the game, from a sub-query reading the
+pre-command snapshot. Reading them afterwards would find nothing, and reading them in a separate
+statement first would open a window in which a new cover could be uploaded and then have its
+file deleted out from under it.
+
+### The download history goes too
+
+`download_events.game_id` is `ON DELETE CASCADE`, so a deleted game takes its rows out of the
+operator's analytics. That is the schema's answer rather than a preference, and it is a real
+consequence: totals on the admin console fall when a publisher deletes a game. The alternative —
+keeping events whose subject no longer exists — would need a migration and a report that can
+name a game it cannot join to.
+
+Note the contrast with account erasure, where `user_id` goes null and the row survives: an
+erasure removes a *person* from data that is still about something, and this removes the thing
+itself.
 
 ## The collector
 
