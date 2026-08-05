@@ -92,12 +92,17 @@ try {
         Write-Step 'Configuring build/'
         # VCPKG_INSTALLED_DIR points into the image, where the dependencies were installed;
         # VCPKG_MANIFEST_INSTALL is off so configuring does not try to install them again.
+        #
+        # Every -D is quoted. Windows PowerShell 5.1 splits an unquoted native argument that
+        # begins with a dash and carries a path, so the toolchain file arrived as two arguments
+        # and CMake reported "could not find toolchain file .../vcpkg" plus a stray ".cmake" —
+        # which reads like a broken image rather than a quoting problem.
         docker run --rm -v "${repoRoot}:/work" -w /work $image `
-            cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug `
-                -DCMAKE_TOOLCHAIN_FILE=/opt/vcpkg/scripts/buildsystems/vcpkg.cmake `
-                -DVCPKG_INSTALLED_DIR=/src/vcpkg_installed `
-                -DVCPKG_MANIFEST_INSTALL=OFF -DVCPKG_MANIFEST_FEATURES=tests `
-                -DLAUNCHER_BUILD_TESTS=ON
+            cmake -B build -G Ninja '-DCMAKE_BUILD_TYPE=Debug' `
+                '-DCMAKE_TOOLCHAIN_FILE=/opt/vcpkg/scripts/buildsystems/vcpkg.cmake' `
+                '-DVCPKG_INSTALLED_DIR=/src/vcpkg_installed' `
+                '-DVCPKG_MANIFEST_INSTALL=OFF' '-DVCPKG_MANIFEST_FEATURES=tests' `
+                '-DLAUNCHER_BUILD_TESTS=ON'
         if ($LASTEXITCODE -ne 0) { throw "CMake configuration failed." }
     }
 
