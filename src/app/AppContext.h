@@ -6,6 +6,7 @@
 
 #include "app/Config.h"
 #include "common/RateLimiter.h"
+#include "repositories/IAccountRepository.h"
 #include "repositories/IAdminUserRepository.h"
 #include "repositories/IAnalyticsRepository.h"
 #include "repositories/IAuditRepository.h"
@@ -22,6 +23,7 @@
 #include "repositories/IUploadSessionRepository.h"
 #include "repositories/IUserRepository.h"
 #include "repositories/IUserTokenRepository.h"
+#include "services/AccountService.h"
 #include "services/AdminUserService.h"
 #include "services/AnalyticsService.h"
 #include "services/AuthService.h"
@@ -56,6 +58,8 @@ class AppContext {
     const drogon::orm::DbClientPtr& database() const;
 
     const services::AuthService& authService() const;
+
+    const services::AccountService& accountService() const;
 
     const services::ITokenService& tokenService() const;
 
@@ -98,6 +102,7 @@ class AppContext {
     drogon::orm::DbClientPtr database_;
 
     std::unique_ptr<repositories::IUserRepository> users_;
+    std::unique_ptr<repositories::IAccountRepository> accounts_;
     std::unique_ptr<repositories::IRoleRepository> roles_;
     std::unique_ptr<repositories::IRefreshTokenRepository> refreshTokens_;
     std::unique_ptr<repositories::IUserTokenRepository> userTokens_;
@@ -117,6 +122,7 @@ class AppContext {
     std::unique_ptr<services::IPasswordHasher> passwordHasher_;
     std::unique_ptr<services::ITokenService> tokenService_;
     std::unique_ptr<services::AuthService> authService_;
+    std::unique_ptr<services::AccountService> accountService_;
     std::unique_ptr<services::CatalogService> catalogService_;
     std::unique_ptr<services::AdminUserService> adminUserService_;
     std::unique_ptr<services::AnalyticsService> analyticsService_;

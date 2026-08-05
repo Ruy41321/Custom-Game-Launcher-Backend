@@ -21,6 +21,7 @@ void AppContext::initialize(AppConfig config, drogon::orm::DbClientPtr database)
     database_ = std::move(database);
 
     users_ = std::make_unique<repositories::postgres::PgUserRepository>(database_);
+    accounts_ = std::make_unique<repositories::postgres::PgAccountRepository>(database_);
     roles_ = std::make_unique<repositories::postgres::PgRoleRepository>(database_);
     refreshTokens_ = std::make_unique<repositories::postgres::PgRefreshTokenRepository>(database_);
     userTokens_ = std::make_unique<repositories::postgres::PgUserTokenRepository>(database_);
@@ -67,6 +68,12 @@ void AppContext::initialize(AppConfig config, drogon::orm::DbClientPtr database)
     // a shared file" rule has exactly one implementation.
     const services::MediaReclaimer artworkReclaimer{
         *media_, storage::MediaStore{std::filesystem::path{config_.media.root}}};
+
+    // Reads the account through IUserRepository and changes it through IAccountRepository:
+    // the erasing statement carries its own audit entry, which registration has no business
+    // carrying — the same split D36 makes for the administrative surface.
+    accountService_ = std::make_unique<services::AccountService>(
+        *users_, *accounts_, *adminUsers_, *passwordHasher_);
 
     catalogService_ = std::make_unique<services::CatalogService>(
         *games_, *gameVersions_, *builds_, *library_, *media_, artworkReclaimer);
@@ -153,6 +160,11 @@ const services::ITokenService& AppContext::tokenService() const {
     return *tokenService_;
 }
 
+const services::AccountService& AppContext::accountService() const {
+    requireInitialized();
+    return *accountService_;
+}
+
 const services::CatalogService& AppContext::catalogService() const {
     requireInitialized();
     return *catalogService_;
@@ -210,6 +222,7 @@ void AppContext::reset() {
     adminUserService_.reset();
     catalogService_.reset();
     authService_.reset();
+    accountService_.reset();
     tokenService_.reset();
     passwordHasher_.reset();
     downloads_.reset();
@@ -227,6 +240,7 @@ void AppContext::reset() {
     userTokens_.reset();
     refreshTokens_.reset();
     roles_.reset();
+    accounts_.reset();
     users_.reset();
     database_.reset();
     config_ = AppConfig{};

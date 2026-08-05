@@ -2,6 +2,8 @@
 
 #include <utility>
 
+#include "repositories/postgres/PgSupport.h"
+
 namespace launcher::repositories {
 
 const char* toDatabaseValue(UserTokenPurpose purpose) {
@@ -140,6 +142,86 @@ drogon::Task<void> PgUserRepository::releaseUpload(std::string userId, int64_t b
         userId,
         std::to_string(bytes));
     co_return;
+}
+
+// ---------------------------------------------------------------------------
+// Erasure
+// ---------------------------------------------------------------------------
+
+PgAccountRepository::PgAccountRepository(drogon::orm::DbClientPtr database)
+    : database_(std::move(database)) {}
+
+drogon::Task<bool> PgAccountRepository::erase(std::string userId,
+                                              ErasedIdentity identity,
+                                              domain::NewAuditEntry audit) const {
+    // One statement, because an erasure is exactly the change that must not be able to half
+    // happen: an audit entry appended afterwards can fail on its own, and what it leaves is an
+    // irreversible change nobody can attribute. Every arm below selects from `anonymised`, so a
+    // statement that changed nothing writes nothing either.
+    //
+    // The guard `email <> $2` is what makes a second erasure a no-op rather than a second audit
+    // row: the placeholder address is derived from the account's id, so an account that already
+    // holds it has already been through here.
+    //
+    // Not touched, on purpose:
+    //   * games, patch notes and the audit trail keep pointing at the row, which is now
+    //     anonymous — that is what anonymising rather than deleting is *for*, and
+    //     `games.publisher_user_id` is ON DELETE RESTRICT anyway;
+    //   * `blobs.uploaded_by_user_id`, so the collector still knows whose quota to refund;
+    //   * `upload_sessions`, whose staging files are discarded by the sweeper when it expires
+    //     the session — deleting the rows here would strand those files on disk with nothing
+    //     left to find them.
+    const auto rows = co_await database_->execSqlCoro(
+        R"(
+            WITH anonymised AS (
+                UPDATE users SET
+                    email             = $2,
+                    display_name      = $3,
+                    password_hash     = $4,
+                    email_verified_at = NULL,
+                    last_login_at     = NULL,
+                    is_active         = false
+                WHERE id = $1::uuid AND email <> $2
+                RETURNING id
+            ),
+            sessions AS (
+                DELETE FROM refresh_tokens
+                WHERE user_id = $1::uuid AND EXISTS (SELECT 1 FROM anonymised)
+            ),
+            links AS (
+                DELETE FROM user_tokens
+                WHERE user_id = $1::uuid AND EXISTS (SELECT 1 FROM anonymised)
+            ),
+            shelf AS (
+                DELETE FROM user_games
+                WHERE user_id = $1::uuid AND EXISTS (SELECT 1 FROM anonymised)
+            ),
+            events AS (
+                UPDATE download_events SET user_id = NULL
+                WHERE user_id = $1::uuid AND EXISTS (SELECT 1 FROM anonymised)
+            ),
+            recorded AS (
+                INSERT INTO account_deletion_requests (user_id, status, reason, processed_at)
+                SELECT id, 'completed', $5, now() FROM anonymised
+            ),
+            logged AS (
+                INSERT INTO audit_log (actor_user_id, action, entity_type, entity_id, metadata)
+                SELECT NULLIF($6, '')::uuid, $7, $8, $9, $10::jsonb FROM anonymised
+            )
+            SELECT count(*) AS erased FROM anonymised
+        )",
+        userId,
+        identity.email,
+        identity.displayName,
+        identity.passwordHash,
+        identity.reason,
+        audit.actorUserId,
+        audit.action,
+        audit.entityType,
+        audit.entityId,
+        auditMetadataJson(audit.metadata));
+
+    co_return !rows.empty() && rows[0]["erased"].as<int64_t>() > 0;
 }
 
 // ---------------------------------------------------------------------------

@@ -19,6 +19,12 @@ All under `/api/v1/auth`. Every response — success or failure — carries `X-R
 | POST | `/password-reset/confirm` | – | yes | Finish a reset |
 | GET | `/me` | Bearer access token | no | Current identity and permissions |
 
+Plus one route outside `/auth`, on the account itself:
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| POST | `/api/v1/me/deletion` | Bearer access token **and** the password | Erase this account |
+
 A session response looks like:
 
 ```json
@@ -108,6 +114,80 @@ adding a role is an `INSERT`. The operator-managed *devlist* is membership in th
 The client performs the same checks so the UI does not offer actions that will fail, but
 **that check is advisory**. Every privileged path re-checks server-side, regardless of what
 the interface already hid.
+
+## Erasing an account
+
+```
+POST /api/v1/me/deletion    {"password": "...", "reason": "optional, ≤ 500 chars"}   -> 204
+```
+
+Implemented in `src/services/AccountService.*` over `IAccountRepository`, whose one method is
+the erasing statement.
+
+### Immediate, not deferred
+
+There is no grace period and nothing to cancel. `account_deletion_requests` has carried a
+`pending` status and a partial unique index enforcing one open request per account since the
+first migration, and that design was deliberately **not** taken up: a window needs something to
+close it, something to cancel it, and a decision about whether signing in during the window
+counts as a change of mind — and, worse, for its whole length the account is *not yet erased*
+while its owner has been told it will be. The row is still written, as `completed` with its
+`processed_at`, so the compliance record exists and a later session that does want the deferred
+form has the table and the status it needs.
+
+### Anonymised, not deleted
+
+The account row survives, holding:
+
+| Column | After |
+|---|---|
+| `email` | `erased+<user id>@deleted.invalid` — unique by construction, and `.invalid` is reserved by RFC 2606 so nothing can be delivered to it or registered as it |
+| `display_name` | `Deleted account` |
+| `password_hash` | a value that is not a valid Argon2id encoding, so no password verifies against it |
+| `email_verified_at`, `last_login_at` | null |
+| `is_active` | false |
+
+It has to survive: `games.publisher_user_id` is `ON DELETE RESTRICT`, so a `DELETE` on an account
+that ever published would be refused by the database — and refusing an erasure because somebody
+published a demo once is not an option either. What the rows pointing at it now point at is an
+anonymous row, which is the whole point.
+
+### What goes, what stays
+
+| Goes | Stays |
+|---|---|
+| Every refresh token — a live session after an erasure is the one thing an erasure exists to rule out | Published games, their versions and builds, so other people's installs keep updating |
+| Every pending verification and password-reset link | Patch notes, now written by "Deleted account" |
+| The library (`user_games`) | Audit entries, whose actor is that anonymous row |
+| The `user_id` on `download_events`, set to null | The `download_events` rows themselves, so the deployment's totals do not move |
+| | `blobs.uploaded_by_user_id`, so the collector still knows whose quota to refund |
+| | Open `upload_sessions`, which the sweeper expires on its timer — deleting the rows here would strand their staging files with nothing left to find them |
+
+A publisher who wants their titles gone deletes them first; that is a separate, deliberate act,
+and [storage-lifecycle.md](storage-lifecycle.md) describes it.
+
+### The rules around it
+
+- **The password is asked for again.** A valid access token says who is asking, not that the
+  owner is the one at the keyboard, and this is the request with no undo.
+- **All of it is one statement**, audit entry included, for the reason
+  [administration.md](administration.md) gives at length: an entry written afterwards can fail on
+  its own, and what it leaves is an irreversible change nobody can attribute.
+- **A second attempt changes nothing.** The access token stays cryptographically valid for its
+  remaining minutes, but the password behind it no longer exists, so the second call is a 401 —
+  and the statement itself refuses an account that already holds its placeholder address, so no
+  path writes a second audit row.
+- **The last operator who can manage users cannot erase themselves**, for the reason D37 gives
+  about deactivation, only more so: nothing but the command line repairs an empty administrator
+  list, and unlike a revoked role this cannot be handed back. The answer is a 409 telling them to
+  grant somebody else first.
+
+### Why POST and not `DELETE /api/v1/me`
+
+The request has to carry a password, so it needs a body, and a body on `DELETE` is the one place
+HTTP declines to promise anything: no defined semantics, and intermediaries may drop it. The
+path also leaves room for `GET` and `DELETE` on `/me/deletion` if the deferred flow is ever
+built, without re-cutting the surface.
 
 ## Rate limiting
 

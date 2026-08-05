@@ -70,14 +70,6 @@ domain::AuditEntry mapAuditEntry(const drogon::orm::Row& row) {
     return entry;
 }
 
-std::string metadataJson(const std::vector<domain::AuditField>& fields) {
-    Json::Value object(Json::objectValue);
-    for (const auto& [name, value] : fields) {
-        object[name] = value;
-    }
-    return toCompactJson(object);
-}
-
 RoleChange classifyRoleChange(const drogon::orm::Row& row) {
     if (row["user_exists"].as<int64_t>() == 0) {
         return RoleChange::NoSuchUser;
@@ -158,7 +150,7 @@ drogon::Task<std::optional<AdminUserSummary>> PgAdminUserRepository::setUploadQu
                                                       audit.action,
                                                       audit.entityType,
                                                       audit.entityId,
-                                                      metadataJson(audit.metadata));
+                                                      auditMetadataJson(audit.metadata));
 
     if (rows.empty()) {
         co_return std::nullopt;
@@ -191,7 +183,7 @@ drogon::Task<std::optional<AdminUserSummary>> PgAdminUserRepository::setActive(
                                                       audit.action,
                                                       audit.entityType,
                                                       audit.entityId,
-                                                      metadataJson(audit.metadata));
+                                                      auditMetadataJson(audit.metadata));
 
     if (rows.empty()) {
         co_return std::nullopt;
@@ -227,7 +219,7 @@ drogon::Task<RoleChange> PgAdminUserRepository::grantRole(std::string userId,
                                                       audit.action,
                                                       audit.entityType,
                                                       audit.entityId,
-                                                      metadataJson(audit.metadata));
+                                                      auditMetadataJson(audit.metadata));
 
     co_return classifyRoleChange(rows[0]);
 }
@@ -258,7 +250,7 @@ drogon::Task<RoleChange> PgAdminUserRepository::revokeRole(std::string userId,
                                                       audit.action,
                                                       audit.entityType,
                                                       audit.entityId,
-                                                      metadataJson(audit.metadata));
+                                                      auditMetadataJson(audit.metadata));
 
     co_return classifyRoleChange(rows[0]);
 }

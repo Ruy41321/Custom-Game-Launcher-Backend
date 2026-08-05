@@ -17,6 +17,10 @@ inline constexpr const char* USER_ACTIVATED = "user.activated";
 inline constexpr const char* USER_DEACTIVATED = "user.deactivated";
 inline constexpr const char* ROLE_GRANTED = "user.role.granted";
 inline constexpr const char* ROLE_REVOKED = "user.role.revoked";
+/// Written by the account itself, so the actor and the entity are the same id. The row stays
+/// readable afterwards because the account is anonymised rather than deleted — an audit trail
+/// that vanished with the person would be exactly the trail nobody could rely on.
+inline constexpr const char* USER_ERASED = "user.erased";
 } // namespace auditActions
 
 namespace auditEntities {
@@ -30,8 +34,10 @@ inline constexpr const char* USER = "user";
 /// hands it to the client and the client displays it.
 struct AuditEntry {
     int64_t id{0};
-    /// Empty when the account that acted has since been erased. The row survives on purpose:
-    /// an audit trail that disappears with the person is not an audit trail.
+    /// Empty when nothing acted — a grant from the command line. It is *not* empty for an
+    /// account that has since been erased: erasure anonymises the row rather than deleting it,
+    /// so the `ON DELETE SET NULL` never fires and the entries of one operator stay linked to
+    /// each other. An audit trail that came apart with the person would not be one.
     std::string actorUserId;
     std::string actorEmail;
     std::string action;

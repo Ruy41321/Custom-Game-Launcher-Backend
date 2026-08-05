@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include "domain/AuditEntry.h"
+
 namespace launcher::repositories::postgres {
 
 /// Conventions shared by every PostgreSQL repository.
@@ -41,6 +43,17 @@ inline std::string jsonArrayParameter(const std::vector<std::string>& values) {
         array.append(value);
     }
     return toCompactJson(array);
+}
+
+/// The `metadata` column of an audit entry, as a real jsonb object rather than a string of JSON.
+/// Shared by every repository that writes the trail, so the one field whose shape varies by
+/// action cannot vary by writer as well.
+inline std::string auditMetadataJson(const std::vector<domain::AuditField>& fields) {
+    Json::Value object(Json::objectValue);
+    for (const auto& [name, value] : fields) {
+        object[name] = value;
+    }
+    return toCompactJson(object);
 }
 
 } // namespace launcher::repositories::postgres

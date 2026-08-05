@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "common/Random.h"
+#include "repositories/IAccountRepository.h"
 #include "repositories/IRefreshTokenRepository.h"
 #include "repositories/IRoleRepository.h"
 #include "repositories/IUserRepository.h"
@@ -123,6 +124,47 @@ class FakeUserRepository : public repositories::IUserRepository {
             }
         }
         co_return;
+    }
+};
+
+/// Stands in for the one erasing statement.
+///
+/// Deliberately does the anonymising *and* the audit entry together, in that order and with no
+/// way to do one without the other, because that is the property the production statement
+/// exists to guarantee — a fake that let them come apart would let a service bug through.
+class FakeAccountRepository : public repositories::IAccountRepository {
+  public:
+    /// The users the erasure acts on. Point this at the same fake the service reads through.
+    FakeUserRepository* users{nullptr};
+
+    mutable std::vector<domain::NewAuditEntry> recorded;
+    mutable std::vector<std::string> reasons;
+    /// Set to make the statement fail, so a test can assert that a failed erasure records
+    /// nothing — the half the audit rule is really about.
+    bool refuse{false};
+
+    drogon::Task<bool> erase(std::string userId,
+                             repositories::ErasedIdentity identity,
+                             domain::NewAuditEntry audit) const override {
+        if (refuse || users == nullptr) {
+            co_return false;
+        }
+
+        for (auto& user : users->users) {
+            if (user.id != userId || user.email == identity.email) {
+                continue;
+            }
+            user.email = identity.email;
+            user.displayName = identity.displayName;
+            user.passwordHash = identity.passwordHash;
+            user.emailVerified = false;
+            user.isActive = false;
+
+            const_cast<std::vector<std::string>&>(reasons).push_back(identity.reason);
+            const_cast<std::vector<domain::NewAuditEntry>&>(recorded).push_back(std::move(audit));
+            co_return true;
+        }
+        co_return false;
     }
 };
 

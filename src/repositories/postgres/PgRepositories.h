@@ -2,6 +2,7 @@
 
 #include <drogon/orm/DbClient.h>
 
+#include "repositories/IAccountRepository.h"
 #include "repositories/IRefreshTokenRepository.h"
 #include "repositories/IRoleRepository.h"
 #include "repositories/IUserRepository.h"
@@ -35,6 +36,17 @@ class PgUserRepository : public IUserRepository {
     drogon::Task<bool> chargeUpload(std::string userId, int64_t bytes) const override;
 
     drogon::Task<void> releaseUpload(std::string userId, int64_t bytes) const override;
+
+  private:
+    drogon::orm::DbClientPtr database_;
+};
+
+class PgAccountRepository : public IAccountRepository {
+  public:
+    explicit PgAccountRepository(drogon::orm::DbClientPtr database);
+
+    drogon::Task<bool>
+    erase(std::string userId, ErasedIdentity identity, domain::NewAuditEntry audit) const override;
 
   private:
     drogon::orm::DbClientPtr database_;

@@ -200,7 +200,18 @@ CTE's effects are invisible to the rest of the statement, so selecting from `use
 hand back the row as it was **before** the change.
 
 Actions recorded today are in `domain::auditActions`: `user.quota.changed`, `user.activated`,
-`user.deactivated`, `user.role.granted`, `user.role.revoked`. They are constants rather than
+`user.deactivated`, `user.role.granted`, `user.role.revoked`, and `user.erased`. The last is the
+only one an ordinary account writes about itself — an erasure names the same id as actor and as
+entity — and it is the clearest case for the rule above: an entry written after an irreversible
+change, and failing, leaves a change nobody can attribute. See
+[authentication.md](authentication.md).
+
+`actor_user_id` is `ON DELETE SET NULL`, but an erasure never triggers it: the account is
+anonymised rather than deleted, so the actor of an old entry resolves to `Deleted account`
+instead of disappearing. Entries by *the same* erased operator therefore stay linked to each
+other, which is what makes the trail still worth reading.
+
+They are constants rather than
 literals at the call sites because these strings are *queried*, and a typo in an audit trail is
 invisible until the day it matters.
 
@@ -301,9 +312,9 @@ it on the host's loopback.
 - **No content moderation.** `admin.games.manage` exists as a permission and
   `domain::mayViewGame` / `mayEditGame` already honour it across the catalog, artwork and
   devlog services, so an operator can already edit any publisher's game through the public API.
-  There is no console screen for it, and deleting a *game* is still not possible at all — that
-  has to be designed together with account erasure, because it is the same question about what
-  survives whom.
+  There is no console screen for it. Deleting a game is possible on the public API — an
+  operator holding `admin.games.manage` can delete any publisher's — but there is no button for
+  it here. See [storage-lifecycle.md](storage-lifecycle.md).
 - **No server settings screen.** `admin.settings.manage` currently guards reading rather than
   writing: configuration arrives from a file and the environment, and a screen that edited it
   would need a story about what happens on restart.
