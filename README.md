@@ -130,6 +130,22 @@ The admin surface is a second listener bound to loopback and published only on t
 ssh -L 9090:127.0.0.1:9090 user@your-vps
 ```
 
+## Documentation
+
+One document per module, in `Documentation/`. Together they describe every endpoint this
+server has and, more usefully, why each one works the way it does.
+
+| Document | What it covers |
+|---|---|
+| [architecture.md](Documentation/architecture.md) | Layers, the composition root, config and logging |
+| [authentication.md](Documentation/authentication.md) | Argon2id, JWT, refresh rotation, rate limiting |
+| [catalog.md](Documentation/catalog.md) | Games, versions, Explore, visibility and the library |
+| [builds-and-uploads.md](Documentation/builds-and-uploads.md) | Content-addressed blobs, resumable uploads, manifests, quota |
+| [downloads-and-deltas.md](Documentation/downloads-and-deltas.md) | Download plans, signed URLs, integrity verification |
+| [artwork-and-devlog.md](Documentation/artwork-and-devlog.md) | Covers and screenshots, and a game's devlog |
+| [storage-lifecycle.md](Documentation/storage-lifecycle.md) | Deleting builds, collecting unreferenced blobs, quota refunds |
+| [administration.md](Documentation/administration.md) | The loopback operator console, roles, quotas, audit |
+
 ## Project layout
 
 | Path | Contents |
@@ -142,7 +158,7 @@ ssh -L 9090:127.0.0.1:9090 user@your-vps
 | `migrations/` | Numbered SQL migrations, immutable once merged |
 | `tests/` | `unit/` and `integration/` |
 | `filters/` | Authentication and rate-limiting middleware |
-| `Documentation/` | One document per module — start with [authentication.md](Documentation/authentication.md) |
+| `Documentation/` | One document per module — see the table above |
 
 Architecture, conventions and the running list of technical decisions live in
 [CLAUDE.md](CLAUDE.md).

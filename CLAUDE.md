@@ -566,12 +566,25 @@ the admin GUI.
   command-line grant with no actor, rendered as "command line", alongside the two changes made
   through the console by a named operator
 
+### Documentation for artwork, the devlog and storage — 2026-08-05
+
+Open debt 4 of `HANDOFF.md`. Artwork, the devlog and the storage lifecycle had only ever been
+described in this file; they now have pages of their own, and the README carries an index of
+all eight documents.
+
+- ✅ [Documentation/artwork-and-devlog.md](Documentation/artwork-and-devlog.md): both media
+  and patch-note surfaces, why artwork is public while blobs are not, and why the format is
+  decided by the leading bytes
+- ✅ [Documentation/storage-lifecycle.md](Documentation/storage-lifecycle.md): deleting builds
+  and versions, the collector's four load-bearing properties, quota refunds, and the shape the
+  absent retention policy should take when it is written
+
 ### Next up
-- ⬜ **M10** `Documentation/` for artwork and the devlog, security hardening, GDPR erasure
+- ⬜ **M10** security hardening, GDPR erasure, client crash reporting
 
 Still deliberately absent, and worth stating so a later session does not assume otherwise:
-there is no `Documentation/` page for artwork or the devlog yet, and no automatic retention
-policy — nothing deletes an *old* build on its own, only what a publisher deletes by hand.
+there is no automatic retention policy — nothing deletes an *old* build on its own, only what a
+publisher deletes by hand.
 The admin surface has no content-moderation screen and no settings screen; deleting a *game*
 is still impossible, and belongs with account erasure because it is the same question.
 
