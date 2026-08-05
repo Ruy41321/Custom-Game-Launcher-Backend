@@ -72,6 +72,43 @@ empty value explicitly.
 `AppConfig::validate()` additionally refuses to start a non-development environment with a
 short JWT secret, a missing file-server secret or a blank database password.
 
+### Telling a client what the configuration is
+
+Several of those values are limits a client cannot work without: a chunk larger than
+`uploads.maxChunkBytes` is refused, and nothing in the refusal says how large one may be. So a
+deployment that lowered it broke every upload for an obscure reason, and one that raised it
+went unnoticed.
+
+`GET /api/v1/capabilities` publishes them. It is **unauthenticated** — a launcher reads it at
+startup, before a session exists — which is possible precisely because nothing in the document
+depends on who is asking: `uploads.defaultQuotaBytes` is what a *new* account is given, never
+what anybody has left, and no secret from the configuration appears at all.
+
+```json
+{
+  "apiVersion": "v1",
+  "serverVersion": "0.1.0",
+  "uploads":  { "maxChunkBytes": 8388608, "maxBlobBytes": 2147483648,
+                "maxOpenSessionsPerUser": 16, "sessionTtlSeconds": 86400,
+                "defaultQuotaBytes": 5368709120 },
+  "manifest": { "maxPathLength": 1024, "maxFiles": 200000 },
+  "media":    { "maxBytes": 5242880, "maxScreenshotsPerGame": 12, "maxAltTextLength": 300,
+                "contentTypes": ["image/png", "image/jpeg", "image/webp"] },
+  "catalog":  { "maxPageSize": 100, "defaultPageSize": 20, "maxPatchNotePageSize": 100 },
+  "updates":  { "fullDownloadThresholdRatio": 0.7 }
+}
+```
+
+The document is built by `app::capabilitiesDocument`, a pure function of `AppConfig`, so it is
+asserted on without an HTTP server and the controller contains nothing but serialisation. It is
+deliberately **not** part of `/health`: a liveness probe is polled by an orchestrator on a short
+timer and answers a question about the process, not about the contract. `Cache-Control:
+max-age=60` keeps a launcher opening five pages from asking five times, while a reconfigured
+deployment still takes effect promptly.
+
+A client must treat every field as optional. An older server has no such route, and the launcher
+falls back to conservative built-in defaults rather than refusing to work.
+
 ## Migrations
 
 Numbered `migrations/NNNN_name.sql`, applied in order, recorded in `schema_migrations` with

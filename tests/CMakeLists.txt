@@ -9,6 +9,7 @@ add_executable(launcher_unit_tests
     unit/HashTest.cpp
     unit/EnvInterpolationTest.cpp
     unit/ConfigTest.cpp
+    unit/CapabilitiesTest.cpp
     unit/MigrationPlanTest.cpp
     unit/ValidationTest.cpp
     unit/PasswordHasherTest.cpp
@@ -55,6 +56,7 @@ add_executable(launcher_integration_tests
     integration/AppHarness.cpp
     integration/MigrationRunnerIntegrationTest.cpp
     integration/HealthEndpointTest.cpp
+    integration/CapabilitiesEndpointTest.cpp
     integration/AuthEndpointTest.cpp
     integration/CatalogEndpointTest.cpp
     integration/MediaEndpointTest.cpp

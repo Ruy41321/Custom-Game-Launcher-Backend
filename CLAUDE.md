@@ -151,6 +151,7 @@ layout accepts it later as an additional blob kind, with no schema change.
 | D37 | **While an account is the only active holder of `admin.users.manage`, none of its roles or its active flag may change** | Deliberately blunt: it refuses to change *any* role on that account, not only the one carrying the permission. A finer rule would have to reason about which permissions the particular role grants, and being wrong once costs the operator every route back, because nothing but the command line repairs an empty administrator list. Deactivated accounts do not count as a way back in. Paired with a flat refusal to deactivate one's own account. | Checking only the role being revoked (one wrong answer locks everybody out); no guard at all (an operator can empty the list in two clicks) |
 | D38 | **The first administrator is granted from the command line** | Granting a role through the surface needs `admin.roles.manage`, which on a fresh deployment nobody holds, so something outside the permission system has to hand out the first one. The authority that makes sense is shell access to the machine — already the authority that reaches the loopback listener at all. `--grant-role` also retires the manual `INSERT INTO user_roles` the setup notes carried since M4, and unlike that statement it leaves an audit row, with a null actor and `metadata.via = "command-line"`. Talks to libpq directly, like the migration runner: no event loop for a coroutine, and destroying a DbClient can abort the process. | An endpoint (cannot bootstrap itself); a seeded admin account with a default password (a credential every deployment shares); leaving it to hand-written SQL (no audit row, and easy to get wrong) |
 | D39 | **The console is one self-contained page, embedded in the binary** | The deployed image then has no path to mount, the page cannot get out of step with the API it talks to, and the integration tests exercise the same bytes a deployment serves. The source stays a real `.html`; CMake configures it into a string literal, with `CMAKE_CONFIGURE_DEPENDS` so an edit is not left stale. Vanilla JavaScript and no build step, because adding npm to a C++ repository to render three tables costs more than the console is worth. The access token lives in a variable — no browser storage, no cookie — since the page is reached over a tunnel from somebody's desktop and a token that survives the tab outlives its reason. The CSP is `default-src 'none'`, which the page needs none of relaxed, so a later edit reaching for a CDN fails loudly. | A document root (a mount to keep in step, and untested bytes); an SPA with a build step (npm in a C++ repo); a token in browser storage (outlives the tunnel) |
+| D40 | **A deployment's limits are published by `GET /api/v1/capabilities`, unauthenticated** | Several configuration values are limits a client cannot work without — a chunk over `uploads.maxChunkBytes` is refused and the refusal does not say what the limit is — so every one of them was a constant compiled into the launcher, guessed from the defaults in this repository. Lowering one broke every upload for a reason nobody could see; raising one changed nothing. The route needs no token because nothing in the document depends on the caller: `defaultQuotaBytes` is what a *new* account is given, not what anybody has left, and no secret appears at all. That is what makes it readable at startup, before a session exists. Not folded into `/health`, which an orchestrator polls on a short timer to ask about the process rather than about the contract; `app::capabilitiesDocument` is a pure function of `AppConfig`, so it is asserted on with no HTTP server and the controller is serialisation only. | Extending `/health` (mixes a contract with a liveness probe polled every few seconds); an authenticated route (unreadable exactly when a client is deciding how to sign in and what to send); leaving the limits undocumented (the status quo: a client that guesses, and a deployment that cannot be reconfigured safely) |
 
 ---
 
@@ -578,6 +579,18 @@ all eight documents.
 - ✅ [Documentation/storage-lifecycle.md](Documentation/storage-lifecycle.md): deleting builds
   and versions, the collector's four load-bearing properties, quota refunds, and the shape the
   absent retention policy should take when it is written
+
+### Capabilities — 2026-08-05
+
+Open debt 9 of `HANDOFF.md`, the server half. `GET /api/v1/capabilities` publishes the limits a
+client cannot work without (D40); the launcher reads it at startup and stops guessing.
+
+- ✅ `app::capabilitiesDocument`, a pure function of `AppConfig`, and a controller that only
+  serialises it
+- ✅ Unauthenticated and briefly cacheable, carrying nothing about any caller — asserted,
+  including that no configured secret can reach the document
+- ✅ [Documentation/architecture.md](Documentation/architecture.md) §Configuration
+- ✅ 518/518 tests green (347 unit, 171 integration)
 
 ### Next up
 - ⬜ **M10** security hardening, GDPR erasure, client crash reporting
