@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 #include "common/EnvInterpolation.h"
 #include "common/Result.h"
@@ -18,6 +19,41 @@ struct ServerConfig {
     uint16_t adminPort{9090};
     bool adminEnabled{false};
     size_t threadCount{0}; ///< 0 = one event loop per hardware thread
+
+    /// The largest *document* body any route accepts, as opposed to the largest upload chunk.
+    ///
+    /// The manifest of a large build is the only body that comes near it, and until this
+    /// existed its ceiling was an accident: the framework's limit was set from
+    /// `uploads.maxChunkBytes` alone, so lowering the chunk size silently lowered how big a
+    /// build could be published. Declaring it separately makes that ceiling a decision.
+    int64_t maxDocumentBytes{16LL * 1024 * 1024};
+
+    /// The largest body a request carrying no bearer token may send.
+    ///
+    /// Sign-in, a refresh, a password reset and a crash report are all small and all reachable
+    /// by anybody; nothing anonymous has a reason to send a document. Note what this does and
+    /// does not do: the framework reads a body before any of our code runs, so this bounds what
+    /// a route will *process*, while what the server will *buffer* is bounded only by
+    /// `maxDocumentBytes` above.
+    int64_t maxAnonymousBodyBytes{64 * 1024};
+
+    /// Addresses whose `X-Forwarded-For` is believed, as plain addresses or IPv4 CIDR blocks.
+    ///
+    /// Empty — the default — means every request is attributed to the peer that sent it, which
+    /// is right for a server clients reach directly and wrong the moment one sits behind a
+    /// TLS-terminating proxy: every request then arrives from the proxy, and every per-address
+    /// limit in the process collapses onto one bucket shared by every client.
+    std::vector<std::string> trustedProxies;
+};
+
+/// Headers that describe the deployment rather than any one response.
+struct SecurityConfig {
+    /// Off by default, and deliberately not "on in development": HSTS on a plain-HTTP
+    /// development machine pins the browser to `https://localhost` with no way back. Browsers
+    /// ignore the header when it arrives over plain HTTP, so a production deployment may
+    /// enable it before its TLS terminator exists without breaking anything.
+    bool hsts{false};
+    uint32_t hstsMaxAgeSeconds{15552000}; ///< 180 days
 };
 
 struct DatabaseConfig {
@@ -74,6 +110,17 @@ struct RateLimitConfig {
     /// which it refills. Applies to login, registration and password-reset requests.
     uint32_t authAttempts{10};
     uint32_t authWindowSeconds{60};
+
+    /// Requests one *account* may make across every authenticated route, whatever address they
+    /// arrive from, and the window the allowance refills over.
+    ///
+    /// Loose on purpose, and for a measurable reason: the busiest legitimate caller is a build
+    /// upload, which sends one request per chunk. At ten a second a client would have to push
+    /// `maxChunkBytes` ten times a second — 80 MB/s at the default — to come near it, which no
+    /// real link does. So this never binds on work anybody is actually doing, and does bind on
+    /// a loop. Tight is the address bucket's job, where each attempt costs an Argon2id hash.
+    uint32_t accountRequests{600};
+    uint32_t accountWindowSeconds{60};
 };
 
 struct UpdateConfig {
@@ -129,6 +176,7 @@ struct AppConfig {
     std::string environment{"development"};
     std::string migrationsDirectory{"migrations"};
     ServerConfig server;
+    SecurityConfig security;
     DatabaseConfig database;
     LoggingConfig logging;
     StorageConfig storage;

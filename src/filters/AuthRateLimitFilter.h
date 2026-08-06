@@ -18,9 +18,11 @@ class AuthRateLimitFilter : public drogon::HttpFilter<AuthRateLimitFilter> {
                   drogon::FilterChainCallback&& proceed) override;
 };
 
-/// The address a request is attributed to. Behind a reverse proxy every request appears to
-/// come from the proxy, so Drogon's configured trusted-proxy resolution is used; the raw
-/// peer address is the fallback.
+/// The address a request is attributed to, and therefore the key of every per-address bucket.
+///
+/// The peer address, unless the peer is one of `server.trustedProxies`, in which case
+/// `X-Forwarded-For` decides — see `common::resolveClientAddress` for why it is read from the
+/// right and why an unconfigured deployment ignores it outright.
 std::string clientAddressOf(const drogon::HttpRequestPtr& request);
 
 } // namespace launcher::filters

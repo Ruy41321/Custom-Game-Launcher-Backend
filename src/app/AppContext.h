@@ -92,6 +92,11 @@ class AppContext {
     /// would let a burst of crash reports lock somebody out of signing in.
     common::RateLimiter& crashRateLimiter() const;
 
+    /// A third bucket, keyed on the *account* rather than the address, for every authenticated
+    /// route. The address buckets say nothing about a caller that holds a valid token and moves
+    /// between addresses; this one is the ceiling a session has.
+    common::RateLimiter& accountRateLimiter() const;
+
     /// Test hook: drops all wiring so a fresh context can be installed.
     void reset();
 
@@ -145,6 +150,7 @@ class AppContext {
 
     std::unique_ptr<common::RateLimiter> authRateLimiter_;
     std::unique_ptr<common::RateLimiter> crashRateLimiter_;
+    std::unique_ptr<common::RateLimiter> accountRateLimiter_;
 };
 
 } // namespace launcher::app

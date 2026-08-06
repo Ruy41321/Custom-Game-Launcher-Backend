@@ -1,10 +1,13 @@
 #include "filters/JwtAuthFilter.h"
 
+#include <spdlog/spdlog.h>
+
 #include <string>
 
 #include "app/AppContext.h"
 #include "app/HttpError.h"
 #include "common/Error.h"
+#include "common/Logging.h"
 
 namespace launcher::filters {
 namespace {
@@ -40,6 +43,28 @@ void JwtAuthFilter::doFilter(const drogon::HttpRequestPtr& request,
     auto claims = app::AppContext::instance().tokenService().verifyAccessToken(token);
     if (!claims.ok()) {
         reject(app::makeErrorResponse(claims.error(), requestId));
+        return;
+    }
+
+    // The per-account ceiling lives here rather than on each route's filter list, and that is
+    // the whole point: every authenticated route on this server runs through this filter, so
+    // there is no route present or future that can be given a token-holding caller with no
+    // limit at all by somebody forgetting a line. It runs after verification because the key
+    // is the account, and an unverified token names nobody.
+    auto& limiter = app::AppContext::instance().accountRateLimiter();
+    const auto& userId = claims.value().userId;
+
+    if (!limiter.tryAcquire(userId)) {
+        const auto retryAfter = limiter.retryAfter(userId);
+        spdlog::warn("rate limited account={} path={}",
+                     common::escapeJson(userId),
+                     common::escapeJson(request->path()));
+
+        auto response = app::makeErrorResponse(
+            Error{ErrorCode::RateLimited, "too many requests on this account; please slow down"},
+            requestId);
+        response->addHeader("Retry-After", std::to_string(retryAfter.count()));
+        reject(response);
         return;
     }
 

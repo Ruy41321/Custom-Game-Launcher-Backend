@@ -6,6 +6,7 @@
 #include <atomic>
 #include <string>
 
+#include "domain/CrashReport.h"
 #include "integration/AppHarness.h"
 
 namespace {
@@ -110,8 +111,12 @@ TEST(CrashReportEndpointTest, RefusesATimestampThatIsNotOne) {
 TEST(CrashReportEndpointTest, RefusesAStackTraceTooLargeToStore) {
     LAUNCHER_REQUIRE_DATABASE();
 
+    // Just over the field's own cap, and deliberately not "enormous". A body big enough to be
+    // obviously wrong is now refused by the anonymous body limit before the field is ever
+    // looked at, which is a fine outcome but a different one — and it would leave the rule
+    // under test here untested.
     auto oversized = report();
-    oversized["stackTrace"] = std::string(64 * 1024, 'x');
+    oversized["stackTrace"] = std::string(launcher::domain::MAX_CRASH_STACK_LENGTH + 1, 'x');
 
     EXPECT_EQ(harness().postJson("/api/v1/crash-reports", oversized)->statusCode(),
               drogon::k422UnprocessableEntity);

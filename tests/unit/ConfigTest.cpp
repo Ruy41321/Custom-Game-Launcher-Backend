@@ -206,6 +206,120 @@ TEST(ConfigTest, ProductionAcceptsAFullyConfiguredDocument) {
     EXPECT_TRUE(std::move(result).value().isProduction());
 }
 
+TEST(ConfigTest, ProductionRefusesTheDevelopmentPlaceholderSecretsByName) {
+    // The length check alone let these through: the placeholder in docker-compose.yml is
+    // thirty-eight characters long and committed to a public repository, so a deployment that
+    // forgot its .env signed every token with a secret anybody could read — and started up
+    // reporting nothing wrong at all.
+    constexpr const char* document = R"({
+      "environment": "production",
+      "database": { "name": "launcher", "user": "launcher", "password": "pw" },
+      "storage": { "secureLinkSecret": "link-secret" },
+      "auth": { "jwtSecret": "dev-insecure-jwt-secret-do-not-deploy" }
+    })";
+
+    const auto result = AppConfig::parse(document, lookupFrom({}));
+
+    ASSERT_FALSE(result.ok());
+    EXPECT_NE(result.error().detail.find("placeholder"), std::string::npos);
+}
+
+TEST(ConfigTest, ProductionRefusesThePlaceholderSigningSecretToo) {
+    constexpr const char* document = R"({
+      "environment": "production",
+      "database": { "name": "launcher", "user": "launcher", "password": "pw" },
+      "storage": { "secureLinkSecret": "dev-insecure-secure-link-secret" },
+      "auth": { "jwtSecret": "0123456789abcdef0123456789abcdef" }
+    })";
+
+    const auto result = AppConfig::parse(document, lookupFrom({}));
+
+    ASSERT_FALSE(result.ok());
+    EXPECT_NE(result.error().detail.find("placeholder"), std::string::npos);
+}
+
+TEST(ConfigTest, DevelopmentKeepsBootingOnThePlaceholders) {
+    // Which is what they are for: the stack comes up with no setup at all, and only a
+    // deployment is asked to have made a decision.
+    constexpr const char* document = R"({
+      "environment": "development",
+      "database": { "name": "launcher", "user": "launcher" },
+      "storage": { "secureLinkSecret": "dev-insecure-secure-link-secret" },
+      "auth": { "jwtSecret": "dev-insecure-jwt-secret-do-not-deploy" }
+    })";
+
+    EXPECT_TRUE(AppConfig::parse(document, lookupFrom({})).ok());
+}
+
+TEST(ConfigTest, ReadsTheHardeningKnobsAndTheirDefaults) {
+    constexpr const char* document = R"({
+      "environment": "development",
+      "server": {
+        "port": 8080,
+        "maxDocumentBytes": 1048576,
+        "maxAnonymousBodyBytes": 4096,
+        "trustedProxies": ["172.16.0.0/12", "10.0.0.5"]
+      },
+      "security": { "hsts": true, "hstsMaxAgeSeconds": 120 },
+      "rateLimit": { "accountRequests": 42, "accountWindowSeconds": 30 },
+      "database": { "name": "launcher", "user": "launcher" }
+    })";
+
+    const auto result = AppConfig::parse(document, lookupFrom({}));
+
+    ASSERT_TRUE(result.ok()) << result.error().detail;
+    const auto config = std::move(result).value();
+
+    EXPECT_EQ(config.server.maxDocumentBytes, 1048576);
+    EXPECT_EQ(config.server.maxAnonymousBodyBytes, 4096);
+    ASSERT_EQ(config.server.trustedProxies.size(), 2U);
+    EXPECT_EQ(config.server.trustedProxies[0], "172.16.0.0/12");
+    EXPECT_TRUE(config.security.hsts);
+    EXPECT_EQ(config.security.hstsMaxAgeSeconds, 120U);
+    EXPECT_EQ(config.rateLimit.accountRequests, 42U);
+    EXPECT_EQ(config.rateLimit.accountWindowSeconds, 30U);
+}
+
+TEST(ConfigTest, DefaultsTrustNoProxyAndSayNothingAboutTransportSecurity) {
+    const auto result = AppConfig::parse(MINIMAL_DEVELOPMENT_CONFIG, lookupFrom({}));
+
+    ASSERT_TRUE(result.ok()) << result.error().detail;
+    const auto config = std::move(result).value();
+
+    EXPECT_TRUE(config.server.trustedProxies.empty());
+    EXPECT_FALSE(config.security.hsts);
+    EXPECT_EQ(config.rateLimit.accountRequests, 600U);
+}
+
+TEST(ConfigTest, RejectsAnAnonymousCapLargerThanTheDocumentOne) {
+    constexpr const char* document = R"({
+      "environment": "development",
+      "server": { "port": 8080, "maxDocumentBytes": 4096, "maxAnonymousBodyBytes": 8192 },
+      "database": { "name": "launcher", "user": "launcher" }
+    })";
+
+    const auto result = AppConfig::parse(document, lookupFrom({}));
+
+    ASSERT_FALSE(result.ok());
+    EXPECT_NE(result.error().detail.find("maxAnonymousBodyBytes"), std::string::npos);
+}
+
+TEST(ConfigTest, RejectsARateLimitOfZero) {
+    // A zero bucket refuses everybody, which reads as an outage rather than as a throttle.
+    // Turning a limit off is not a supported configuration; widening it is.
+    constexpr const char* document = R"({
+      "environment": "development",
+      "server": { "port": 8080 },
+      "rateLimit": { "accountRequests": 0 },
+      "database": { "name": "launcher", "user": "launcher" }
+    })";
+
+    const auto result = AppConfig::parse(document, lookupFrom({}));
+
+    ASSERT_FALSE(result.ok());
+    EXPECT_NE(result.error().detail.find("rateLimit"), std::string::npos);
+}
+
 TEST(ConfigTest, DatabaseConnectionStringCarriesEveryField) {
     launcher::app::DatabaseConfig database;
     database.host = "db";

@@ -150,6 +150,26 @@ class ScopedAuthRateLimit {
     std::chrono::seconds previousWindow_;
 };
 
+/// The same, for the per-account ceiling, and for the same reason: the harness runs the whole
+/// suite through one process, so the number of requests an account has already spent is not
+/// something a test can know. It narrows the bucket, asserts, and resets it — the reset matters
+/// more here than it does for the address bucket, because later tests reuse accounts.
+class ScopedAccountRateLimit {
+  public:
+    ScopedAccountRateLimit(std::size_t requests, std::chrono::seconds window);
+
+    ~ScopedAccountRateLimit();
+
+    ScopedAccountRateLimit(const ScopedAccountRateLimit&) = delete;
+    ScopedAccountRateLimit& operator=(const ScopedAccountRateLimit&) = delete;
+    ScopedAccountRateLimit(ScopedAccountRateLimit&&) = delete;
+    ScopedAccountRateLimit& operator=(ScopedAccountRateLimit&&) = delete;
+
+  private:
+    std::size_t previousRequests_;
+    std::chrono::seconds previousWindow_;
+};
+
 /// Skips the calling test when no database is configured.
 #define LAUNCHER_REQUIRE_DATABASE()                                                                \
     do {                                                                                           \

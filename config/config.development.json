@@ -8,7 +8,15 @@
     "adminListenAddress": "${ADMIN_HOST:-127.0.0.1}",
     "adminPort": ${ADMIN_PORT:-9090},
     "adminEnabled": ${ADMIN_ENABLED:-false},
-    "threadCount": 0
+    "threadCount": 0,
+    "maxDocumentBytes": ${MAX_DOCUMENT_BYTES:-16777216},
+    "maxAnonymousBodyBytes": ${MAX_ANONYMOUS_BODY_BYTES:-65536},
+    "trustedProxies": ${TRUSTED_PROXIES:-[]}
+  },
+
+  "security": {
+    "hsts": ${HSTS_ENABLED:-false},
+    "hstsMaxAgeSeconds": ${HSTS_MAX_AGE:-15552000}
   },
 
   "database": {
@@ -65,7 +73,9 @@
 
   "rateLimit": {
     "authAttempts": ${AUTH_RATE_LIMIT_ATTEMPTS:-50},
-    "authWindowSeconds": ${AUTH_RATE_LIMIT_WINDOW:-60}
+    "authWindowSeconds": ${AUTH_RATE_LIMIT_WINDOW:-60},
+    "accountRequests": ${ACCOUNT_RATE_LIMIT_REQUESTS:-5000},
+    "accountWindowSeconds": ${ACCOUNT_RATE_LIMIT_WINDOW:-60}
   },
 
   "updates": {

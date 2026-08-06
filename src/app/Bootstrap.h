@@ -19,7 +19,10 @@ int runMigrations(const AppConfig& config);
 /// Exposed rather than hidden inside runServer because the integration harness starts the
 /// framework itself: if the tests ran against the default one-megabyte cap while production
 /// did not, the upload path would be tested under limits nobody deploys.
-void configureUploadLimits(const UploadConfig& uploads);
+/// Sets the framework's body limits from the two budgets that describe them, and installs the
+/// tighter cap that applies to a request carrying no bearer token. Called by the server and by
+/// the integration harness alike, so tests never run under limits nobody deploys.
+void configureBodyLimits(const AppConfig& config);
 
 /// Boots the HTTP server. Blocks until the framework is asked to quit.
 int runServer(const AppConfig& config);

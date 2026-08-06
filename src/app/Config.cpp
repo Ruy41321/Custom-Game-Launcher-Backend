@@ -31,6 +31,26 @@ T readInt(const Json::Value& node, const char* key, T fallback) {
     return static_cast<T>(node[key].asInt64());
 }
 
+std::vector<std::string>
+readStrings(const Json::Value& node, const char* key, std::vector<std::string> fallback) {
+    if (!node.isMember(key) || !node[key].isArray()) {
+        return fallback;
+    }
+    std::vector<std::string> values;
+    for (const auto& element : node[key]) {
+        if (element.isString() && !element.asString().empty()) {
+            values.push_back(element.asString());
+        }
+    }
+    return values;
+}
+
+/// Marks the secrets this repository ships so a deployment can boot with no setup. Their whole
+/// point is that they are public, so any environment but development refuses them.
+bool isDevelopmentPlaceholder(const std::string& secret) {
+    return secret.find("dev-insecure") != std::string::npos;
+}
+
 } // namespace
 
 std::string DatabaseConfig::connectionString() const {
@@ -77,6 +97,17 @@ Result<AppConfig> AppConfig::parse(std::string_view json, const common::EnvLooku
     config.server.adminPort = readInt<uint16_t>(server, "adminPort", config.server.adminPort);
     config.server.adminEnabled = readBool(server, "adminEnabled", config.server.adminEnabled);
     config.server.threadCount = readInt<size_t>(server, "threadCount", config.server.threadCount);
+    config.server.maxDocumentBytes =
+        readInt<int64_t>(server, "maxDocumentBytes", config.server.maxDocumentBytes);
+    config.server.maxAnonymousBodyBytes =
+        readInt<int64_t>(server, "maxAnonymousBodyBytes", config.server.maxAnonymousBodyBytes);
+    config.server.trustedProxies =
+        readStrings(server, "trustedProxies", config.server.trustedProxies);
+
+    const auto& security = root["security"];
+    config.security.hsts = readBool(security, "hsts", config.security.hsts);
+    config.security.hstsMaxAgeSeconds =
+        readInt<uint32_t>(security, "hstsMaxAgeSeconds", config.security.hstsMaxAgeSeconds);
 
     const auto& database = root["database"];
     config.database.host = readString(database, "host", config.database.host);
@@ -148,6 +179,10 @@ Result<AppConfig> AppConfig::parse(std::string_view json, const common::EnvLooku
         readInt<uint32_t>(rateLimit, "authAttempts", config.rateLimit.authAttempts);
     config.rateLimit.authWindowSeconds =
         readInt<uint32_t>(rateLimit, "authWindowSeconds", config.rateLimit.authWindowSeconds);
+    config.rateLimit.accountRequests =
+        readInt<uint32_t>(rateLimit, "accountRequests", config.rateLimit.accountRequests);
+    config.rateLimit.accountWindowSeconds =
+        readInt<uint32_t>(rateLimit, "accountWindowSeconds", config.rateLimit.accountWindowSeconds);
 
     const auto& updates = root["updates"];
     config.updates.fullDownloadThresholdRatio = readDouble(
@@ -227,6 +262,23 @@ common::VoidResult AppConfig::validate() const {
             ErrorCode::InvalidInput,
             "uploads.maxChunkBytes cannot exceed uploads.maxBlobBytes: a chunk is part of a file");
     }
+    if (server.maxDocumentBytes <= 0 || server.maxAnonymousBodyBytes <= 0) {
+        return common::VoidResult::failure(
+            ErrorCode::InvalidInput,
+            "server.maxDocumentBytes and server.maxAnonymousBodyBytes must be positive");
+    }
+    if (server.maxAnonymousBodyBytes > server.maxDocumentBytes) {
+        return common::VoidResult::failure(ErrorCode::InvalidInput,
+                                           "server.maxAnonymousBodyBytes cannot exceed "
+                                           "server.maxDocumentBytes: it is the tighter of the two");
+    }
+    if (rateLimit.authAttempts == 0 || rateLimit.authWindowSeconds == 0 ||
+        rateLimit.accountRequests == 0 || rateLimit.accountWindowSeconds == 0) {
+        // A zero bucket refuses everybody, which reads as an outage rather than as a throttle.
+        // Turning a limit off is not a supported configuration; widening it is.
+        return common::VoidResult::failure(ErrorCode::InvalidInput,
+                                           "every rateLimit value must be positive");
+    }
     if (uploads.sessionTtlSeconds == 0 || uploads.maxOpenSessionsPerUser <= 0) {
         return common::VoidResult::failure(
             ErrorCode::InvalidInput,
@@ -246,6 +298,19 @@ common::VoidResult AppConfig::validate() const {
             return common::VoidResult::failure(
                 ErrorCode::InvalidInput,
                 "storage.secureLinkSecret is required outside development");
+        }
+        // A length check alone lets the placeholders through: the one in docker-compose.yml is
+        // thirty-eight characters long and committed to a public repository, so a deployment
+        // that forgets its .env signs tokens with a secret anybody can read — and boots
+        // reporting nothing wrong. Refusing them by name is what turns that into a start-up
+        // failure with a sentence saying which variable to set.
+        if (isDevelopmentPlaceholder(auth.jwtSecret) ||
+            isDevelopmentPlaceholder(storage.secureLinkSecret)) {
+            return common::VoidResult::failure(
+                ErrorCode::InvalidInput,
+                "auth.jwtSecret and storage.secureLinkSecret still hold the development "
+                "placeholders this repository ships: set JWT_SECRET and FILE_SECURE_LINK_SECRET "
+                "to secrets of your own outside development");
         }
         if (database.password.empty()) {
             return common::VoidResult::failure(ErrorCode::InvalidInput,

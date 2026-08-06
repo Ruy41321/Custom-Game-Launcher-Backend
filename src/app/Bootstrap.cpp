@@ -4,6 +4,7 @@
 #include <drogon/utils/coroutine.h>
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <exception>
 
@@ -12,6 +13,8 @@
 
 #include "app/AppContext.h"
 #include "app/HttpError.h"
+#include "app/SecurityHeaders.h"
+#include "common/Error.h"
 #include "common/Logging.h"
 #include "launcher/Version.h"
 #include "migrations/MigrationRunner.h"
@@ -71,14 +74,47 @@ void scheduleCrashReportSweeper(uint32_t intervalSeconds) {
 
 } // namespace
 
-void configureUploadLimits(const UploadConfig& uploads) {
+void configureBodyLimits(const AppConfig& config) {
     // Drogon buffers a request body before the handler ever runs, and its default cap is one
     // megabyte — well under a single upload chunk, so without this every chunk is rejected
-    // before reaching the controller. The memory limit is raised alongside it so a chunk is
-    // not spilled to a temporary file only to be read straight back.
-    const auto limit = static_cast<std::size_t>(uploads.maxChunkBytes) + BODY_SIZE_HEADROOM;
-    drogon::app().setClientMaxBodySize(limit);
-    drogon::app().setClientMaxMemoryBodySize(limit);
+    // before reaching the controller.
+    //
+    // Two budgets, not one. The largest body the server accepts at all is whichever of the two
+    // is bigger: an upload chunk, or the largest document a route takes — in practice the
+    // manifest of a big build. Until `maxDocumentBytes` existed only the chunk size was here,
+    // so how many files a build could contain was a silent consequence of a number about
+    // something else.
+    //
+    // The *memory* limit stays at the chunk size on purpose: a chunk is read straight back, so
+    // spilling it to a temporary file would be pure loss, while the rare manifest that exceeds
+    // it is better on disk than held in RAM once per concurrent request.
+    const auto chunk = static_cast<std::size_t>(config.uploads.maxChunkBytes) + BODY_SIZE_HEADROOM;
+    const auto largest = std::max(
+        chunk, static_cast<std::size_t>(config.server.maxDocumentBytes) + BODY_SIZE_HEADROOM);
+
+    drogon::app().setClientMaxBodySize(largest);
+    drogon::app().setClientMaxMemoryBodySize(chunk);
+
+    const auto anonymousLimit = static_cast<std::size_t>(config.server.maxAnonymousBodyBytes);
+    drogon::app().registerPreRoutingAdvice([anonymousLimit](const drogon::HttpRequestPtr& request,
+                                                            drogon::AdviceCallback&& reject,
+                                                            drogon::AdviceChainCallback&& proceed) {
+        // Keyed on the absence of a token rather than on a list of routes, so it cannot go
+        // stale when a route is added: nothing anonymous on this server has a reason to
+        // send a document. A caller can of course attach a token that turns out to be
+        // invalid and be measured against the larger limit instead — its route then refuses
+        // it — which changes nothing about what was buffered, since the framework read the
+        // body before this advice existed to have an opinion.
+        if (request->getHeader("Authorization").empty() &&
+            request->body().size() > anonymousLimit) {
+            reject(makeErrorResponse(
+                common::Error{common::ErrorCode::QuotaExceeded,
+                              "this request is too large to be sent without an account"},
+                requestIdOf(request)));
+            return;
+        }
+        proceed();
+    });
 }
 
 drogon::orm::DbClientPtr createDatabaseClient(const DatabaseConfig& config) {
@@ -107,11 +143,12 @@ int runServer(const AppConfig& config) {
         auto database = createDatabaseClient(config.database);
         AppContext::instance().initialize(config, database);
 
-        registerErrorHandling();
+        registerErrorHandling(config.security);
+        registerSecurityHeaders(config.security);
 
         auto& framework = drogon::app();
         framework.addListener(config.server.listenAddress, config.server.port);
-        configureUploadLimits(config.uploads);
+        configureBodyLimits(config);
         scheduleUploadSweeper(config.uploads.sweepIntervalSeconds);
         scheduleBlobCollector(config.retention.sweepIntervalSeconds);
         if (config.crashReports.enabled) {

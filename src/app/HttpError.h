@@ -5,6 +5,7 @@
 
 #include <string>
 
+#include "app/Config.h"
 #include "common/Error.h"
 
 namespace launcher::app {
@@ -21,6 +22,10 @@ drogon::HttpResponsePtr makeErrorResponse(const common::Error& error, const std:
 
 /// Installs the request-id advice, the central exception handler and the 404/405 pages.
 /// Called once during server startup.
-void registerErrorHandling();
+///
+/// Takes the security configuration because the not-found page is built here and Drogon caches
+/// it: it is one shared object handed to every request that misses, so its headers are written
+/// once, at construction, rather than by the advice that stamps every other response.
+void registerErrorHandling(const SecurityConfig& security);
 
 } // namespace launcher::app

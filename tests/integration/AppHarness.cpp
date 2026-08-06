@@ -12,6 +12,7 @@
 #include "app/Bootstrap.h"
 #include "app/Config.h"
 #include "app/HttpError.h"
+#include "app/SecurityHeaders.h"
 #include "migrations/MigrationRunner.h"
 
 #ifndef LAUNCHER_MIGRATIONS_DIR
@@ -79,6 +80,17 @@ app::AppConfig testConfig(const std::filesystem::path& blobRoot,
     config.rateLimit.authAttempts = 500;
     config.rateLimit.authWindowSeconds = 60;
 
+    // Wider still, because this bucket is keyed on the account and the whole suite shares a
+    // process: the accounts a fixture reuses would otherwise spend a deployment's allowance
+    // between them. The test that exercises it narrows the bucket for its own duration.
+    config.rateLimit.accountRequests = 100000;
+    config.rateLimit.accountWindowSeconds = 60;
+
+    // On here, off in the struct's own default. A deployment behind TLS wants it and a
+    // developer's plain-HTTP machine must not have it, so the header's presence is asserted
+    // where a deployment is being simulated and its absence is a unit test on the default.
+    config.security.hsts = true;
+
     return config;
 }
 
@@ -109,10 +121,11 @@ void AppHarness::SetUp() {
     app::AppContext::instance().initialize(
         config, database_ ? database_->client() : drogon::orm::DbClientPtr{});
 
-    app::registerErrorHandling();
+    app::registerErrorHandling(config.security);
+    app::registerSecurityHeaders(config.security);
     // The same call production makes: without it Drogon's default one-megabyte body cap would
     // reject upload chunks the deployed server accepts.
-    app::configureUploadLimits(config.uploads);
+    app::configureBodyLimits(config);
     drogon::app().addListener(TEST_HOST, TEST_PORT);
     drogon::app().addListener(TEST_HOST, TEST_ADMIN_PORT);
     drogon::app().setThreadNum(1);
@@ -415,6 +428,17 @@ ScopedAuthRateLimit::ScopedAuthRateLimit(std::size_t attempts, std::chrono::seco
 
 ScopedAuthRateLimit::~ScopedAuthRateLimit() {
     app::AppContext::instance().authRateLimiter().reconfigure(previousAttempts_, previousWindow_);
+}
+
+ScopedAccountRateLimit::ScopedAccountRateLimit(std::size_t requests, std::chrono::seconds window)
+    : previousRequests_(app::AppContext::instance().config().rateLimit.accountRequests),
+      previousWindow_(app::AppContext::instance().config().rateLimit.accountWindowSeconds) {
+    app::AppContext::instance().accountRateLimiter().reconfigure(requests, window);
+}
+
+ScopedAccountRateLimit::~ScopedAccountRateLimit() {
+    app::AppContext::instance().accountRateLimiter().reconfigure(previousRequests_,
+                                                                 previousWindow_);
 }
 
 namespace {

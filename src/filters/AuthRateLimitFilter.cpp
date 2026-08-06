@@ -4,6 +4,7 @@
 
 #include "app/AppContext.h"
 #include "app/HttpError.h"
+#include "common/ClientAddress.h"
 #include "common/Error.h"
 #include "common/Logging.h"
 
@@ -16,7 +17,9 @@ using common::ErrorCode;
 } // namespace
 
 std::string clientAddressOf(const drogon::HttpRequestPtr& request) {
-    return request->getPeerAddr().toIp();
+    return common::resolveClientAddress(request->getPeerAddr().toIp(),
+                                        request->getHeader("X-Forwarded-For"),
+                                        app::AppContext::instance().config().server.trustedProxies);
 }
 
 void AuthRateLimitFilter::doFilter(const drogon::HttpRequestPtr& request,

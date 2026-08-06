@@ -200,6 +200,16 @@ The limiter is in-process. That is correct for the single-node deployment this p
 targets and deliberately avoids adding Redis to the compose stack. If the API is ever scaled
 out, the buckets become a shared-store problem.
 
+A second, looser bucket applies to a caller that already holds a token: `JwtAuthFilter` charges
+every authenticated request against the **account**, so a valid token is no longer a ceiling of
+its own. It lives in the filter rather than on each route so no route can be added without it.
+Numbers, reasoning and the interaction with an upload are in
+[hardening-and-deployment.md](hardening-and-deployment.md) §3.
+
+Which address a bucket is keyed on is not always the peer: behind a TLS terminator it has to
+come from `X-Forwarded-For`, and only from a proxy the deployment named. That is §6.2 of the
+same page, and getting it wrong collapses every per-address bucket here into one.
+
 ## Development affordances
 
 There is no mail transport yet. In `development` **only**, `/register` and

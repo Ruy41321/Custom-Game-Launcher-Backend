@@ -5,6 +5,7 @@
 #include <json/json.h>
 #include <spdlog/spdlog.h>
 
+#include "app/SecurityHeaders.h"
 #include "common/Logging.h"
 
 namespace launcher::app {
@@ -12,6 +13,16 @@ namespace {
 
 using common::Error;
 using common::ErrorCode;
+
+/// What `makeErrorResponse` stamps on the envelopes it builds, set once at start-up.
+///
+/// It is held here rather than passed in because of where these responses come from: a filter
+/// that refuses a request answers it itself, and **a response a filter rejects with never
+/// reaches post-handling advice**. Every 401, every 403 and every throttle on this server is
+/// therefore invisible to the advice that stamps the rest, and this is the one place all of
+/// them pass through. The default is the safe one, so an envelope built before start-up
+/// finished is still described.
+SecurityConfig SECURITY;
 
 } // namespace
 
@@ -39,10 +50,13 @@ drogon::HttpResponsePtr makeErrorResponse(const Error& error, const std::string&
     if (!requestId.empty()) {
         response->addHeader("X-Request-Id", requestId);
     }
+    applySecurityHeaders(response, SECURITY);
     return response;
 }
 
-void registerErrorHandling() {
+void registerErrorHandling(const SecurityConfig& security) {
+    SECURITY = security;
+
     drogon::app().registerPreRoutingAdvice([](const drogon::HttpRequestPtr& request) {
         // An id supplied by an upstream proxy is honoured so a request can be traced across
         // hops; otherwise one is minted here.
@@ -92,6 +106,10 @@ void registerErrorHandling() {
                                        requestId));
         });
 
+    // Built after SECURITY is set, so it carries its headers from `makeErrorResponse` — which
+    // for this response is the only safe moment to write them: Drogon caches this object and
+    // hands the same one to every request that misses, so a later write to it is a write two
+    // event loops can make at once. See applySecurityHeaders.
     drogon::app().setCustom404Page(
         makeErrorResponse(Error{ErrorCode::NotFound, "The requested resource does not exist."}, {}),
         /*set404=*/true);

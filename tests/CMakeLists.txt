@@ -17,6 +17,8 @@ add_executable(launcher_unit_tests
     unit/AuthServiceTest.cpp
     unit/AccountServiceTest.cpp
     unit/RateLimiterTest.cpp
+    unit/ClientAddressTest.cpp
+    unit/SecurityHeadersTest.cpp
     unit/CatalogDomainTest.cpp
     unit/BlobStoreTest.cpp
     unit/MediaDomainTest.cpp
@@ -74,6 +76,7 @@ add_executable(launcher_integration_tests
     integration/RoleGrantIntegrationTest.cpp
     integration/AdminUiEndpointTest.cpp
     integration/CrashReportEndpointTest.cpp
+    integration/HardeningEndpointTest.cpp
 )
 
 target_include_directories(launcher_integration_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")

@@ -136,6 +136,10 @@ void AppContext::initialize(AppConfig config, drogon::orm::DbClientPtr database)
     authRateLimiter_ = std::make_unique<common::RateLimiter>(
         config_.rateLimit.authAttempts, std::chrono::seconds{config_.rateLimit.authWindowSeconds});
 
+    accountRateLimiter_ = std::make_unique<common::RateLimiter>(
+        config_.rateLimit.accountRequests,
+        std::chrono::seconds{config_.rateLimit.accountWindowSeconds});
+
     initialized_ = true;
 }
 
@@ -229,10 +233,16 @@ common::RateLimiter& AppContext::crashRateLimiter() const {
     return *crashRateLimiter_;
 }
 
+common::RateLimiter& AppContext::accountRateLimiter() const {
+    requireInitialized();
+    return *accountRateLimiter_;
+}
+
 void AppContext::reset() {
     initialized_ = false;
     authRateLimiter_.reset();
     crashRateLimiter_.reset();
+    accountRateLimiter_.reset();
     crashReportService_.reset();
     retentionService_.reset();
     downloadService_.reset();

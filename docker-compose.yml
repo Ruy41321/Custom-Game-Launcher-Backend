@@ -66,9 +66,24 @@ services:
       FILE_SECURE_LINK_SECRET: ${FILE_SECURE_LINK_SECRET:-dev-insecure-secure-link-secret}
       SIGNED_URL_TTL: ${SIGNED_URL_TTL:-3600}
 
+      # The two fallbacks here are the development placeholders, and outside development the
+      # server refuses to start on them by name: a deployment that forgets its .env fails
+      # loudly instead of signing every token with a secret this repository publishes.
       JWT_SECRET: ${JWT_SECRET:-dev-insecure-jwt-secret-do-not-deploy}
       DEFAULT_UPLOAD_QUOTA_BYTES: ${DEFAULT_UPLOAD_QUOTA_BYTES:-5368709120}
       FULL_DOWNLOAD_THRESHOLD: ${FULL_DOWNLOAD_THRESHOLD:-0.7}
+
+      ACCOUNT_RATE_LIMIT_REQUESTS: ${ACCOUNT_RATE_LIMIT_REQUESTS:-600}
+      ACCOUNT_RATE_LIMIT_WINDOW: ${ACCOUNT_RATE_LIMIT_WINDOW:-60}
+      MAX_DOCUMENT_BYTES: ${MAX_DOCUMENT_BYTES:-16777216}
+      MAX_ANONYMOUS_BODY_BYTES: ${MAX_ANONYMOUS_BODY_BYTES:-65536}
+
+      # Off, and TRUSTED_PROXIES empty, because nothing terminates TLS in this stack: the API
+      # port is published in the clear and clients reach it directly. Both change together
+      # when a reverse proxy goes in front — see Documentation/deployment.md.
+      HSTS_ENABLED: ${HSTS_ENABLED:-false}
+      HSTS_MAX_AGE: ${HSTS_MAX_AGE:-15552000}
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-[]}
     ports:
       - "${API_HOST_PORT:-8080}:8080"
       # Admin surface: loopback only. Reach it with

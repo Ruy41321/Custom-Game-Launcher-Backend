@@ -159,6 +159,11 @@ layout accepts it later as an additional blob kind, with no schema change.
 | D45 | **A crash report names no account, and there is no column for one** | The obvious design attaches the sender, and it is the wrong one. A crash report is a diagnostic about a *program*; the moment it names an account it becomes personal data, and then the erasure of D43 has one more table to reason about and a later session has one more thing to remember. Here there is nothing to remember: `crash_reports` has no `user_id`, no installation id and no foreign key at all, so a future addition has to be a deliberate migration rather than an accident. The client does the other half — it strips its own profile, data and install directories out of the text *before writing the file*, so the copy on disk is the copy that travels — and the two measures fail differently on purpose rather than one being trusted. The cost is real and accepted: an operator cannot ask which of their testers hit a bug. | Recording the account when a token happens to be present (personal data, and inconsistent — the same crash is attributed or not depending on whether somebody was signed in); an installation id (a pseudonym is still a person once two reports are joined); trusting the client's redaction alone (a message can carry anything a caller put in it) |
 | D46 | **Submitting a crash report needs no account; reading them needs `admin.crashes.read`** | A launcher crashes on the sign-in screen as readily as anywhere else — more readily, since that is where a broken configuration shows — so a route only a signed-in client could reach would be missing exactly the failures worth having, and requiring a token would make the report be *about* an account (D45). What stands in for one is a per-address bucket with its own numbers, a field-by-field size cap, and `enabled` answering **404** rather than a refusal so a deployment that does not collect them looks like one too old to have the route. The bucket is separate from the authentication one because they want different numbers — auth is tight because each attempt costs an Argon2id hash, this is loose because a launcher that crashed five times overnight legitimately sends five — and because sharing would let a burst of crash reports lock somebody out of signing in. Reading is an operator permission because a stack trace is a map of the program and a list of them is a list of ways to break it. | An authenticated route (loses the crashes worth having, and attributes the rest); reusing the auth rate limiter (one of the two numbers is then wrong, and reports can lock out sign-in); answering a refusal when disabled (tells a client the route exists and is being withheld) |
 | D47 | **The fingerprint is computed server-side from the exception type and the *shape* of the stack, and never from the message** | It decides what counts as one bug, so it cannot be the client's to choose: two client versions would disagree about what one crash is, and a caller could hide a report among a thousand distinct ones. Normalising the stack — keeping names, dropping digits, offsets and addresses — is what makes a rebuild the same bug rather than a brand-new one, which a fingerprint over the raw text would get wrong on every release. Leaving the message out is the same argument from the other side: "could not open D:.pak" and "could not open C:\....pak" are one failure, and folding the message in would split it into as many bugs as there are machines. The group's summary comes from the *most recent* report via `DISTINCT ON`, because that is the one an operator is about to open. | A client-supplied fingerprint (disagreement, and a grouping a caller controls); hashing the raw stack (every rebuild is a new bug); including the message (one bug per machine); no grouping at all (a thousand rows of one crash, which answers neither question an operator has) |
+| D48 | **The per-account ceiling lives inside `JwtAuthFilter`, not on each route's filter list** | Every authenticated route on this server already runs through that filter, so putting the limit there means no route — present or future — can be added with a token-holding caller and no ceiling at all, which is precisely the failure a list of forty-seven filter names invites. It runs after verification because the key is the account, and an unverified token names nobody. The default is loose on purpose and for a measurable reason: the busiest legitimate caller is a build upload, one request per chunk, so ten a second means pushing `maxChunkBytes` ten times a second — faster than any link this project targets. Tightness belongs to the address bucket, where an attempt costs an Argon2id hash. | A filter listed per route (forty-seven chances to forget one, and nothing to catch it); one bucket shared with the address limiter (the two want opposite numbers, and a busy upload would lock out sign-in); no per-account limit (the status quo: a valid token had no ceiling at all) |
+| D49 | **Security headers are written where the response is *built*, not only by post-handling advice** | A response a filter rejects with never reaches post-handling advice, so an advice-only implementation left exactly the security-relevant responses — every 401, every 403, every throttle — as the only ones carrying nothing. `makeErrorResponse` is the single place all of them pass through. Two more rules fall out of the same reasoning: a header already present is never replaced, because the admin console states a stricter policy of its own and this is the one surface a browser really renders; and Drogon's cached not-found page is stamped once at construction, because it is one shared object handed to every request that misses and a later write to it is a write two event loops can make at once. | Advice alone (bare 401s and 403s — found by a test, not by review); overwriting unconditionally (loosens the console's own policy); mutating the cached 404 from the advice (a data race for a header that is always the same) |
+| D50 | **HSTS is configurable and off by default, and `includeSubDomains`/`preload` are not offered at all** | It is the one header here that promises something about the *transport* rather than describing the payload, and this stack terminates no TLS. Browsers ignore it over plain HTTP, so enabling it in production before a terminator exists is harmless; receiving it from `http://localhost` is not, because it pins that browser to `https://localhost` with no way back short of clearing browser state. The two extensions are refused because both are promises about names this server does not know it has, and preload is close to irreversible. | On by default (breaks a developer's browser for their other localhost work); always on in production (same header, no way to stage the rollout); offering preload (an irreversible promise from a configuration file) |
+| D51 | **`X-Forwarded-For` is believed only from a configured proxy, and read from the right** | The header on `AuthRateLimitFilter` claimed Drogon's trusted-proxy resolution was in use; the code returned the raw peer address, and nothing was wrong with that until TLS goes in front — at which point every request arrives from the proxy and **every per-address bucket collapses onto one shared by every client**, so one crash-looping launcher locks everybody out of signing in. Reading it only from configured proxies keeps the direct-deployment case honest, since there the header is not a fact about the network but a string somebody typed. Reading from the right is the other half: the left of the header is whatever the original caller sent, so taking the first entry would let anybody hand themselves a fresh bucket per request. IPv4 CIDR is supported because the entry that matters is a container bridge, whose gateway is assigned rather than chosen. | Trusting the header always (a throttle whose key the throttled party picks); ignoring it always (correct today, and silently wrong the moment §6.1 of the deployment page is done); taking the leftmost entry (the same forgeable key, one step removed) |
+| D52 | **A deployment that still holds this repository's placeholder secrets is refused by name, not only by length** | The placeholder in `docker-compose.yml` is thirty-eight characters long and published on GitHub: it passed the `size() < 32` check while being secret from nobody, so a deployment that forgot its `.env` signed every token with a value anybody could read and started up reporting nothing wrong. Matching on `dev-insecure` rather than on the two exact strings covers the variants a future placeholder would take. Development keeps booting on them, which is what they are for. | A length check alone (the status quo, which the compose defaults walk straight through); removing the compose fallbacks (the stack no longer starts with no setup, which is the reason they exist); a warning at start-up (a line in a log nobody reads while the deployment works) |
 
 ---
 
@@ -356,6 +361,9 @@ curl -s http://localhost:8080/api/v1/health
 | **`account_deletion_requests` exists but is never `pending`** | The erasure is immediate (D43), so the table only ever holds `completed` rows and the partial unique index that enforces one open request per account never fires. That is deliberate, not a bug to "fix" by writing a pending row somewhere |
 | **A game's detail response nests the game under `game`** | `gameDetailToJson` returns `{ "game": {...}, "versions": [...], "builds": [...], "media": [...], "inLibrary": bool }`, and the publisher is `game.publisher.displayName`. A test reading `body["id"]` gets an empty string against a perfectly correct 200 |
 | **Negotiating an upload for content the server already holds is a 409, not a session** | It is the deduplication working, and it is what makes a second build carrying the same file cost nothing. A test helper that publishes twice has to expect it rather than trying to `PATCH` a session that was never created |
+| **A response a filter rejects with never reaches post-handling advice** | So an advice registered with `registerPostHandlingAdvice` sees successes and misses every 401, 403 and throttle — which on this server is every response a filter produces. It cost one red test rather than a debugging cycle only because the test asked for the headers on a 401 specifically. Anything that must be true of *every* response has to be written where the response is built, which for errors is `makeErrorResponse` |
+| **A body cap keyed on size can shadow a field cap keyed on meaning** | `RefusesAStackTraceTooLargeToStore` sent a 64 KiB stack trace and started failing with 413 instead of 422 the moment the anonymous body limit landed: the request never reached the field check. The refusal is still correct, but the test had stopped exercising its own rule. A test for a field limit sends a body just over *that* limit, not an obviously enormous one |
+| **A token-bucket check against the running server needs the bucket narrowed too** | Six hundred requests against a 600/60s limit all returned 200, because the bucket refilled faster than PowerShell emptied it — the same shape as the CI rate-limit row above, met again by hand. Set the limit low in `.env` and restart the API rather than trying to out-run the refill |
 
 ---
 
@@ -621,11 +629,13 @@ driving them against this stack found a bug **no test here could have caught**.
   ordering and reordering, SVG refused with 422, deleting one row leaving a shared file alone,
   re-publishing a patch note keeping its original date, and a second delete answering 404
 
-### Milestone 10 — GDPR erasure, deleting a game, and crash reports 🚧
+### Milestone 10 — GDPR erasure, deleting a game, crash reports and hardening ✅
 
-Two of the three parts. The middle one went with open debt 15 of `HANDOFF.md`, because they
-are one question — what survives whom — and the third is the receiving side of the crash
-reports the launcher has been writing to disk since milestone 1.
+The first two below went together, because deleting a game and erasing an account are one
+question — what survives whom — and the second of them was open debt 15 of `HANDOFF.md`. Then
+the receiving side of the crash reports the launcher had been writing to disk since milestone 1,
+its console screen, and finally the hardening, which is the part that had to be scoped before it
+could be written.
 
 - ✅ `DELETE /api/v1/games/{idOrSlug}`: the game and, by cascade, its versions, builds, manifest
   rows, artwork rows, patch notes, library entries and download history. Allowed while other
@@ -677,9 +687,38 @@ The three routes had answered nobody since the day they shipped.
   fingerprint rather than by an account there is no column for
 - ✅ 592/592 tests green (390 unit, 202 integration), `clang-format` clean
 
+#### Hardening — 2026-08-06, and with it M10 ✅
+
+Split before it was written, into code with tests behind it and configuration a machine this
+repository has never seen has to do. The second half is written down rather than left implicit:
+[Documentation/hardening-and-deployment.md](Documentation/hardening-and-deployment.md) §6.
+
+- ✅ **Security headers on every response**, including the ones filters refuse with, which are
+  the ones an advice-only implementation would have missed (D49)
+- ✅ **A per-account ceiling on every authenticated route**, inside `JwtAuthFilter` so no route
+  can be added without one; tested on behaviour — the refusal, the `Retry-After`, one account's
+  exhausted allowance not touching another's, and an unauthenticated route unaffected (D48)
+- ✅ **`server.maxDocumentBytes` and `server.maxAnonymousBodyBytes`**: the manifest ceiling stops
+  being a silent consequence of the upload chunk size, and a caller with no token cannot have a
+  document parsed. The memory limit stays at the chunk size
+- ✅ **`X-Forwarded-For` honoured only from configured proxies, and read from the right** (D51) —
+  the code half of the TLS work, without which every per-address bucket collapses into one the
+  day a terminator goes in front
+- ✅ **The placeholder secrets are refused by name outside development** (D52), which the length
+  check alone let through
+- ✅ HSTS configurable, off by default, no `includeSubDomains` and no `preload` (D50)
+- ✅ 626/626 tests green (412 unit, 214 integration), `clang-format` clean
+
 ### Next up
-- ⬜ **M10**, the third that is left: security hardening. Rate limiting exists on the auth
-  endpoints and now on crash submission; HTTPS, security headers and everything else do not
+
+- ⬜ **Self-update.** `GameLauncher.Updater` is a stub with its command line already drawn, and
+  it cannot be finished client-side: it needs a release surface here first — releases, channels,
+  and signature verification — which has never been scheduled and has no milestone number.
+- ⬜ **TLS in the stack.** Deliberately not code, and written out in
+  [Documentation/hardening-and-deployment.md](Documentation/hardening-and-deployment.md) §6
+  rather than left implicit: a terminator in front of the API, the two published ports moved to
+  loopback, `https://` base URLs, and the two settings — `HSTS_ENABLED` and `TRUSTED_PROXIES` —
+  that only mean something once it exists.
 
 Still deliberately absent, and worth stating so a later session does not assume otherwise:
 there is no automatic retention policy — nothing deletes an *old* build on its own, only what a
