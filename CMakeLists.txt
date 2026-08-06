@@ -24,6 +24,11 @@ find_package(spdlog CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(jwt-cpp CONFIG REQUIRED)
 
+# SMTP delivery. libcurl rather than a hand-written client over trantor, chiefly because it
+# verifies the relay's certificate: the suite here has no mail server, so a client written by
+# hand would be the one security-relevant piece of this repository that no test ever runs.
+find_package(CURL REQUIRED)
+
 # libpq is used directly by the migration runner. Drogon's PostgreSQL backend cannot send
 # multi-statement scripts once libpq is new enough for pipeline mode; see
 # src/migrations/MigrationRunner.h.
@@ -82,6 +87,19 @@ configure_file(
     @ONLY)
 list(APPEND LAUNCHER_CORE_SOURCES "${CMAKE_CURRENT_BINARY_DIR}/generated/AdminUi.cpp")
 
+# The two pages a link in an email lands on, embedded the same way and for the same reasons.
+set(LAUNCHER_VERIFY_EMAIL_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/auth/ui/verify-email.html")
+set(LAUNCHER_PASSWORD_RESET_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/auth/ui/password-reset.html")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${LAUNCHER_VERIFY_EMAIL_SOURCE}" "${LAUNCHER_PASSWORD_RESET_SOURCE}")
+file(READ "${LAUNCHER_VERIFY_EMAIL_SOURCE}" LAUNCHER_VERIFY_EMAIL_HTML)
+file(READ "${LAUNCHER_PASSWORD_RESET_SOURCE}" LAUNCHER_PASSWORD_RESET_HTML)
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/AuthPages.cpp.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/AuthPages.cpp"
+    @ONLY)
+list(APPEND LAUNCHER_CORE_SOURCES "${CMAKE_CURRENT_BINARY_DIR}/generated/AuthPages.cpp")
+
 add_library(launcher_core OBJECT ${LAUNCHER_CORE_SOURCES})
 
 target_include_directories(launcher_core
@@ -96,6 +114,7 @@ target_link_libraries(launcher_core
         OpenSSL::Crypto
         PostgreSQL::PostgreSQL
         jwt-cpp::jwt-cpp
+        CURL::libcurl
         ${LAUNCHER_SODIUM_TARGET}
     PRIVATE
         launcher_warnings)

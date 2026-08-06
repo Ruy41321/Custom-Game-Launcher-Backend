@@ -26,10 +26,19 @@ class AuthController : public drogon::HttpController<AuthController> {
     ADD_METHOD_TO(AuthController::refresh, "/api/v1/auth/refresh", drogon::Post);
     ADD_METHOD_TO(AuthController::logout, "/api/v1/auth/logout", drogon::Post);
     ADD_METHOD_TO(AuthController::verifyEmail, "/api/v1/auth/verify-email", drogon::Post);
+    // Only the mail bucket, because this one costs no Argon2id hash — it costs a message in
+    // somebody's inbox, which is what that bucket is for.
+    ADD_METHOD_TO(AuthController::resendVerification,
+                  "/api/v1/auth/verify-email/resend",
+                  drogon::Post,
+                  "launcher::filters::MailRateLimitFilter");
+    // Both buckets: it is an unauthenticated credential-adjacent endpoint *and* it sends a
+    // message, and the two limits exist for different reasons.
     ADD_METHOD_TO(AuthController::requestPasswordReset,
                   "/api/v1/auth/password-reset/request",
                   drogon::Post,
-                  "launcher::filters::AuthRateLimitFilter");
+                  "launcher::filters::AuthRateLimitFilter",
+                  "launcher::filters::MailRateLimitFilter");
     ADD_METHOD_TO(AuthController::confirmPasswordReset,
                   "/api/v1/auth/password-reset/confirm",
                   drogon::Post,
@@ -54,6 +63,9 @@ class AuthController : public drogon::HttpController<AuthController> {
 
     drogon::Task<> verifyEmail(drogon::HttpRequestPtr request,
                                std::function<void(const drogon::HttpResponsePtr&)> callback);
+
+    drogon::Task<> resendVerification(drogon::HttpRequestPtr request,
+                                      std::function<void(const drogon::HttpResponsePtr&)> callback);
 
     drogon::Task<>
     requestPasswordReset(drogon::HttpRequestPtr request,

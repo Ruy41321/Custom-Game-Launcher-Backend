@@ -2,7 +2,9 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "common/EnvInterpolation.h"
@@ -105,6 +107,69 @@ struct AuthConfig {
     uint64_t argon2MemoryLimitBytes{0};
 };
 
+/// How a deployment delivers the two messages the authentication flows cannot work without.
+enum class MailTransport {
+    /// A real relay, over SMTP. The only value a deployed environment accepts.
+    Smtp,
+    /// Write the message to the log instead of sending it. Development only, and refused
+    /// elsewhere by `validate()`: the body of a reset message is a live credential.
+    Log,
+    /// Deliberately no mail at all. Then nothing can require a verified address and the routes
+    /// that would send answer 404, so a launcher sees a server that does not have the feature.
+    None,
+};
+
+enum class MailSecurity {
+    /// Only ever right for a relay on the same host or the same private network.
+    None,
+    /// Connect in the clear and refuse to continue unless STARTTLS succeeds.
+    StartTls,
+    /// TLS from the first byte, the implicit form on port 465.
+    Tls,
+};
+
+std::optional<MailTransport> parseMailTransport(std::string_view value);
+
+std::optional<MailSecurity> parseMailSecurity(std::string_view value);
+
+struct MailConfig {
+    /// The harmless one is the default, and every deployed configuration says `smtp` out loud.
+    /// A document that forgets the section entirely therefore fails to start outside
+    /// development, with a sentence naming the variable to set, rather than starting and
+    /// delivering nothing.
+    MailTransport transport{MailTransport::Log};
+    std::string host;
+    uint16_t port{587};
+    std::string username;
+    std::string password;
+    MailSecurity security{MailSecurity::StartTls};
+    std::string fromAddress;
+    std::string fromName{"Custom Game Launcher"};
+
+    /// The origin the links in a message are built from.
+    ///
+    /// Configuration rather than the request's `Host` header, which is chosen by whoever is
+    /// calling: building the link from it would let a stranger pick the domain that appears in
+    /// a message delivered to somebody else's inbox.
+    std::string linkBaseUrl{"http://localhost:8080"};
+    std::string productName{"Custom Game Launcher"};
+
+    /// Bounds the whole SMTP conversation. A registration waits for it before it can say
+    /// whether the message went out, so it is short.
+    uint32_t timeoutSeconds{10};
+
+    /// Its own bucket, and not the authentication one, for the routes that send a message.
+    ///
+    /// The auth bucket is tight because every attempt there costs an Argon2id hash; these cost
+    /// no CPU at all and spend something scarcer — a stranger's inbox, and the deployment's
+    /// standing with its relay. Sharing the two would mean one set of numbers was wrong, and
+    /// would let a burst of resend requests lock somebody out of signing in.
+    uint32_t sendAttempts{3};
+    uint32_t sendWindowSeconds{900};
+
+    bool enabled() const { return transport != MailTransport::None; }
+};
+
 struct RateLimitConfig {
     /// Attempts allowed per client address before the bucket empties, and the window over
     /// which it refills. Applies to login, registration and password-reset requests.
@@ -182,6 +247,7 @@ struct AppConfig {
     StorageConfig storage;
     MediaConfig media;
     AuthConfig auth;
+    MailConfig mail;
     RateLimitConfig rateLimit;
     UpdateConfig updates;
     UploadConfig uploads;

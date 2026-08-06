@@ -164,6 +164,9 @@ layout accepts it later as an additional blob kind, with no schema change.
 | D50 | **HSTS is configurable and off by default, and `includeSubDomains`/`preload` are not offered at all** | It is the one header here that promises something about the *transport* rather than describing the payload, and this stack terminates no TLS. Browsers ignore it over plain HTTP, so enabling it in production before a terminator exists is harmless; receiving it from `http://localhost` is not, because it pins that browser to `https://localhost` with no way back short of clearing browser state. The two extensions are refused because both are promises about names this server does not know it has, and preload is close to irreversible. | On by default (breaks a developer's browser for their other localhost work); always on in production (same header, no way to stage the rollout); offering preload (an irreversible promise from a configuration file) |
 | D51 | **`X-Forwarded-For` is believed only from a configured proxy, and read from the right** | The header on `AuthRateLimitFilter` claimed Drogon's trusted-proxy resolution was in use; the code returned the raw peer address, and nothing was wrong with that until TLS goes in front — at which point every request arrives from the proxy and **every per-address bucket collapses onto one shared by every client**, so one crash-looping launcher locks everybody out of signing in. Reading it only from configured proxies keeps the direct-deployment case honest, since there the header is not a fact about the network but a string somebody typed. Reading from the right is the other half: the left of the header is whatever the original caller sent, so taking the first entry would let anybody hand themselves a fresh bucket per request. IPv4 CIDR is supported because the entry that matters is a container bridge, whose gateway is assigned rather than chosen. | Trusting the header always (a throttle whose key the throttled party picks); ignoring it always (correct today, and silently wrong the moment §6.1 of the deployment page is done); taking the leftmost entry (the same forgeable key, one step removed) |
 | D52 | **A deployment that still holds this repository's placeholder secrets is refused by name, not only by length** | The placeholder in `docker-compose.yml` is thirty-eight characters long and published on GitHub: it passed the `size() < 32` check while being secret from nobody, so a deployment that forgot its `.env` signed every token with a value anybody could read and started up reporting nothing wrong. Matching on `dev-insecure` rather than on the two exact strings covers the variants a future placeholder would take. Development keeps booting on them, which is what they are for. | A length check alone (the status quo, which the compose defaults walk straight through); removing the compose fallbacks (the stack no longer starts with no setup, which is the reason they exist); a warning at start-up (a line in a log nobody reads while the deployment works) |
+| D53 | **A registration survives a verification message that could not be sent, and says so** | The account is created, the answer carries `verificationEmailSent: false`, and `POST /auth/verify-email/resend` is the way back. Undoing the registration was the obvious alternative and is worse: creating an account is not one statement, so unwinding it is a compensating delete that can fail on its own — and when it does, the address is held by an account that cannot sign in and cannot be created again, which turns an outage at the relay into a lost account. The send is *awaited*, bounded by `mail.timeoutSeconds`, precisely so the answer can distinguish the two cases: telling somebody to check an inbox nothing was sent to is a wait with no end. A password reset cannot say the same thing — its answer is identical whether or not the address exists — so there a failed send is a log line and nothing more. The raw token never leaves `AuthService`: it is generated, hashed, composed into a message and dropped inside one function, so the `dev*` fields are gone rather than moved. | Failing the registration and unwinding the row (a compensating delete that strands an address when it fails); fire-and-forget with an optimistic answer (the client tells people to wait for something that never left); a retry queue (an outbox table and a sweeper, for a message that arrives at most once per registration) |
+| D54 | **The links land on two pages this server serves, and neither page changes anything by being opened** | Every authentication route here is a JSON `POST` and an inbox opens URLs with a browser, so without a page a verification link is a URL nobody can follow — and the launcher has no screen for either flow, so "the client will handle it" was not available either. `/verify-email` and `/password-reset` are self-contained pages embedded from `src/auth/ui/` the way the console is, outside `/api/v1/` because the version in a path is a promise about a wire contract and these are for a person. The load-bearing part is that a `GET` decides nothing: a mail provider's link scanner fetches every URL in a message, so a page that confirmed on load would spend the token before its owner clicked and show them "this link is invalid" for having done nothing wrong. Each states its own CSP and `Cache-Control: no-store`, because the URL carries a single-use token. | Confirming on `GET` (link scanners consume it); a plain HTML form posting form-encoded (a second body format on a JSON route, and `form-action` would have to be opened); two screens in the launcher (a client release before anybody can register, and the reset flow needs a screen that does not exist); no page at all (the status quo: a link nobody can follow) |
+| D55 | **The routes that send a message have their own bucket, and a deployment that cannot send refuses to start** | Same shape as D46 and the same reason it is not the authentication bucket: that one is tight because every attempt behind it costs an Argon2id hash, while these cost no CPU and spend something scarcer — a stranger's inbox and the deployment's standing with its relay. Sharing would make one of the two sets of numbers wrong and would let a burst of resend requests lock somebody out of signing in; the reset request carries both filters, because it is both things at once. The start-up refusals are the other half: `smtp` with no relay, `log` outside development (it writes the body, and the body of a reset message is a live credential), and `none` together with `requireVerifiedEmail` (nothing delivers the link, nothing lets anybody in without it, so every account is one that can never sign in) — which is exactly the state this repository shipped in until now, discovered at the first registration rather than at boot. With `none` the routes that send answer **404**, as a disabled crash-report route does. | Reusing the auth bucket (one of two numbers is wrong, and reports lock out sign-in); a warning at start-up (D52's argument: a line in a log nobody reads while the deployment appears to work); allowing `log` in production (credentials in a log with a retention policy); leaving the combination unchecked (the debt this closes, rediscovered by the first user) |
 
 ---
 
@@ -265,6 +268,20 @@ docker compose exec db psql -U launcher -d launcher -c "\dt"
 docker compose exec api /app/launcher-api --grant-role you@example.com admin
 docker compose exec api /app/launcher-api --grant-role friend@example.com dev
 
+# Mail. The development stack runs a catcher (docker-compose.override.yml), which accepts
+# every message and delivers none; its inbox is a web page. Nothing in the suite speaks SMTP,
+# so this is where the sender is actually exercised — see the note in §9.
+#   http://localhost:8025
+#
+# Driving a flow by hand: register, then pull the link out of the message.
+curl -s -X POST http://localhost:8080/api/v1/auth/register -H 'Content-Type: application/json' \
+    -d '{"email":"a@b.test","password":"correct horse battery staple","displayName":"Tester"}'
+curl -s "http://localhost:8025/api/v1/messages?limit=1"    # then GET /api/v1/message/<ID>
+
+# The development stack does not require a verified address, so registrations sign straight
+# in. To exercise the deployed shape, restart the API with the flag on:
+REQUIRE_VERIFIED_EMAIL=true docker compose up -d api
+
 # The admin console, once ADMIN_ENABLED=true. From anywhere but the server itself it is
 # reached through a tunnel and nothing more.
 ssh -L 9090:127.0.0.1:9090 user@your-vps    # then open http://localhost:9090/admin
@@ -363,6 +380,8 @@ curl -s http://localhost:8080/api/v1/health
 | **Negotiating an upload for content the server already holds is a 409, not a session** | It is the deduplication working, and it is what makes a second build carrying the same file cost nothing. A test helper that publishes twice has to expect it rather than trying to `PATCH` a session that was never created |
 | **A response a filter rejects with never reaches post-handling advice** | So an advice registered with `registerPostHandlingAdvice` sees successes and misses every 401, 403 and throttle — which on this server is every response a filter produces. It cost one red test rather than a debugging cycle only because the test asked for the headers on a 401 specifically. Anything that must be true of *every* response has to be written where the response is built, which for errors is `makeErrorResponse` |
 | **A body cap keyed on size can shadow a field cap keyed on meaning** | `RefusesAStackTraceTooLargeToStore` sent a 64 KiB stack trace and started failing with 413 instead of 422 the moment the anonymous body limit landed: the request never reached the field check. The refusal is still correct, but the test had stopped exercising its own rule. A test for a field limit sends a body just over *that* limit, not an obviously enormous one |
+| **Adding a line to `vcpkg.json` means rebuilding the toolchain image, not just reconfiguring** | The fast loop builds against `/src/vcpkg_installed` *inside* `custom-game-launcher-api-build`, so a new dependency is invisible until `docker compose --profile tools build api-build` has run — and the failure is `find_package` not finding a package that is sitting in the manifest, which reads like a broken CMake file. With vcpkg's binary cache warm it is about half a minute; from cold it is the first-build story again |
+| **vcpkg's `curl` port only speaks SMTP with its `non-http` feature** | It is in the port's default features, so a bare `"curl"` works today — but a dependency written as `default-features: false` with only `ssl` would build a libcurl that refuses `smtp://` at runtime with "unsupported protocol", which reads as a configuration problem at the relay. The manifest names `non-http` explicitly for that reason. Nothing new is needed in the runtime image: vcpkg links it statically, and `ca-certificates` was already there |
 | **A token-bucket check against the running server needs the bucket narrowed too** | Six hundred requests against a 600/60s limit all returned 200, because the bucket refilled faster than PowerShell emptied it — the same shape as the CI rate-limit row above, met again by hand. Set the limit low in `.env` and restart the API rather than trying to out-run the refill |
 
 ---
@@ -450,8 +469,8 @@ Legend: ✅ done · 🚧 in progress · ⬜ not started
 - ✅ Repository layer over Drogon coroutines; `JwtAuthFilter` + `requirePermission`
 - ✅ Per-address token-bucket rate limiting on the unauthenticated endpoints
 - ✅ [Documentation/authentication.md](Documentation/authentication.md)
-- ⚠️ No mail transport yet: verification and reset tokens are returned in the response in
-  **development only**. Remove those fields when delivery lands.
+- ✅ ~~No mail transport yet~~ — **closed on 2026-08-06**, see below. The dev token fields are
+  gone from the response in every environment.
 
 ### GitHub Actions, first real runs (2026-08-03)
 The workflow finally ran. Three runs, and what each taught:
@@ -708,6 +727,38 @@ repository has never seen has to do. The second half is written down rather than
   check alone let through
 - ✅ HSTS configurable, off by default, no `includeSubDomains` and no `preload` (D50)
 - ✅ 626/626 tests green (412 unit, 214 integration), `clang-format` clean
+
+### Mail delivery — 2026-08-06
+
+Open debt 1 of `HANDOFF.md`, and the one that kept this server from receiving its first real
+user: `requireVerifiedEmail` was true in production, the verification token came back in the
+response body in development **only**, and nothing anywhere sent a message — so on a real
+deployment nobody could finish registering and nobody could recover a password.
+
+- ✅ `services::IMailSender` beside the service that decides *when* something is due, with
+  `SmtpMailSender` over libcurl, `LoggingMailSender` for development and `DisabledMailSender`
+  for a deployment that sends nothing. One new dependency, `curl[non-http,openssl]`
+- ✅ The `dev*` token fields are **gone from both repositories**. The raw token now lives for
+  the length of one function inside `AuthService` and is never returned to anybody
+- ✅ A send that fails does not undo a registration; the answer says `verificationEmailSent`
+  and `POST /auth/verify-email/resend` is the recovery (D53)
+- ✅ `GET /verify-email` and `GET /password-reset`: two embedded pages, because a link in a
+  message is opened by a browser and every route here is a JSON POST. Neither consumes
+  anything on the `GET` (D54)
+- ✅ Its own rate-limit bucket for the routes that send, and three start-up refusals for the
+  configurations that cannot deliver (D55)
+- ✅ [Documentation/authentication.md](Documentation/authentication.md) §Delivering the two
+  links, rewritten over the old "development affordances"
+- ✅ 656/656 tests green (434 unit, 222 integration), `clang-format` clean
+
+**Verified by hand against a real relay**, because the suite has no mail server — Mailpit in
+`docker-compose.override.yml`, which stays out of the production compose on purpose. Registered
+with `REQUIRE_VERIFIED_EMAIL=true`, read the message in the catcher, opened the link **in a
+browser** and pressed the button, then signed in; requested a reset, mistyped the confirmation
+and was told, changed the password, and watched the old one stop working and the used link
+answer 422. Then stopped the relay: the registration still succeeded in two seconds with
+`verificationEmailSent: false` and one error line naming only the account id, and the resend
+recovered the account once the relay was back.
 
 ### Next up
 

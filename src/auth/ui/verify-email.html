@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Confirm your address</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: #f4f5f7; color: #1c2024; padding: 24px;
+  }
+  main { width: 100%; max-width: 30rem; background: #fff; border-radius: 12px; padding: 32px;
+         box-shadow: 0 1px 3px rgba(0,0,0,.12), 0 8px 24px rgba(0,0,0,.06); }
+  h1 { font-size: 1.35rem; margin: 0 0 .75rem; }
+  p { margin: 0 0 1.25rem; }
+  button { font: inherit; font-weight: 600; padding: .7rem 1.4rem; border: 0; border-radius: 8px;
+           background: #2d5bd7; color: #fff; cursor: pointer; }
+  button:disabled { opacity: .55; cursor: default; }
+  .note { font-size: .9rem; color: #5b6470; margin-bottom: 0; }
+  .ok { color: #1a7f43; font-weight: 600; }
+  .bad { color: #b3261e; font-weight: 600; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #16181c; color: #e6e8ea; }
+    main { background: #202329; box-shadow: none; }
+    .note { color: #9aa3ad; }
+    .ok { color: #6fd08c; } .bad { color: #ef8a82; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Confirm your address</h1>
+  <p id="message">Press the button to finish creating your account.</p>
+  <p><button id="confirm" type="button">Confirm my address</button></p>
+  <p class="note">You can close this page afterwards and sign in from the launcher.</p>
+</main>
+<script>
+  // The token is only ever read from the query string and only ever sent in a body: it never
+  // reaches another origin, and the page asks for no referrer.
+  var token = new URLSearchParams(window.location.search).get('token') || '';
+  var button = document.getElementById('confirm');
+  var message = document.getElementById('message');
+
+  function say(text, className) {
+    message.textContent = text;
+    message.className = className || '';
+  }
+
+  if (!token) {
+    button.disabled = true;
+    say('This link is missing its token. Open the link from the message exactly as it arrived.', 'bad');
+  }
+
+  // Deliberately not done on load. A mail provider's link scanner opens every URL in a
+  // message, so a page that confirmed by itself would burn the token before its owner ever
+  // clicked, and they would be told the link was invalid.
+  button.addEventListener('click', function () {
+    button.disabled = true;
+    say('Confirming…');
+
+    fetch('/api/v1/auth/verify-email', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: token })
+    }).then(function (response) {
+      return response.json().catch(function () { return {}; }).then(function (body) {
+        if (response.ok) {
+          button.remove();
+          say('Your address is confirmed. You can sign in from the launcher now.', 'ok');
+          return;
+        }
+        button.disabled = false;
+        say(body.detail || 'This link is invalid or has expired. Ask the launcher for a new one.', 'bad');
+      });
+    }).catch(function () {
+      button.disabled = false;
+      say('The server could not be reached. Try again in a moment.', 'bad');
+    });
+  });
+</script>
+</body>
+</html>

@@ -154,6 +154,8 @@ TEST(ConfigTest, DevelopmentToleratesBlankSecrets) {
 TEST(ConfigTest, ProductionRejectsAWeakJwtSecret) {
     constexpr const char* document = R"({
       "environment": "production",
+      "mail": { "transport": "smtp", "host": "smtp.example.com",
+                "fromAddress": "no-reply@example.com" },
       "database": { "name": "launcher", "user": "launcher", "password": "pw" },
       "storage": { "secureLinkSecret": "link-secret" },
       "auth": { "jwtSecret": "too-short" }
@@ -168,6 +170,8 @@ TEST(ConfigTest, ProductionRejectsAWeakJwtSecret) {
 TEST(ConfigTest, ProductionRejectsAMissingSecureLinkSecret) {
     constexpr const char* document = R"({
       "environment": "production",
+      "mail": { "transport": "smtp", "host": "smtp.example.com",
+                "fromAddress": "no-reply@example.com" },
       "database": { "name": "launcher", "user": "launcher", "password": "pw" },
       "auth": { "jwtSecret": "0123456789abcdef0123456789abcdef" }
     })";
@@ -181,6 +185,8 @@ TEST(ConfigTest, ProductionRejectsAMissingSecureLinkSecret) {
 TEST(ConfigTest, ProductionRejectsABlankDatabasePassword) {
     constexpr const char* document = R"({
       "environment": "production",
+      "mail": { "transport": "smtp", "host": "smtp.example.com",
+                "fromAddress": "no-reply@example.com" },
       "database": { "name": "launcher", "user": "launcher" },
       "storage": { "secureLinkSecret": "link-secret" },
       "auth": { "jwtSecret": "0123456789abcdef0123456789abcdef" }
@@ -195,6 +201,8 @@ TEST(ConfigTest, ProductionRejectsABlankDatabasePassword) {
 TEST(ConfigTest, ProductionAcceptsAFullyConfiguredDocument) {
     constexpr const char* document = R"({
       "environment": "production",
+      "mail": { "transport": "smtp", "host": "smtp.example.com",
+                "fromAddress": "no-reply@example.com" },
       "database": { "name": "launcher", "user": "launcher", "password": "pw" },
       "storage": { "secureLinkSecret": "link-secret" },
       "auth": { "jwtSecret": "0123456789abcdef0123456789abcdef" }
@@ -213,6 +221,8 @@ TEST(ConfigTest, ProductionRefusesTheDevelopmentPlaceholderSecretsByName) {
     // reporting nothing wrong at all.
     constexpr const char* document = R"({
       "environment": "production",
+      "mail": { "transport": "smtp", "host": "smtp.example.com",
+                "fromAddress": "no-reply@example.com" },
       "database": { "name": "launcher", "user": "launcher", "password": "pw" },
       "storage": { "secureLinkSecret": "link-secret" },
       "auth": { "jwtSecret": "dev-insecure-jwt-secret-do-not-deploy" }
@@ -224,9 +234,126 @@ TEST(ConfigTest, ProductionRefusesTheDevelopmentPlaceholderSecretsByName) {
     EXPECT_NE(result.error().detail.find("placeholder"), std::string::npos);
 }
 
+// ---------------------------------------------------------------------------
+// Mail. A deployment that cannot deliver a verification link is one where nobody can finish
+// registering, so the refusals below happen at start-up rather than at the first registration.
+// ---------------------------------------------------------------------------
+
+TEST(ConfigTest, SmtpWithoutARelayIsRefusedEvenInDevelopment) {
+    constexpr const char* document = R"({
+      "environment": "development",
+      "database": { "name": "launcher", "user": "launcher" },
+      "mail": { "transport": "smtp", "fromAddress": "no-reply@example.com" }
+    })";
+
+    const auto result = AppConfig::parse(document, lookupFrom({}));
+
+    ASSERT_FALSE(result.ok());
+    EXPECT_NE(result.error().detail.find("mail.host"), std::string::npos);
+}
+
+// A document that says nothing about mail gets the transport that cannot leak anything and
+// cannot fail to connect — and, outside development, is refused for exactly that reason.
+TEST(ConfigTest, ADocumentWithNoMailSectionGetsTheLogTransport) {
+    const auto result = AppConfig::parse(MINIMAL_DEVELOPMENT_CONFIG, lookupFrom({}));
+
+    ASSERT_TRUE(result.ok()) << result.error().detail;
+    EXPECT_EQ(std::move(result).value().mail.transport, launcher::app::MailTransport::Log);
+}
+
+TEST(ConfigTest, ProductionRefusesADocumentThatSaysNothingAboutMailAtAll) {
+    constexpr const char* document = R"({
+      "environment": "production",
+      "database": { "name": "launcher", "user": "launcher", "password": "pw" },
+      "storage": { "secureLinkSecret": "link-secret" },
+      "auth": { "jwtSecret": "0123456789abcdef0123456789abcdef" }
+    })";
+
+    const auto result = AppConfig::parse(document, lookupFrom({}));
+
+    ASSERT_FALSE(result.ok());
+    EXPECT_NE(result.error().detail.find("MAIL_TRANSPORT"), std::string::npos);
+}
+
+// The log transport writes the body of the message, and the body of a reset message is a live
+// credential. Selecting it on a deployed environment would be filing credentials into a log.
+TEST(ConfigTest, ProductionRefusesTheLogTransport) {
+    constexpr const char* document = R"({
+      "environment": "production",
+      "database": { "name": "launcher", "user": "launcher", "password": "pw" },
+      "storage": { "secureLinkSecret": "link-secret" },
+      "auth": { "jwtSecret": "0123456789abcdef0123456789abcdef" },
+      "mail": { "transport": "log" }
+    })";
+
+    const auto result = AppConfig::parse(document, lookupFrom({}));
+
+    ASSERT_FALSE(result.ok());
+    EXPECT_NE(result.error().detail.find("MAIL_TRANSPORT"), std::string::npos);
+}
+
+TEST(ConfigTest, ProductionRefusesARequiredVerificationNothingCanDeliver) {
+    constexpr const char* document = R"({
+      "environment": "production",
+      "database": { "name": "launcher", "user": "launcher", "password": "pw" },
+      "storage": { "secureLinkSecret": "link-secret" },
+      "auth": { "jwtSecret": "0123456789abcdef0123456789abcdef", "requireVerifiedEmail": true },
+      "mail": { "transport": "none" }
+    })";
+
+    const auto result = AppConfig::parse(document, lookupFrom({}));
+
+    ASSERT_FALSE(result.ok());
+    EXPECT_NE(result.error().detail.find("requireVerifiedEmail"), std::string::npos);
+}
+
+// Turning mail off is a legitimate configuration, and this is the shape it has to take.
+TEST(ConfigTest, ProductionAcceptsNoMailAtAllWhenNothingRequiresAVerifiedAddress) {
+    constexpr const char* document = R"({
+      "environment": "production",
+      "database": { "name": "launcher", "user": "launcher", "password": "pw" },
+      "storage": { "secureLinkSecret": "link-secret" },
+      "auth": { "jwtSecret": "0123456789abcdef0123456789abcdef", "requireVerifiedEmail": false },
+      "mail": { "transport": "none" }
+    })";
+
+    const auto result = AppConfig::parse(document, lookupFrom({}));
+
+    ASSERT_TRUE(result.ok()) << result.error().detail;
+    EXPECT_FALSE(std::move(result).value().mail.enabled());
+}
+
+TEST(ConfigTest, RejectsATransportNobodyImplements) {
+    constexpr const char* document = R"({
+      "environment": "development",
+      "database": { "name": "launcher", "user": "launcher" },
+      "mail": { "transport": "carrier-pigeon" }
+    })";
+
+    const auto result = AppConfig::parse(document, lookupFrom({}));
+
+    ASSERT_FALSE(result.ok());
+    EXPECT_NE(result.error().detail.find("carrier-pigeon"), std::string::npos);
+}
+
+TEST(ConfigTest, RejectsALinkBaseUrlThatIsNotThere) {
+    constexpr const char* document = R"({
+      "environment": "development",
+      "database": { "name": "launcher", "user": "launcher" },
+      "mail": { "transport": "log", "linkBaseUrl": "" }
+    })";
+
+    const auto result = AppConfig::parse(document, lookupFrom({}));
+
+    ASSERT_FALSE(result.ok());
+    EXPECT_NE(result.error().detail.find("linkBaseUrl"), std::string::npos);
+}
+
 TEST(ConfigTest, ProductionRefusesThePlaceholderSigningSecretToo) {
     constexpr const char* document = R"({
       "environment": "production",
+      "mail": { "transport": "smtp", "host": "smtp.example.com",
+                "fromAddress": "no-reply@example.com" },
       "database": { "name": "launcher", "user": "launcher", "password": "pw" },
       "storage": { "secureLinkSecret": "dev-insecure-secure-link-secret" },
       "auth": { "jwtSecret": "0123456789abcdef0123456789abcdef" }

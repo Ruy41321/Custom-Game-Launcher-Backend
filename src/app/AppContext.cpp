@@ -9,17 +9,60 @@
 #include "repositories/postgres/PgDownloadRepositories.h"
 #include "repositories/postgres/PgRepositories.h"
 #include "repositories/postgres/PgUploadRepositories.h"
+#include "services/DisabledMailSender.h"
+#include "services/LoggingMailSender.h"
+#include "services/SmtpMailSender.h"
 
 namespace launcher::app {
+namespace {
+
+services::SmtpSecurity smtpSecurityOf(MailSecurity security) {
+    switch (security) {
+    case MailSecurity::None:
+        return services::SmtpSecurity::None;
+    case MailSecurity::Tls:
+        return services::SmtpSecurity::Tls;
+    case MailSecurity::StartTls:
+        break;
+    }
+    return services::SmtpSecurity::StartTls;
+}
+
+std::unique_ptr<services::IMailSender> mailSenderFor(const MailConfig& config) {
+    switch (config.transport) {
+    case MailTransport::Log:
+        return std::make_unique<services::LoggingMailSender>();
+    case MailTransport::None:
+        return std::make_unique<services::DisabledMailSender>();
+    case MailTransport::Smtp:
+        break;
+    }
+
+    services::SmtpSettings settings;
+    settings.host = config.host;
+    settings.port = config.port;
+    settings.username = config.username;
+    settings.password = config.password;
+    settings.security = smtpSecurityOf(config.security);
+    settings.fromAddress = config.fromAddress;
+    settings.fromName = config.fromName;
+    settings.timeout = std::chrono::seconds{config.timeoutSeconds};
+    return std::make_unique<services::SmtpMailSender>(std::move(settings));
+}
+
+} // namespace
 
 AppContext& AppContext::instance() {
     static AppContext context;
     return context;
 }
 
-void AppContext::initialize(AppConfig config, drogon::orm::DbClientPtr database) {
+void AppContext::initialize(AppConfig config,
+                            drogon::orm::DbClientPtr database,
+                            std::unique_ptr<services::IMailSender> mailSender) {
     config_ = std::move(config);
     database_ = std::move(database);
+    mailSender_ = mailSender ? std::move(mailSender) : mailSenderFor(config_.mail);
 
     users_ = std::make_unique<repositories::postgres::PgUserRepository>(database_);
     accounts_ = std::make_unique<repositories::postgres::PgAccountRepository>(database_);
@@ -57,6 +100,9 @@ void AppContext::initialize(AppConfig config, drogon::orm::DbClientPtr database)
     authSettings.emailVerificationTtl =
         std::chrono::seconds{config_.auth.emailVerificationTtlSeconds};
     authSettings.passwordResetTtl = std::chrono::seconds{config_.auth.passwordResetTtlSeconds};
+    authSettings.mailEnabled = config_.mail.enabled();
+    authSettings.mail.linkBaseUrl = config_.mail.linkBaseUrl;
+    authSettings.mail.productName = config_.mail.productName;
 
     authService_ = std::make_unique<services::AuthService>(*users_,
                                                            *roles_,
@@ -64,6 +110,7 @@ void AppContext::initialize(AppConfig config, drogon::orm::DbClientPtr database)
                                                            *userTokens_,
                                                            *passwordHasher_,
                                                            *tokenService_,
+                                                           *mailSender_,
                                                            std::move(authSettings));
 
     // One reclaimer, copied into both services that delete artwork, so the "ask before removing
@@ -139,6 +186,9 @@ void AppContext::initialize(AppConfig config, drogon::orm::DbClientPtr database)
     accountRateLimiter_ = std::make_unique<common::RateLimiter>(
         config_.rateLimit.accountRequests,
         std::chrono::seconds{config_.rateLimit.accountWindowSeconds});
+
+    mailRateLimiter_ = std::make_unique<common::RateLimiter>(
+        config_.mail.sendAttempts, std::chrono::seconds{config_.mail.sendWindowSeconds});
 
     initialized_ = true;
 }
@@ -238,8 +288,14 @@ common::RateLimiter& AppContext::accountRateLimiter() const {
     return *accountRateLimiter_;
 }
 
+common::RateLimiter& AppContext::mailRateLimiter() const {
+    requireInitialized();
+    return *mailRateLimiter_;
+}
+
 void AppContext::reset() {
     initialized_ = false;
+    mailRateLimiter_.reset();
     authRateLimiter_.reset();
     crashRateLimiter_.reset();
     accountRateLimiter_.reset();
@@ -256,6 +312,7 @@ void AppContext::reset() {
     accountService_.reset();
     tokenService_.reset();
     passwordHasher_.reset();
+    mailSender_.reset();
     crashReports_.reset();
     downloads_.reset();
     uploadSessions_.reset();

@@ -10,14 +10,22 @@ All under `/api/v1/auth`. Every response — success or failure — carries `X-R
 
 | Method | Path | Auth | Throttled | Purpose |
 |---|---|---|---|---|
-| POST | `/register` | – | yes | Create an account and send a verification link |
-| POST | `/login` | – | yes | Exchange credentials for a session |
+| POST | `/register` | – | address | Create an account and send a verification link |
+| POST | `/login` | – | address | Exchange credentials for a session |
 | POST | `/refresh` | refresh token in body | no | Rotate the session |
 | POST | `/logout` | refresh token in body | no | Revoke one session |
 | POST | `/verify-email` | – | no | Redeem a verification link |
-| POST | `/password-reset/request` | – | yes | Start a reset |
-| POST | `/password-reset/confirm` | – | yes | Finish a reset |
+| POST | `/verify-email/resend` | – | mail | Send a fresh verification link |
+| POST | `/password-reset/request` | – | address + mail | Start a reset |
+| POST | `/password-reset/confirm` | – | address | Finish a reset |
 | GET | `/me` | Bearer access token | no | Current identity and permissions |
+
+And two pages, outside `/api/v1/` because they are for a person rather than for a client:
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/verify-email?token=…` | Where a verification link lands |
+| GET | `/password-reset?token=…` | Where a reset link lands: the form that chooses the password |
 
 Plus one route outside `/auth`, on the account itself:
 
@@ -94,7 +102,8 @@ multi-megabyte "password" cannot be turned into an Argon2id denial of service.
 | Path | Behaviour |
 |---|---|
 | Login, unknown address | Same status and message as a wrong password, **and** a dummy hash is computed so the timing matches |
-| Password reset request | Always reports success, with or without a matching account |
+| Password reset request | Always reports success, with or without a matching account — and sends nothing when there is none, which is the half a caller could otherwise measure |
+| Resending a verification link | One sentence for an unknown address, an already confirmed one and a disabled account alike, and nothing is sent in any of the three |
 | Logout, unknown token | Reports success |
 | Token rejection | One message for expired, forged, malformed and wrong-issuer alike |
 | Registration, existing address | **409 Conflict — deliberately distinguishable** |
@@ -196,6 +205,15 @@ bucket, 10 attempts per 60 seconds by default (`rateLimit.*`). Without it these 
 both an online guessing oracle and — because each attempt costs an Argon2id hash — a cheap
 way to burn the server's CPU. A throttled response is `429` with `Retry-After`.
 
+The two routes that put a message in somebody's inbox — the resend and the reset request —
+carry `MailRateLimitFilter` and a bucket of their own, three per fifteen minutes
+(`mail.sendAttempts`). Not the authentication one, and not because a second bucket is tidier:
+that one is tight because every attempt behind it costs a hash, while these cost no CPU at all
+and spend something scarcer — a stranger's inbox, and the deployment's standing with its
+relay. Sharing would mean one of the two sets of numbers was wrong, and would let a burst of
+resend requests lock somebody out of signing in. The reset request carries **both**, because
+it is a credential-adjacent unauthenticated endpoint *and* it sends a message.
+
 The limiter is in-process. That is correct for the single-node deployment this project
 targets and deliberately avoids adding Redis to the compose stack. If the API is ever scaled
 out, the buckets become a shared-store problem.
@@ -210,19 +228,98 @@ Which address a bucket is keyed on is not always the peer: behind a TLS terminat
 come from `X-Forwarded-For`, and only from a proxy the deployment named. That is §6.2 of the
 same page, and getting it wrong collapses every per-address bucket here into one.
 
-## Development affordances
+## Delivering the two links
 
-There is no mail transport yet. In `development` **only**, `/register` and
-`/password-reset/request` return the raw token as `devEmailVerificationToken` /
-`devPasswordResetToken`, so the flows are exercisable and the integration tests can drive
-them. The fields are gated on the environment name, and `AppConfig::validate()` refuses to
-start a deployed environment with development-grade secrets.
+Registration and password recovery are both a message arriving somewhere. `AuthService`
+decides *when* one is due and holds an `IMailSender`, which is the whole of what it knows
+about delivery; the sender lives in `services/` because the caller is a service, and every
+rule around sending is therefore unit tested with no socket involved.
 
-`auth.requireVerifiedEmail` can be turned off in development so logging in does not need the
-verification round trip.
+**The raw token never leaves `AuthService`.** It is generated, hashed into `user_tokens`,
+composed into a message and dropped, inside one function. No response carries it in any
+environment — the development affordance that used to return `devEmailVerificationToken` and
+`devPasswordResetToken` is gone rather than moved, which is what makes it impossible to bring
+back by accident.
 
-**Both must be revisited when mail delivery lands** — at that point the dev token fields
-should go away entirely.
+### A message that does not go out does not undo a registration
+
+The account is created, the answer says `verificationEmailSent: false`, and the failure is an
+error in the log. Unwinding the registration was considered and rejected: it is not one
+statement, so undoing it is a compensating delete that can fail on its own — and when it does,
+the address is held by an account that cannot sign in and cannot be created again, which turns
+an outage at the relay into a lost account. `POST /auth/verify-email/resend` is the way back,
+and it exists precisely because this answer is "no" rather than "the whole thing failed".
+
+The send is *awaited* rather than fired and forgotten, bounded by `mail.timeoutSeconds`, so
+the answer can say which of the two happened. Telling somebody to check their inbox when the
+message never left is a wait with no end.
+
+A password reset cannot say the same thing: its response is identical whether or not the
+address belongs to an account, so a failed send there is a log line and nothing else. There is
+nothing it could report without reporting that the address exists.
+
+### The pages the links land on
+
+Every route above is a JSON `POST`, and a link in an email is opened by a browser — so without
+a page a verification link is a URL nobody can follow. `/verify-email` and `/password-reset`
+are two self-contained pages, embedded in the binary from `src/auth/ui/` exactly as the admin
+console is, each stating its own `Content-Security-Policy` and `Cache-Control: no-store`,
+because the URL carries a single-use token.
+
+**Neither changes anything by being opened.** A mail provider's link scanner fetches every URL
+in a message, so a page that confirmed on load would spend the token before its owner clicked
+and show them "this link is invalid" for having done nothing. Both pages carry a button that
+calls the same JSON route a client would call.
+
+### Configuration
+
+Everything lives under `mail`, and the secrets arrive from the environment like every other
+one. `mail.transport` is the switch:
+
+| Transport | What it does |
+|---|---|
+| `smtp` | A real relay, through libcurl. Requires `mail.host` and `mail.fromAddress` |
+| `log` | Writes the message to the log instead of sending it. Development only |
+| `none` | This deployment sends no mail at all |
+
+`AppConfig::validate()` refuses three shapes rather than letting them start and deliver
+nothing, which is what the debt this replaced actually was:
+
+- `smtp` with no relay or no sender address, in any environment;
+- `log` outside development — it writes the *body*, and the body of a reset message is a live
+  credential, so a deployment that chose it by accident would be filing credentials into a log
+  with a retention policy and an operator audience;
+- `none` together with `auth.requireVerifiedEmail`, because then nothing delivers the link and
+  nothing lets anybody in without it: every account created would be one that can never sign
+  in. With `none` the routes that send answer **404**, the way a disabled crash-report route
+  does, so a launcher sees a server without the feature rather than one withholding it.
+
+`mail.linkBaseUrl` is the origin the links are built from, and it comes from configuration and
+never from the request's `Host` header: that header is chosen by whoever is calling, and
+building the link from it would let a stranger pick the domain that appears in somebody else's
+inbox.
+
+`SmtpMailSender` uses libcurl rather than a client written here, chiefly because it verifies
+the relay's certificate. There is no switch to turn that off; a private certificate authority
+belongs in the image's trust store. `starttls` is *mandatory* when selected — a relay that
+does not offer it fails the send rather than carrying credentials in the clear. The
+conversation is blocking and runs on a thread of its own, so messages leave one at a time and
+a slow relay occupies nothing else.
+
+### The text
+
+English, plain text, no template engine — `services/MailTemplates.*`, two pure functions.
+This server has no localisation of any kind and no idea what language an account reads:
+nothing stores a locale and no route sends one. Translating two messages would mean a
+migration, a change to the registration contract and a second translation system living on
+this side, which is a larger thing than the feature it would serve. That is a decision rather
+than an oversight.
+
+### `requireVerifiedEmail`
+
+Still configurable, and still off in the development stack so a developer does not open a mail
+catcher before every sign-in. In a deployed environment it is on and now *means* something,
+because the link it waits for is actually delivered.
 
 ## Testing
 
@@ -230,7 +327,19 @@ should go away entirely.
 |---|---|
 | Validation, hashing, JWT, rate limiting | `tests/unit/` — pure, no I/O |
 | AuthService rules | `tests/unit/AuthServiceTest.cpp` against `tests/support/FakeRepositories.h` |
+| The message bodies and their links | `tests/unit/MailTemplatesTest.cpp` — pure functions |
 | Endpoints end to end | `tests/integration/AuthEndpointTest.cpp` against a real server and database |
+| The two pages | `tests/integration/AuthPageEndpointTest.cpp`, over the bytes a deployment serves |
+
+Both suites drive the flows through `tests/support/FakeMailSender.h`, which keeps the message
+instead of sending it: with no token in any response, the message is the only place a link
+exists, and a test reads it exactly where a person would. Its refusal switch is the more
+important half — that a registration survives a send that failed is a behaviour, and this is
+what makes it assertable.
+
+**No test speaks SMTP.** There is no mail server in this suite, so `SmtpMailSender` is
+verified by hand against a catcher in `docker-compose.override.yml`, the way nginx is
+(open debt 8). When you change it, spend the ten minutes.
 
 The fakes are hand-written rather than gmock: the repository interfaces return coroutines,
 which gmock expresses awkwardly, and the fakes have to model real behaviour (unique emails,

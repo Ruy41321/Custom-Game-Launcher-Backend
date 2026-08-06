@@ -73,6 +73,22 @@
     "argon2MemoryLimitBytes": ${ARGON2_MEMLIMIT:-0}
   },
 
+  "mail": {
+    "transport": "${MAIL_TRANSPORT:-smtp}",
+    "host": "${SMTP_HOST:-}",
+    "port": ${SMTP_PORT:-587},
+    "username": "${SMTP_USERNAME:-}",
+    "password": "${SMTP_PASSWORD:-}",
+    "security": "${SMTP_SECURITY:-starttls}",
+    "fromAddress": "${MAIL_FROM_ADDRESS:-}",
+    "fromName": "${MAIL_FROM_NAME:-Custom Game Launcher}",
+    "linkBaseUrl": "${MAIL_LINK_BASE_URL:-}",
+    "productName": "${MAIL_PRODUCT_NAME:-Custom Game Launcher}",
+    "timeoutSeconds": ${MAIL_TIMEOUT:-10},
+    "sendAttempts": ${MAIL_RATE_LIMIT:-3},
+    "sendWindowSeconds": ${MAIL_RATE_WINDOW:-900}
+  },
+
   "rateLimit": {
     "authAttempts": ${AUTH_RATE_LIMIT_ATTEMPTS:-10},
     "authWindowSeconds": ${AUTH_RATE_LIMIT_WINDOW:-60},

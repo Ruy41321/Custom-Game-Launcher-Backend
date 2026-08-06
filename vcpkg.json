@@ -14,7 +14,11 @@
     "spdlog",
     "libsodium",
     "jwt-cpp",
-    "openssl"
+    "openssl",
+    {
+      "name": "curl",
+      "features": ["non-http", "openssl"]
+    }
   ],
   "features": {
     "tests": {

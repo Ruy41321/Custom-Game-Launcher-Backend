@@ -92,13 +92,10 @@ AuthController::registerUser(drogon::HttpRequestPtr request,
     Json::Value response;
     response["user"] = userToJson(registration.user);
     response["emailVerificationRequired"] = context.config().auth.requireVerifiedEmail;
-
-    // Development affordance: there is no mail transport yet, so the verification token is
-    // returned directly to make the flow exercisable. Gated on the environment name, and
-    // AppConfig::validate() refuses to start a deployed environment as "development".
-    if (context.config().environment == "development") {
-        response["devEmailVerificationToken"] = registration.emailVerificationToken;
-    }
+    // Said out loud rather than assumed. The account exists either way, and a client that told
+    // somebody to check their inbox when the message never left would be describing a wait
+    // that never ends; with this it can offer the resend route instead.
+    response["verificationEmailSent"] = registration.verificationEmailSent;
 
     callback(jsonResponse(request, response, drogon::k201Created));
     co_return;
@@ -173,22 +170,38 @@ AuthController::requestPasswordReset(drogon::HttpRequestPtr request,
     const auto body = app::requireJsonObject(request);
     const auto email = app::requireString(body, "email");
 
-    auto result = co_await app::AppContext::instance().authService().requestPasswordReset(email);
+    const auto result =
+        co_await app::AppContext::instance().authService().requestPasswordReset(email);
     if (!result.ok()) {
         fail(result.error());
     }
 
-    const auto& context = app::AppContext::instance();
-    const auto reset = std::move(result).value();
-
-    // Always the same answer, whether or not the address exists: this endpoint is
-    // unauthenticated, and a distinguishable response makes it an enumeration tool.
+    // Always the same answer, whether or not the address exists and whether or not the message
+    // could be delivered: this endpoint is unauthenticated, and a distinguishable response
+    // makes it an enumeration tool.
     Json::Value response;
     response["status"] = "if that address is registered, a reset link has been sent";
 
-    if (context.config().environment == "development" && reset.token.has_value()) {
-        response["devPasswordResetToken"] = *reset.token;
+    callback(jsonResponse(request, response));
+    co_return;
+}
+
+drogon::Task<>
+AuthController::resendVerification(drogon::HttpRequestPtr request,
+                                   std::function<void(const drogon::HttpResponsePtr&)> callback) {
+    const auto body = app::requireJsonObject(request);
+    const auto email = app::requireString(body, "email");
+
+    const auto result =
+        co_await app::AppContext::instance().authService().resendVerification(email);
+    if (!result.ok()) {
+        fail(result.error());
     }
+
+    // One sentence for an unknown address, an already confirmed one and a message just sent,
+    // for the same reason the reset request has one.
+    Json::Value response;
+    response["status"] = "if that address needs confirming, a new link has been sent";
 
     callback(jsonResponse(request, response));
     co_return;

@@ -84,6 +84,29 @@ services:
       HSTS_ENABLED: ${HSTS_ENABLED:-false}
       HSTS_MAX_AGE: ${HSTS_MAX_AGE:-15552000}
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-[]}
+
+      # Mail. Outside development the server refuses to start on the "log" transport and on an
+      # "smtp" one with no relay, because a deployment that cannot deliver a verification link
+      # is one where nobody can finish registering. MAIL_LINK_BASE_URL is the origin the links
+      # are built from and comes from here rather than from a request's Host header, which is
+      # chosen by whoever is calling.
+      # Deployed default. The development override turns it off, because a developer who has
+      # to open a mail catcher before every login is a developer who turns the stack off.
+      REQUIRE_VERIFIED_EMAIL: ${REQUIRE_VERIFIED_EMAIL:-true}
+
+      MAIL_TRANSPORT: ${MAIL_TRANSPORT:-log}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_SECURITY: ${SMTP_SECURITY:-starttls}
+      MAIL_FROM_ADDRESS: ${MAIL_FROM_ADDRESS:-}
+      MAIL_FROM_NAME: ${MAIL_FROM_NAME:-Custom Game Launcher}
+      MAIL_LINK_BASE_URL: ${MAIL_LINK_BASE_URL:-http://localhost:8080}
+      MAIL_PRODUCT_NAME: ${MAIL_PRODUCT_NAME:-Custom Game Launcher}
+      MAIL_TIMEOUT: ${MAIL_TIMEOUT:-10}
+      MAIL_RATE_LIMIT: ${MAIL_RATE_LIMIT:-3}
+      MAIL_RATE_WINDOW: ${MAIL_RATE_WINDOW:-900}
     ports:
       - "${API_HOST_PORT:-8080}:8080"
       # Admin surface: loopback only. Reach it with

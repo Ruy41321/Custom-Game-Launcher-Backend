@@ -7,6 +7,7 @@
 
 #include "common/Hash.h"
 #include "services/AuthService.h"
+#include "support/FakeMailSender.h"
 #include "support/FakeRepositories.h"
 
 namespace {
@@ -22,6 +23,7 @@ using launcher::services::JwtTokenService;
 using launcher::services::PasswordHashingSettings;
 using launcher::services::RegisterCommand;
 using launcher::services::TokenSettings;
+using launcher::testing::FakeMailSender;
 using launcher::testing::FakeRefreshTokenRepository;
 using launcher::testing::FakeRoleRepository;
 using launcher::testing::FakeUserRepository;
@@ -36,7 +38,8 @@ struct AuthFixture {
     explicit AuthFixture(AuthSettings settings = AuthSettings{})
         : hasher(PasswordHashingSettings{2, 64U * 1024U * 1024U}),
           tokens(TokenSettings{JWT_SECRET, "custom-game-launcher", std::chrono::seconds{900}}),
-          service(users, roles, refreshTokens, userTokens, hasher, tokens, std::move(settings)) {}
+          service(
+              users, roles, refreshTokens, userTokens, hasher, tokens, mail, std::move(settings)) {}
 
     FakeUserRepository users;
     FakeRoleRepository roles;
@@ -44,6 +47,7 @@ struct AuthFixture {
     FakeUserTokenRepository userTokens;
     Argon2idPasswordHasher hasher;
     JwtTokenService tokens;
+    FakeMailSender mail;
     AuthService service;
 
     /// Seeds a ready-to-log-in account with a real hash of VALID_PASSWORD.
@@ -100,12 +104,67 @@ TEST(AuthServiceRegisterTest, IssuesAnEmailVerificationTokenStoredOnlyAsAHash) {
         fixture.service.registerUser(RegisterCommand{"dev@example.com", VALID_PASSWORD, "Dev"}));
 
     ASSERT_TRUE(result.ok());
-    const auto& raw = result.value().emailVerificationToken;
+    // Read where a recipient reads it: the raw token exists for the length of one function and
+    // is never returned to anybody, so the message is the only place it can be found.
+    const auto raw = fixture.mail.tokenIn("dev@example.com");
     ASSERT_FALSE(raw.empty());
     ASSERT_EQ(fixture.userTokens.entries.size(), 1U);
     EXPECT_EQ(fixture.userTokens.entries[0].purpose, UserTokenPurpose::EmailVerification);
     EXPECT_EQ(fixture.userTokens.entries[0].tokenHash, launcher::common::sha256Hex(raw));
     EXPECT_NE(fixture.userTokens.entries[0].tokenHash, raw);
+}
+
+TEST(AuthServiceRegisterTest, SendsTheVerificationLinkAndSaysThatItWent) {
+    AuthFixture fixture;
+
+    const auto result = drogon::sync_wait(
+        fixture.service.registerUser(RegisterCommand{"dev@example.com", VALID_PASSWORD, "Dev"}));
+
+    ASSERT_TRUE(result.ok()) << result.error().detail;
+    EXPECT_TRUE(result.value().verificationEmailSent);
+    ASSERT_EQ(fixture.mail.sentCount(), 1U);
+    const auto message = fixture.mail.lastTo("dev@example.com");
+    ASSERT_TRUE(message.has_value());
+    EXPECT_NE(message->body.find("/verify-email?token="), std::string::npos)
+        << "the message must carry the link a browser can open, not a bare token";
+}
+
+// The failure this whole feature exists to make survivable: the account is created, the
+// message is not, and the caller is told which of the two happened. Undoing the registration
+// would mean a compensating delete that can fail on its own — and when it does, the address is
+// taken by an account that cannot sign in and cannot be created again.
+TEST(AuthServiceRegisterTest, KeepsTheAccountWhenTheMessageCannotBeSent) {
+    AuthFixture fixture;
+    fixture.mail.refuseEverything(true);
+
+    const auto result = drogon::sync_wait(
+        fixture.service.registerUser(RegisterCommand{"dev@example.com", VALID_PASSWORD, "Dev"}));
+
+    ASSERT_TRUE(result.ok()) << result.error().detail;
+    EXPECT_FALSE(result.value().verificationEmailSent);
+    ASSERT_EQ(fixture.users.users.size(), 1U) << "the account must survive a relay that was down";
+    EXPECT_EQ(fixture.users.users[0].email, "dev@example.com");
+    EXPECT_EQ(fixture.roles.assignments.size(), 1U);
+    // The token is issued whether or not the message went out, so the resend route has
+    // something to replace and the account is in one state rather than two.
+    ASSERT_EQ(fixture.userTokens.entries.size(), 1U);
+    EXPECT_EQ(fixture.userTokens.entries[0].purpose, UserTokenPurpose::EmailVerification);
+}
+
+TEST(AuthServiceRegisterTest, ComposesNothingWhenTheDeploymentSendsNoMail) {
+    AuthSettings settings = withoutEmailVerification();
+    settings.mailEnabled = false;
+    AuthFixture fixture(settings);
+
+    const auto result = drogon::sync_wait(
+        fixture.service.registerUser(RegisterCommand{"dev@example.com", VALID_PASSWORD, "Dev"}));
+
+    ASSERT_TRUE(result.ok()) << result.error().detail;
+    EXPECT_FALSE(result.value().verificationEmailSent);
+    EXPECT_EQ(fixture.mail.sentCount(), 0U);
+    EXPECT_EQ(fixture.mail.refusedCount(), 0U) << "nothing should have been handed to the sender";
+    EXPECT_TRUE(fixture.userTokens.entries.empty())
+        << "a link nothing can deliver is not worth issuing";
 }
 
 TEST(AuthServiceRegisterTest, RejectsInvalidInput) {
@@ -395,7 +454,7 @@ TEST(AuthServiceVerifyEmailTest, MarksTheAccountVerified) {
     ASSERT_TRUE(registration.ok());
 
     const auto result =
-        drogon::sync_wait(fixture.service.verifyEmail(registration.value().emailVerificationToken));
+        drogon::sync_wait(fixture.service.verifyEmail(fixture.mail.tokenIn("dev@example.com")));
 
     EXPECT_TRUE(result.ok()) << result.error().detail;
     EXPECT_EQ(fixture.users.verifiedUserIds,
@@ -407,7 +466,7 @@ TEST(AuthServiceVerifyEmailTest, ATokenCanOnlyBeUsedOnce) {
     const auto registration = drogon::sync_wait(
         fixture.service.registerUser(RegisterCommand{"dev@example.com", VALID_PASSWORD, "Dev"}));
     ASSERT_TRUE(registration.ok());
-    const auto token = registration.value().emailVerificationToken;
+    const auto token = fixture.mail.tokenIn("dev@example.com");
 
     ASSERT_TRUE(drogon::sync_wait(fixture.service.verifyEmail(token)).ok());
 
@@ -424,49 +483,123 @@ TEST(AuthServiceVerifyEmailTest, RejectsAnUnknownToken) {
 }
 
 // ---------------------------------------------------------------------------
+// Resending the verification link
+// ---------------------------------------------------------------------------
+
+TEST(AuthServiceResendTest, SendsAFreshLinkAndRetiresTheOldOne) {
+    AuthFixture fixture;
+    ASSERT_TRUE(drogon::sync_wait(fixture.service.registerUser(
+                                      RegisterCommand{"dev@example.com", VALID_PASSWORD, "Dev"}))
+                    .ok());
+    const auto first = fixture.mail.tokenIn("dev@example.com");
+
+    const auto result = drogon::sync_wait(fixture.service.resendVerification("Dev@Example.COM"));
+
+    ASSERT_TRUE(result.ok()) << result.error().detail;
+    const auto second = fixture.mail.tokenIn("dev@example.com");
+    ASSERT_FALSE(second.empty());
+    ASSERT_NE(first, second);
+    // Only the newest link works: a resend that left the previous one alive would mean a
+    // message somebody asked to replace still opens.
+    EXPECT_FALSE(drogon::sync_wait(fixture.service.verifyEmail(first)).ok());
+    EXPECT_TRUE(drogon::sync_wait(fixture.service.verifyEmail(second)).ok());
+}
+
+// The same sentence for an address nobody registered, one already confirmed and a disabled
+// account — and nothing sent in any of the three, which is the part a caller could time.
+TEST(AuthServiceResendTest, SendsNothingForAnUnknownAddress) {
+    AuthFixture fixture;
+
+    const auto result = drogon::sync_wait(fixture.service.resendVerification("nobody@example.com"));
+
+    EXPECT_TRUE(result.ok());
+    EXPECT_EQ(fixture.mail.sentCount(), 0U);
+    EXPECT_TRUE(fixture.userTokens.entries.empty());
+}
+
+TEST(AuthServiceResendTest, SendsNothingForAnAddressThatIsAlreadyConfirmed) {
+    AuthFixture fixture;
+    const auto user = fixture.seedActiveUser();
+
+    const auto result = drogon::sync_wait(fixture.service.resendVerification(user.email));
+
+    EXPECT_TRUE(result.ok());
+    EXPECT_EQ(fixture.mail.sentCount(), 0U);
+}
+
+TEST(AuthServiceResendTest, SendsNothingToADisabledAccount) {
+    AuthFixture fixture;
+    User disabled;
+    disabled.email = "gone@example.com";
+    disabled.displayName = "Gone";
+    disabled.emailVerified = false;
+    disabled.isActive = false;
+    fixture.users.seed(disabled);
+
+    const auto result = drogon::sync_wait(fixture.service.resendVerification(disabled.email));
+
+    EXPECT_TRUE(result.ok());
+    EXPECT_EQ(fixture.mail.sentCount(), 0U);
+}
+
+// ---------------------------------------------------------------------------
 // Password reset
 // ---------------------------------------------------------------------------
 
-// An unauthenticated endpoint that says "no such user" is an enumeration tool.
-TEST(AuthServicePasswordResetTest, ReportsSuccessWithNoTokenForAnUnknownAddress) {
+// An unauthenticated endpoint that says "no such user" is an enumeration tool. The answer is
+// the same either way *and* nothing is sent, which is the half a caller could otherwise time.
+TEST(AuthServicePasswordResetTest, ReportsSuccessAndSendsNothingForAnUnknownAddress) {
     AuthFixture fixture;
 
     const auto result =
         drogon::sync_wait(fixture.service.requestPasswordReset("nobody@example.com"));
 
     ASSERT_TRUE(result.ok());
-    EXPECT_FALSE(result.value().token.has_value());
     EXPECT_TRUE(fixture.userTokens.entries.empty());
+    EXPECT_EQ(fixture.mail.sentCount(), 0U);
 }
 
-TEST(AuthServicePasswordResetTest, IssuesAHashedSingleUseTokenForAKnownAddress) {
+TEST(AuthServicePasswordResetTest, IssuesAHashedSingleUseTokenAndSendsItToTheAccount) {
     AuthFixture fixture;
     const auto user = fixture.seedActiveUser();
 
     const auto result = drogon::sync_wait(fixture.service.requestPasswordReset(user.email));
 
     ASSERT_TRUE(result.ok());
-    ASSERT_TRUE(result.value().token.has_value());
     ASSERT_EQ(fixture.userTokens.entries.size(), 1U);
-    EXPECT_EQ(fixture.userTokens.entries[0].tokenHash,
-              launcher::common::sha256Hex(*result.value().token));
+    const auto delivered = fixture.mail.tokenIn(user.email);
+    ASSERT_FALSE(delivered.empty());
+    EXPECT_EQ(fixture.userTokens.entries[0].tokenHash, launcher::common::sha256Hex(delivered));
+}
+
+// The reply cannot say the message failed without saying the address exists, so the caller is
+// told the same thing and the failure is a log line. What matters is that nothing else changes.
+TEST(AuthServicePasswordResetTest, StillReportsSuccessWhenTheMessageCannotBeSent) {
+    AuthFixture fixture;
+    const auto user = fixture.seedActiveUser();
+    fixture.mail.refuseEverything(true);
+
+    const auto result = drogon::sync_wait(fixture.service.requestPasswordReset(user.email));
+
+    EXPECT_TRUE(result.ok());
+    EXPECT_EQ(fixture.mail.refusedCount(), 1U);
+    EXPECT_EQ(fixture.mail.sentCount(), 0U);
 }
 
 TEST(AuthServicePasswordResetTest, RequestingANewLinkInvalidatesTheOldOne) {
     AuthFixture fixture;
     const auto user = fixture.seedActiveUser();
 
-    const auto first = drogon::sync_wait(fixture.service.requestPasswordReset(user.email));
-    const auto second = drogon::sync_wait(fixture.service.requestPasswordReset(user.email));
-    ASSERT_TRUE(first.ok());
-    ASSERT_TRUE(second.ok());
+    ASSERT_TRUE(drogon::sync_wait(fixture.service.requestPasswordReset(user.email)).ok());
+    const auto first = fixture.mail.tokenIn(user.email);
+    ASSERT_TRUE(drogon::sync_wait(fixture.service.requestPasswordReset(user.email)).ok());
+    const auto second = fixture.mail.tokenIn(user.email);
+    ASSERT_NE(first, second);
 
-    EXPECT_FALSE(drogon::sync_wait(
-                     fixture.service.resetPassword(*first.value().token, "a brand new passphrase"))
-                     .ok());
-    EXPECT_TRUE(drogon::sync_wait(
-                    fixture.service.resetPassword(*second.value().token, "a brand new passphrase"))
-                    .ok());
+    EXPECT_FALSE(
+        drogon::sync_wait(fixture.service.resetPassword(first, "a brand new passphrase")).ok());
+    EXPECT_TRUE(
+        drogon::sync_wait(fixture.service.resetPassword(second, "a brand new passphrase")).ok());
 }
 
 TEST(AuthServicePasswordResetTest, ChangesThePasswordAndKillsEverySession) {
@@ -474,11 +607,10 @@ TEST(AuthServicePasswordResetTest, ChangesThePasswordAndKillsEverySession) {
     const auto user = fixture.seedActiveUser();
     ASSERT_TRUE(
         drogon::sync_wait(fixture.service.login(user.email, VALID_PASSWORD, ClientContext{})).ok());
-    const auto request = drogon::sync_wait(fixture.service.requestPasswordReset(user.email));
-    ASSERT_TRUE(request.ok());
+    ASSERT_TRUE(drogon::sync_wait(fixture.service.requestPasswordReset(user.email)).ok());
 
-    const auto result = drogon::sync_wait(
-        fixture.service.resetPassword(*request.value().token, "an entirely new passphrase"));
+    const auto result = drogon::sync_wait(fixture.service.resetPassword(
+        fixture.mail.tokenIn(user.email), "an entirely new passphrase"));
 
     ASSERT_TRUE(result.ok()) << result.error().detail;
     ASSERT_EQ(fixture.users.passwordUpdates.count(user.id), 1U);
@@ -495,18 +627,16 @@ TEST(AuthServicePasswordResetTest, ChangesThePasswordAndKillsEverySession) {
 TEST(AuthServicePasswordResetTest, RejectsAWeakNewPasswordBeforeConsumingTheToken) {
     AuthFixture fixture;
     const auto user = fixture.seedActiveUser();
-    const auto request = drogon::sync_wait(fixture.service.requestPasswordReset(user.email));
-    ASSERT_TRUE(request.ok());
+    ASSERT_TRUE(drogon::sync_wait(fixture.service.requestPasswordReset(user.email)).ok());
+    const auto token = fixture.mail.tokenIn(user.email);
 
-    const auto weak =
-        drogon::sync_wait(fixture.service.resetPassword(*request.value().token, "short"));
+    const auto weak = drogon::sync_wait(fixture.service.resetPassword(token, "short"));
 
     ASSERT_FALSE(weak.ok());
     EXPECT_EQ(weak.error().code, ErrorCode::InvalidInput);
     // The link must survive a rejected attempt, or a typo would strand the user.
-    EXPECT_TRUE(drogon::sync_wait(
-                    fixture.service.resetPassword(*request.value().token, "a brand new passphrase"))
-                    .ok());
+    EXPECT_TRUE(
+        drogon::sync_wait(fixture.service.resetPassword(token, "a brand new passphrase")).ok());
 }
 
 TEST(AuthServicePasswordResetTest, RejectsAnUnknownToken) {

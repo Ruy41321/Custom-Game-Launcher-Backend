@@ -31,6 +31,7 @@ AuthService::AuthService(const repositories::IUserRepository& users,
                          const repositories::IUserTokenRepository& userTokens,
                          const IPasswordHasher& passwordHasher,
                          const ITokenService& tokenService,
+                         const IMailSender& mailSender,
                          AuthSettings settings)
     : users_(users),
       roles_(roles),
@@ -38,7 +39,32 @@ AuthService::AuthService(const repositories::IUserRepository& users,
       userTokens_(userTokens),
       passwordHasher_(passwordHasher),
       tokenService_(tokenService),
+      mailSender_(mailSender),
       settings_(std::move(settings)) {}
+
+drogon::Task<bool> AuthService::sendVerificationLink(domain::User user) const {
+    if (!settings_.mailEnabled) {
+        co_return false;
+    }
+
+    const auto token = common::randomUrlSafeToken();
+    co_await userTokens_.issue(user.id,
+                               UserTokenPurpose::EmailVerification,
+                               common::sha256Hex(token),
+                               settings_.emailVerificationTtl);
+
+    auto message = verificationMessage(settings_.mail, user.email, user.displayName, token);
+    const auto delivery = co_await mailSender_.send(std::move(message));
+    if (!delivery.ok()) {
+        // The account is not mentioned by address, and the token is never logged at all: this
+        // line has to be readable by whoever operates the relay without being a way to read
+        // somebody's mail out of the log.
+        spdlog::error("could not send the verification message for user id={}: {}",
+                      common::escapeJson(user.id),
+                      common::escapeJson(delivery.error().detail));
+    }
+    co_return delivery.ok();
+}
 
 drogon::Task<Result<RegistrationResult>> AuthService::registerUser(RegisterCommand command) const {
     const auto email = domain::normalizeEmail(command.email);
@@ -70,17 +96,36 @@ drogon::Task<Result<RegistrationResult>> AuthService::registerUser(RegisterComma
     const auto user = std::move(created).value();
     co_await roles_.assignRole(user.id, settings_.defaultRole, std::nullopt);
 
-    const auto verificationToken = common::randomUrlSafeToken();
-    co_await userTokens_.issue(user.id,
-                               UserTokenPurpose::EmailVerification,
-                               common::sha256Hex(verificationToken),
-                               settings_.emailVerificationTtl);
+    // A message that does not go out does **not** undo the registration. Unwinding it would
+    // mean a compensating delete that can fail on its own, and when it does the address is
+    // taken by an account that cannot sign in and cannot be created again — an outage at the
+    // relay turned into a lost account. The registration stands, the answer says the message
+    // did not go, and the resend route is the way back.
+    const bool sent = co_await sendVerificationLink(user);
 
-    spdlog::info("registered user id={} role={}",
+    spdlog::info("registered user id={} role={} verificationEmailSent={}",
                  common::escapeJson(user.id),
-                 common::escapeJson(settings_.defaultRole));
+                 common::escapeJson(settings_.defaultRole),
+                 sent);
 
-    co_return Result<RegistrationResult>::success(RegistrationResult{user, verificationToken});
+    co_return Result<RegistrationResult>::success(RegistrationResult{user, sent});
+}
+
+drogon::Task<VoidResult> AuthService::resendVerification(std::string email) const {
+    const auto user = co_await users_.findByEmail(domain::normalizeEmail(email));
+
+    // Three different reasons to send nothing, one answer for all of them and for success:
+    // an address nobody registered, one that is already confirmed, and a disabled account.
+    if (!user.has_value() || user->emailVerified || !user->isActive) {
+        co_return VoidResult::success();
+    }
+
+    // Only the newest link works, exactly as for a password reset: a resend that left the
+    // previous link alive would mean a message somebody asked to replace still opens.
+    co_await userTokens_.invalidateAll(user->id, UserTokenPurpose::EmailVerification);
+    co_await sendVerificationLink(*user);
+
+    co_return VoidResult::success();
 }
 
 drogon::Task<Result<AuthTokens>>
@@ -186,13 +231,12 @@ drogon::Task<VoidResult> AuthService::verifyEmail(std::string token) const {
     co_return VoidResult::success();
 }
 
-drogon::Task<Result<PasswordResetRequest>>
-AuthService::requestPasswordReset(std::string email) const {
+drogon::Task<VoidResult> AuthService::requestPasswordReset(std::string email) const {
     const auto user = co_await users_.findByEmail(domain::normalizeEmail(email));
-    if (!user.has_value()) {
-        // Deliberately a success with no token: an unauthenticated endpoint that reports
+    if (!user.has_value() || !settings_.mailEnabled) {
+        // Deliberately a success that sends nothing: an unauthenticated endpoint that reports
         // "no such user" is an account enumeration tool.
-        co_return Result<PasswordResetRequest>::success(PasswordResetRequest{std::nullopt});
+        co_return VoidResult::success();
     }
 
     // Requesting a new link invalidates any earlier one, so only the most recent works.
@@ -204,7 +248,14 @@ AuthService::requestPasswordReset(std::string email) const {
                                common::sha256Hex(token),
                                settings_.passwordResetTtl);
 
-    co_return Result<PasswordResetRequest>::success(PasswordResetRequest{token});
+    auto message = passwordResetMessage(settings_.mail, user->email, user->displayName, token);
+    if (const auto delivery = co_await mailSender_.send(std::move(message)); !delivery.ok()) {
+        spdlog::error("could not send the password reset message for user id={}: {}",
+                      common::escapeJson(user->id),
+                      common::escapeJson(delivery.error().detail));
+    }
+
+    co_return VoidResult::success();
 }
 
 drogon::Task<VoidResult> AuthService::resetPassword(std::string token,

@@ -16,6 +16,7 @@
 #include <thread>
 
 #include "integration/TestDatabase.h"
+#include "support/FakeMailSender.h"
 #include "support/TemporaryDirectory.h"
 
 namespace launcher::testing {
@@ -106,6 +107,16 @@ class AppHarness : public ::testing::Environment {
     /// Clears the shared auth throttle so one test's attempts cannot affect the next.
     void resetRateLimiter();
 
+    /// The mail sender the running application was built with.
+    ///
+    /// No response carries a token any more, so this is where the flows are driven from — the
+    /// same place a person reads them. It is also the only way to assert on a *failed* send,
+    /// which is a behaviour rather than an interface.
+    FakeMailSender& mail();
+
+    /// The token out of the link in the last message sent to that address.
+    std::string tokenMailedTo(const std::string& email);
+
   private:
     /// Blocks until the given listener answers a real request, or throws.
     ///
@@ -123,6 +134,8 @@ class AppHarness : public ::testing::Environment {
     TemporaryDirectory blobRoot_{"launcher-blobs"};
     TemporaryDirectory mediaRoot_{"launcher-media"};
     std::unique_ptr<TestDatabase> database_;
+    /// Owned by the AppContext; borrowed here for the length of the run.
+    FakeMailSender* mail_{nullptr};
     std::thread serverThread_;
     bool started_{false};
 };
@@ -144,6 +157,23 @@ class ScopedAuthRateLimit {
     ScopedAuthRateLimit& operator=(const ScopedAuthRateLimit&) = delete;
     ScopedAuthRateLimit(ScopedAuthRateLimit&&) = delete;
     ScopedAuthRateLimit& operator=(ScopedAuthRateLimit&&) = delete;
+
+  private:
+    std::size_t previousAttempts_;
+    std::chrono::seconds previousWindow_;
+};
+
+/// The same, for the bucket the routes that send a message share.
+class ScopedMailRateLimit {
+  public:
+    ScopedMailRateLimit(std::size_t attempts, std::chrono::seconds window);
+
+    ~ScopedMailRateLimit();
+
+    ScopedMailRateLimit(const ScopedMailRateLimit&) = delete;
+    ScopedMailRateLimit& operator=(const ScopedMailRateLimit&) = delete;
+    ScopedMailRateLimit(ScopedMailRateLimit&&) = delete;
+    ScopedMailRateLimit& operator=(ScopedMailRateLimit&&) = delete;
 
   private:
     std::size_t previousAttempts_;

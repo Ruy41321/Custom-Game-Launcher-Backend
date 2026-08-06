@@ -1,6 +1,7 @@
 # Development overrides. Applied automatically by `docker compose up`.
 #
-# Adds: the database port on the host, verbose text logging, and an `api-build` service
+# Adds: the database port on the host, verbose text logging, a mail catcher so the
+# registration and password-reset flows can be driven end to end, and an `api-build` service
 # that carries the full toolchain so the test suite can be run without installing
 # anything locally.
 
@@ -9,13 +10,39 @@ services:
     ports:
       - "${DB_HOST_PORT:-5432}:5432"
 
+  # Accepts every message and delivers none, with a web interface to read them. Here rather
+  # than in docker-compose.yml on purpose: a production stack must not grow a mail server that
+  # swallows the messages a deployment thinks it is sending.
+  mail:
+    image: axllent/mailpit:latest
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "true"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "true"
+    ports:
+      # The inbox. The SMTP port stays on the compose network, where the API reaches it.
+      - "${MAILPIT_HOST_PORT:-8025}:8025"
+    restart: unless-stopped
+
   api:
     build:
       args:
         BUILD_TYPE: Debug
+    depends_on:
+      mail:
+        condition: service_started
     environment:
       LOG_LEVEL: debug
       LOG_JSON: "false"
+      REQUIRE_VERIFIED_EMAIL: ${REQUIRE_VERIFIED_EMAIL:-false}
+      # Development talks to the catcher rather than to the log, so the flows are exercised
+      # the way a deployment runs them — over a socket, with a message that has to parse.
+      MAIL_TRANSPORT: ${MAIL_TRANSPORT:-smtp}
+      SMTP_HOST: ${SMTP_HOST:-mail}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_SECURITY: ${SMTP_SECURITY:-none}
+      MAIL_FROM_ADDRESS: ${MAIL_FROM_ADDRESS:-launcher@localhost}
+      # Wide enough that testing a flow by hand does not throttle it after three messages.
+      MAIL_RATE_LIMIT: ${MAIL_RATE_LIMIT:-50}
 
   # Not started by `up` (see the `tools` profile). Run the suite with:
   #   docker compose run --rm api-build ctest --test-dir build --output-on-failure

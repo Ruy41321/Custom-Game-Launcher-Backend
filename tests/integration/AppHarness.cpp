@@ -80,6 +80,13 @@ app::AppConfig testConfig(const std::filesystem::path& blobRoot,
     config.rateLimit.authAttempts = 500;
     config.rateLimit.authWindowSeconds = 60;
 
+    // Same reasoning for the mail bucket, whose deployed numbers are three messages in fifteen
+    // minutes: a suite that registers dozens of accounts would spend a deployment's allowance
+    // in its first fixture.
+    config.mail.sendAttempts = 500;
+    config.mail.sendWindowSeconds = 60;
+    config.mail.linkBaseUrl = "https://launcher.test";
+
     // Wider still, because this bucket is keyed on the account and the whole suite shares a
     // process: the accounts a fixture reuses would otherwise spend a deployment's allowance
     // between them. The test that exercises it narrows the bucket for its own duration.
@@ -118,8 +125,18 @@ void AppHarness::SetUp() {
     }
 
     const auto config = testConfig(blobRoot_.path(), mediaRoot_.path());
-    app::AppContext::instance().initialize(
-        config, database_ ? database_->client() : drogon::orm::DbClientPtr{});
+
+    // The one dependency the harness supplies rather than lets the context build: the real one
+    // talks SMTP, and there is no mail server in this suite. Borrowed back as a raw pointer so
+    // a test can read what was sent — which, now that no response carries a token, is the only
+    // way to follow a verification link.
+    auto mailSender = std::make_unique<FakeMailSender>();
+    mail_ = mailSender.get();
+
+    app::AppContext::instance().initialize(config,
+                                           database_ ? database_->client()
+                                                     : drogon::orm::DbClientPtr{},
+                                           std::move(mailSender));
 
     app::registerErrorHandling(config.security);
     app::registerSecurityHeaders(config.security);
@@ -372,8 +389,11 @@ Json::Value AppHarness::createVerifiedSession(const std::string& email) {
         return {};
     }
 
+    EXPECT_TRUE((*registeredBody)["verificationEmailSent"].asBool())
+        << "the fixture cannot verify an address whose message never went out";
+
     Json::Value verify;
-    verify["token"] = (*registeredBody)["devEmailVerificationToken"].asString();
+    verify["token"] = tokenMailedTo(email);
     EXPECT_EQ(postJson("/api/v1/auth/verify-email", verify)->statusCode(), drogon::k200OK);
 
     Json::Value credentials;
@@ -418,6 +438,24 @@ Json::Value AppHarness::createSessionWithRole(const std::string& email,
 
 void AppHarness::resetRateLimiter() {
     app::AppContext::instance().authRateLimiter().reset();
+}
+
+FakeMailSender& AppHarness::mail() {
+    return *mail_;
+}
+
+std::string AppHarness::tokenMailedTo(const std::string& email) {
+    return mail_->tokenIn(email);
+}
+
+ScopedMailRateLimit::ScopedMailRateLimit(std::size_t attempts, std::chrono::seconds window)
+    : previousAttempts_(app::AppContext::instance().config().mail.sendAttempts),
+      previousWindow_(app::AppContext::instance().config().mail.sendWindowSeconds) {
+    app::AppContext::instance().mailRateLimiter().reconfigure(attempts, window);
+}
+
+ScopedMailRateLimit::~ScopedMailRateLimit() {
+    app::AppContext::instance().mailRateLimiter().reconfigure(previousAttempts_, previousWindow_);
 }
 
 ScopedAuthRateLimit::ScopedAuthRateLimit(std::size_t attempts, std::chrono::seconds window)

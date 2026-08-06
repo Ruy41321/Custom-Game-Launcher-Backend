@@ -1,0 +1,12 @@
+// Generated from src/auth/ui/*.html. Do not edit; edit the HTML.
+#include "auth/AuthPages.h"
+
+namespace launcher::auth {
+
+// Raw strings with an unlikely delimiter, so a page can contain quotes and parentheses freely.
+// The only sequence they must never contain is the closing delimiter itself.
+const char* const VERIFY_EMAIL_HTML = R"AUTHPAGE(@LAUNCHER_VERIFY_EMAIL_HTML@)AUTHPAGE";
+
+const char* const PASSWORD_RESET_HTML = R"AUTHPAGE(@LAUNCHER_PASSWORD_RESET_HTML@)AUTHPAGE";
+
+} // namespace launcher::auth

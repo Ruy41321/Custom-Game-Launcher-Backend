@@ -31,6 +31,7 @@
 #include "services/CatalogService.h"
 #include "services/CrashReportService.h"
 #include "services/DownloadService.h"
+#include "services/IMailSender.h"
 #include "services/MediaService.h"
 #include "services/PasswordHasher.h"
 #include "services/PatchNoteService.h"
@@ -51,7 +52,14 @@ class AppContext {
   public:
     static AppContext& instance();
 
-    void initialize(AppConfig config, drogon::orm::DbClientPtr database);
+    /// Builds everything. `mailSender` is the one dependency that can be handed in, because it
+    /// is the one whose real implementation talks to a machine the test suite does not have:
+    /// the integration harness installs a capturing sender and reads the link out of the
+    /// message, which is how the flows stay exercisable now that no token is returned in a
+    /// response. Null means "build the one this configuration describes".
+    void initialize(AppConfig config,
+                    drogon::orm::DbClientPtr database,
+                    std::unique_ptr<services::IMailSender> mailSender = nullptr);
 
     bool initialized() const noexcept;
 
@@ -97,6 +105,10 @@ class AppContext {
     /// between addresses; this one is the ceiling a session has.
     common::RateLimiter& accountRateLimiter() const;
 
+    /// A fourth, for the routes that put a message in somebody's inbox. See MailConfig for why
+    /// it is not the authentication one.
+    common::RateLimiter& mailRateLimiter() const;
+
     /// Test hook: drops all wiring so a fresh context can be installed.
     void reset();
 
@@ -134,6 +146,7 @@ class AppContext {
     std::unique_ptr<repositories::IDownloadRepository> downloads_;
     std::unique_ptr<repositories::ICrashReportRepository> crashReports_;
 
+    std::unique_ptr<services::IMailSender> mailSender_;
     std::unique_ptr<services::IPasswordHasher> passwordHasher_;
     std::unique_ptr<services::ITokenService> tokenService_;
     std::unique_ptr<services::AuthService> authService_;
@@ -151,6 +164,7 @@ class AppContext {
     std::unique_ptr<common::RateLimiter> authRateLimiter_;
     std::unique_ptr<common::RateLimiter> crashRateLimiter_;
     std::unique_ptr<common::RateLimiter> accountRateLimiter_;
+    std::unique_ptr<common::RateLimiter> mailRateLimiter_;
 };
 
 } // namespace launcher::app

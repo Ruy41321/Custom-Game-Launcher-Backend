@@ -71,6 +71,22 @@
     "requireVerifiedEmail": ${REQUIRE_VERIFIED_EMAIL:-false}
   },
 
+  "mail": {
+    "transport": "${MAIL_TRANSPORT:-log}",
+    "host": "${SMTP_HOST:-}",
+    "port": ${SMTP_PORT:-1025},
+    "username": "${SMTP_USERNAME:-}",
+    "password": "${SMTP_PASSWORD:-}",
+    "security": "${SMTP_SECURITY:-none}",
+    "fromAddress": "${MAIL_FROM_ADDRESS:-launcher@localhost}",
+    "fromName": "${MAIL_FROM_NAME:-Custom Game Launcher}",
+    "linkBaseUrl": "${MAIL_LINK_BASE_URL:-http://localhost:8080}",
+    "productName": "${MAIL_PRODUCT_NAME:-Custom Game Launcher}",
+    "timeoutSeconds": ${MAIL_TIMEOUT:-10},
+    "sendAttempts": ${MAIL_RATE_LIMIT:-50},
+    "sendWindowSeconds": ${MAIL_RATE_WINDOW:-900}
+  },
+
   "rateLimit": {
     "authAttempts": ${AUTH_RATE_LIMIT_ATTEMPTS:-50},
     "authWindowSeconds": ${AUTH_RATE_LIMIT_WINDOW:-60},

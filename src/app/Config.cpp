@@ -53,6 +53,32 @@ bool isDevelopmentPlaceholder(const std::string& secret) {
 
 } // namespace
 
+std::optional<MailTransport> parseMailTransport(std::string_view value) {
+    if (value == "smtp") {
+        return MailTransport::Smtp;
+    }
+    if (value == "log") {
+        return MailTransport::Log;
+    }
+    if (value == "none") {
+        return MailTransport::None;
+    }
+    return std::nullopt;
+}
+
+std::optional<MailSecurity> parseMailSecurity(std::string_view value) {
+    if (value == "none") {
+        return MailSecurity::None;
+    }
+    if (value == "starttls") {
+        return MailSecurity::StartTls;
+    }
+    if (value == "tls") {
+        return MailSecurity::Tls;
+    }
+    return std::nullopt;
+}
+
 std::string DatabaseConfig::connectionString() const {
     std::ostringstream out;
     out << "host=" << host << " port=" << port << " dbname=" << name << " user=" << user
@@ -174,6 +200,38 @@ Result<AppConfig> AppConfig::parse(std::string_view json, const common::EnvLooku
     config.auth.argon2MemoryLimitBytes =
         readInt<uint64_t>(auth, "argon2MemoryLimitBytes", config.auth.argon2MemoryLimitBytes);
 
+    const auto& mail = root["mail"];
+    const auto transportName = readString(mail, "transport", "log");
+    if (const auto transport = parseMailTransport(transportName); transport.has_value()) {
+        config.mail.transport = *transport;
+    } else {
+        return Result<AppConfig>::failure(
+            ErrorCode::InvalidInput,
+            "mail.transport must be one of smtp, log or none, not \"" + transportName + "\"");
+    }
+    const auto securityName = readString(mail, "security", "starttls");
+    if (const auto mailSecurity = parseMailSecurity(securityName); mailSecurity.has_value()) {
+        config.mail.security = *mailSecurity;
+    } else {
+        return Result<AppConfig>::failure(ErrorCode::InvalidInput,
+                                          "mail.security must be one of none, starttls or tls, "
+                                          "not \"" +
+                                              securityName + "\"");
+    }
+    config.mail.host = readString(mail, "host", config.mail.host);
+    config.mail.port = readInt<uint16_t>(mail, "port", config.mail.port);
+    config.mail.username = readString(mail, "username", config.mail.username);
+    config.mail.password = readString(mail, "password", config.mail.password);
+    config.mail.fromAddress = readString(mail, "fromAddress", config.mail.fromAddress);
+    config.mail.fromName = readString(mail, "fromName", config.mail.fromName);
+    config.mail.linkBaseUrl = readString(mail, "linkBaseUrl", config.mail.linkBaseUrl);
+    config.mail.productName = readString(mail, "productName", config.mail.productName);
+    config.mail.timeoutSeconds =
+        readInt<uint32_t>(mail, "timeoutSeconds", config.mail.timeoutSeconds);
+    config.mail.sendAttempts = readInt<uint32_t>(mail, "sendAttempts", config.mail.sendAttempts);
+    config.mail.sendWindowSeconds =
+        readInt<uint32_t>(mail, "sendWindowSeconds", config.mail.sendWindowSeconds);
+
     const auto& rateLimit = root["rateLimit"];
     config.rateLimit.authAttempts =
         readInt<uint32_t>(rateLimit, "authAttempts", config.rateLimit.authAttempts);
@@ -279,6 +337,26 @@ common::VoidResult AppConfig::validate() const {
         return common::VoidResult::failure(ErrorCode::InvalidInput,
                                            "every rateLimit value must be positive");
     }
+    if (mail.enabled()) {
+        if (mail.linkBaseUrl.empty()) {
+            return common::VoidResult::failure(
+                ErrorCode::InvalidInput,
+                "mail.linkBaseUrl is required when mail is enabled: a verification link with no "
+                "origin is not a link");
+        }
+        if (mail.sendAttempts == 0 || mail.sendWindowSeconds == 0 || mail.timeoutSeconds == 0) {
+            return common::VoidResult::failure(
+                ErrorCode::InvalidInput,
+                "mail.sendAttempts, mail.sendWindowSeconds and mail.timeoutSeconds must be "
+                "positive");
+        }
+    }
+    if (mail.transport == MailTransport::Smtp && (mail.host.empty() || mail.fromAddress.empty())) {
+        return common::VoidResult::failure(
+            ErrorCode::InvalidInput,
+            "mail.host and mail.fromAddress are required when mail.transport is smtp: set "
+            "SMTP_HOST and MAIL_FROM_ADDRESS");
+    }
     if (uploads.sessionTtlSeconds == 0 || uploads.maxOpenSessionsPerUser <= 0) {
         return common::VoidResult::failure(
             ErrorCode::InvalidInput,
@@ -315,6 +393,27 @@ common::VoidResult AppConfig::validate() const {
         if (database.password.empty()) {
             return common::VoidResult::failure(ErrorCode::InvalidInput,
                                                "database.password is required outside development");
+        }
+        // The log transport exists so a developer with no relay can still follow the link. What
+        // it writes is the body of the message, and the body of a password-reset message is a
+        // live credential — so a deployment that selected it by accident would be filing
+        // credentials into a log with a retention policy and an operator audience.
+        if (mail.transport == MailTransport::Log) {
+            return common::VoidResult::failure(
+                ErrorCode::InvalidInput,
+                "mail.transport \"log\" is a development affordance and writes reset links into "
+                "the log: set MAIL_TRANSPORT to smtp, or to none if this deployment sends no "
+                "mail at all");
+        }
+        // Nothing delivers the link, and nothing lets anybody in without it: every account
+        // created on such a deployment is one that can never sign in. It is the exact failure
+        // this whole feature exists to remove, so it is a start-up refusal rather than a
+        // surprise on the first registration.
+        if (!mail.enabled() && auth.requireVerifiedEmail) {
+            return common::VoidResult::failure(
+                ErrorCode::InvalidInput,
+                "auth.requireVerifiedEmail cannot be true while mail.transport is \"none\": "
+                "nothing would ever deliver the verification link, so no account could sign in");
         }
     }
 

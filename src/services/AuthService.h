@@ -14,19 +14,28 @@
 #include "repositories/IRoleRepository.h"
 #include "repositories/IUserRepository.h"
 #include "repositories/IUserTokenRepository.h"
+#include "services/IMailSender.h"
+#include "services/MailTemplates.h"
 #include "services/PasswordHasher.h"
 #include "services/TokenService.h"
 
 namespace launcher::services {
 
 struct AuthSettings {
-    /// When true, an account cannot log in until its email address is confirmed. Off in
-    /// development, where there is no mail transport.
+    /// When true, an account cannot log in until its email address is confirmed.
     bool requireVerifiedEmail{true};
     std::chrono::seconds refreshTokenTtl{2592000};
     std::chrono::seconds emailVerificationTtl{86400};
     std::chrono::seconds passwordResetTtl{3600};
     std::string defaultRole{domain::roles::PLAYER};
+
+    /// Where the links in a message point, and what the deployment calls itself.
+    MailContext mail;
+
+    /// False when the deployment sends no mail at all. Nothing is composed and nothing is
+    /// handed to the sender, so a disabled transport is quiet rather than an error per
+    /// registration. `AppConfig::validate()` refuses to pair it with `requireVerifiedEmail`.
+    bool mailEnabled{true};
 };
 
 /// Where a request came from, recorded against a refresh token so a user can later be shown
@@ -44,9 +53,13 @@ struct RegisterCommand {
 
 struct RegistrationResult {
     domain::User user;
-    /// The raw verification token, to be delivered by email. It is returned here and never
-    /// through the API: only the hash is stored, so this is the one moment it exists.
-    std::string emailVerificationToken;
+    /// Whether the verification message actually left the building.
+    ///
+    /// The raw token is deliberately **not** here. It exists for the length of one function,
+    /// is handed straight to the sender, and nothing above this layer can return it by
+    /// accident — which is the difference between removing the development affordance and
+    /// moving it somewhere else.
+    bool verificationEmailSent{false};
 };
 
 struct AuthTokens {
@@ -55,12 +68,6 @@ struct AuthTokens {
     std::chrono::seconds accessTokenExpiresIn{0};
     domain::User user;
     std::vector<std::string> permissions;
-};
-
-struct PasswordResetRequest {
-    /// Empty when no account matches. The caller still reports success, so the endpoint
-    /// cannot be used to discover which addresses are registered.
-    std::optional<std::string> token;
 };
 
 /// Registration, login, refresh-token rotation, email verification and password reset.
@@ -75,6 +82,7 @@ class AuthService {
                 const repositories::IUserTokenRepository& userTokens,
                 const IPasswordHasher& passwordHasher,
                 const ITokenService& tokenService,
+                const IMailSender& mailSender,
                 AuthSettings settings);
 
     drogon::Task<common::Result<RegistrationResult>> registerUser(RegisterCommand command) const;
@@ -93,8 +101,18 @@ class AuthService {
 
     drogon::Task<common::VoidResult> verifyEmail(std::string token) const;
 
-    drogon::Task<common::Result<PasswordResetRequest>>
-    requestPasswordReset(std::string email) const;
+    /// Issues a fresh verification link and sends it.
+    ///
+    /// Succeeds for an unknown address, for one that is already verified and for a disabled
+    /// account alike, and sends nothing in those three cases: the caller reports one sentence
+    /// whatever happened, so the route cannot be used to find out who has an account.
+    drogon::Task<common::VoidResult> resendVerification(std::string email) const;
+
+    /// Always succeeds, whether or not the address belongs to an account and whether or not
+    /// the message could be delivered. The caller answers the same either way, which is what
+    /// keeps this from being an account-enumeration tool; a failed send is a log line, because
+    /// there is nothing that can be said about it without saying the address exists.
+    drogon::Task<common::VoidResult> requestPasswordReset(std::string email) const;
 
     drogon::Task<common::VoidResult> resetPassword(std::string token,
                                                    std::string newPassword) const;
@@ -109,8 +127,13 @@ class AuthService {
     const repositories::IRoleRepository& roles_;
     const repositories::IRefreshTokenRepository& refreshTokens_;
     const repositories::IUserTokenRepository& userTokens_;
+    /// Issues a verification token for an account and sends the link. Returns whether the
+    /// message went out; false is never a reason to undo anything the caller already did.
+    drogon::Task<bool> sendVerificationLink(domain::User user) const;
+
     const IPasswordHasher& passwordHasher_;
     const ITokenService& tokenService_;
+    const IMailSender& mailSender_;
     AuthSettings settings_;
 };
 

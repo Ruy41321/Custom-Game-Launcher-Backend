@@ -15,6 +15,7 @@ add_executable(launcher_unit_tests
     unit/PasswordHasherTest.cpp
     unit/JwtTokenServiceTest.cpp
     unit/AuthServiceTest.cpp
+    unit/MailTemplatesTest.cpp
     unit/AccountServiceTest.cpp
     unit/RateLimiterTest.cpp
     unit/ClientAddressTest.cpp
@@ -63,6 +64,7 @@ add_executable(launcher_integration_tests
     integration/HealthEndpointTest.cpp
     integration/CapabilitiesEndpointTest.cpp
     integration/AuthEndpointTest.cpp
+    integration/AuthPageEndpointTest.cpp
     integration/AccountErasureEndpointTest.cpp
     integration/CatalogEndpointTest.cpp
     integration/MediaEndpointTest.cpp

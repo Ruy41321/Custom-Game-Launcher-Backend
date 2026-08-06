@@ -14,12 +14,25 @@ namespace {
 
 using launcher::testing::AppHarness;
 using launcher::testing::ScopedAuthRateLimit;
+using launcher::testing::ScopedMailRateLimit;
 
 constexpr const char* PASSWORD = "correct horse battery staple";
 
 AppHarness& harness() {
     return *AppHarness::current();
 }
+
+/// Makes every send fail for the length of a scope, whichever way the scope ends — the sender
+/// is shared by the whole binary, so an assertion that stopped a test early must not leave it
+/// refusing for everybody after it.
+struct ScopedMailFailure {
+    ScopedMailFailure() { harness().mail().refuseEverything(true); }
+
+    ~ScopedMailFailure() { harness().mail().refuseEverything(false); }
+
+    ScopedMailFailure(const ScopedMailFailure&) = delete;
+    ScopedMailFailure& operator=(const ScopedMailFailure&) = delete;
+};
 
 /// Each test registers its own account, so tests never collide over one shared fixture row.
 std::string uniqueEmail() {
@@ -55,7 +68,7 @@ Json::Value createVerifiedSession(const std::string& email) {
     EXPECT_EQ(registered->statusCode(), drogon::k201Created);
 
     Json::Value verify;
-    verify["token"] = bodyOf(registered)["devEmailVerificationToken"].asString();
+    verify["token"] = harness().tokenMailedTo(email);
     EXPECT_EQ(harness().postJson("/api/v1/auth/verify-email", verify)->statusCode(),
               drogon::k200OK);
 
@@ -167,12 +180,12 @@ TEST(AuthEndpointTest, GrantsThePlayerPermissionsOnRegistration) {
 
 TEST(AuthEndpointTest, AVerificationTokenCannotBeReplayed) {
     LAUNCHER_REQUIRE_DATABASE();
-    const auto registered =
-        harness().postJson("/api/v1/auth/register", registerPayload(uniqueEmail()));
+    const auto email = uniqueEmail();
+    const auto registered = harness().postJson("/api/v1/auth/register", registerPayload(email));
     ASSERT_EQ(registered->statusCode(), drogon::k201Created);
 
     Json::Value verify;
-    verify["token"] = bodyOf(registered)["devEmailVerificationToken"].asString();
+    verify["token"] = harness().tokenMailedTo(email);
     ASSERT_EQ(harness().postJson("/api/v1/auth/verify-email", verify)->statusCode(),
               drogon::k200OK);
 
@@ -302,7 +315,7 @@ TEST(AuthEndpointTest, ResetsThePasswordAndEndsExistingSessions) {
     ASSERT_EQ(requested->statusCode(), drogon::k200OK);
 
     Json::Value confirm;
-    confirm["token"] = bodyOf(requested)["devPasswordResetToken"].asString();
+    confirm["token"] = harness().tokenMailedTo(email);
     confirm["password"] = "an entirely different passphrase";
     ASSERT_EQ(harness().postJson("/api/v1/auth/password-reset/confirm", confirm)->statusCode(),
               drogon::k200OK);
@@ -343,12 +356,117 @@ TEST(AuthEndpointTest, PasswordResetLooksIdenticalForAnUnknownAddress) {
     EXPECT_EQ(knownResponse->statusCode(), unknownResponse->statusCode());
     EXPECT_EQ(bodyOf(knownResponse)["status"].asString(),
               bodyOf(unknownResponse)["status"].asString());
-    EXPECT_FALSE(bodyOf(unknownResponse).isMember("devPasswordResetToken"));
+    EXPECT_FALSE(harness().mail().lastTo("definitely-not-registered@example.test").has_value())
+        << "the answer is identical, and so is the silence: nothing may be sent";
+}
+
+// ---------------------------------------------------------------------------
+// Delivery
+// ---------------------------------------------------------------------------
+
+TEST(AuthEndpointTest, RegistrationMailsALinkAndNoResponseCarriesAToken) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto email = uniqueEmail();
+
+    const auto registered = harness().postJson("/api/v1/auth/register", registerPayload(email));
+
+    ASSERT_EQ(registered->statusCode(), drogon::k201Created);
+    const auto body = bodyOf(registered);
+    EXPECT_TRUE(body["verificationEmailSent"].asBool());
+    // The affordance is gone rather than moved: nothing in the response can be turned back
+    // into a link, in any environment.
+    EXPECT_FALSE(body.isMember("devEmailVerificationToken"));
+
+    const auto message = harness().mail().lastTo(email);
+    ASSERT_TRUE(message.has_value());
+    EXPECT_NE(message->body.find("https://launcher.test/verify-email?token="), std::string::npos)
+        << "the link has to be built from the configured origin, never from the Host header";
+}
+
+// The failure the whole feature exists to survive, end to end: the relay is down, the account
+// is created anyway, its owner cannot sign in yet, and the resend route is the way out.
+TEST(AuthEndpointTest, AnAccountSurvivesAMessageThatCouldNotBeSentAndIsRecoveredByAResend) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto email = uniqueEmail();
+
+    {
+        const ScopedMailFailure relayIsDown;
+        const auto registered = harness().postJson("/api/v1/auth/register", registerPayload(email));
+        ASSERT_EQ(registered->statusCode(), drogon::k201Created);
+        EXPECT_FALSE(bodyOf(registered)["verificationEmailSent"].asBool());
+    }
+
+    EXPECT_EQ(harness().postJson("/api/v1/auth/login", credentials(email))->statusCode(),
+              drogon::k403Forbidden)
+        << "the account exists and is waiting for an address it was never able to confirm";
+
+    Json::Value resend;
+    resend["email"] = email;
+    ASSERT_EQ(harness().postJson("/api/v1/auth/verify-email/resend", resend)->statusCode(),
+              drogon::k200OK);
+
+    Json::Value verify;
+    verify["token"] = harness().tokenMailedTo(email);
+    ASSERT_FALSE(verify["token"].asString().empty());
+    ASSERT_EQ(harness().postJson("/api/v1/auth/verify-email", verify)->statusCode(),
+              drogon::k200OK);
+    EXPECT_EQ(harness().postJson("/api/v1/auth/login", credentials(email))->statusCode(),
+              drogon::k200OK);
+}
+
+TEST(AuthEndpointTest, ResendingLooksIdenticalForAnAddressNobodyRegistered) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto known = uniqueEmail();
+    harness().postJson("/api/v1/auth/register", registerPayload(known));
+
+    Json::Value knownRequest;
+    knownRequest["email"] = known;
+    Json::Value unknownRequest;
+    unknownRequest["email"] = "never-registered@example.test";
+
+    const auto knownResponse = harness().postJson("/api/v1/auth/verify-email/resend", knownRequest);
+    const auto unknownResponse =
+        harness().postJson("/api/v1/auth/verify-email/resend", unknownRequest);
+
+    EXPECT_EQ(knownResponse->statusCode(), unknownResponse->statusCode());
+    EXPECT_EQ(bodyOf(knownResponse)["status"].asString(),
+              bodyOf(unknownResponse)["status"].asString());
+    EXPECT_FALSE(harness().mail().lastTo("never-registered@example.test").has_value());
 }
 
 // ---------------------------------------------------------------------------
 // Rate limiting
 // ---------------------------------------------------------------------------
+
+// Its own bucket, and therefore its own test: the auth limiter is left wide open here, so a
+// refusal can only be coming from the one that counts messages.
+TEST(AuthEndpointTest, ThrottlesTheRoutesThatSendAMessage) {
+    LAUNCHER_REQUIRE_DATABASE();
+
+    constexpr std::size_t ATTEMPTS = 3;
+    const ScopedMailRateLimit limit(ATTEMPTS, std::chrono::seconds{60});
+
+    Json::Value request;
+    request["email"] = "never-registered@example.test";
+
+    for (std::size_t sent = 0; sent < ATTEMPTS; ++sent) {
+        ASSERT_EQ(harness().postJson("/api/v1/auth/verify-email/resend", request)->statusCode(),
+                  drogon::k200OK)
+            << "attempt " << sent;
+    }
+
+    const auto limited = harness().postJson("/api/v1/auth/verify-email/resend", request);
+    ASSERT_EQ(limited->statusCode(), drogon::k429TooManyRequests);
+    EXPECT_EQ(bodyOf(limited)["code"].asString(), "rate_limited");
+    EXPECT_FALSE(limited->getHeader("Retry-After").empty());
+
+    // The same bucket, shared with the reset request: they spend one allowance between them,
+    // because they cost the same thing.
+    Json::Value reset;
+    reset["email"] = "never-registered@example.test";
+    EXPECT_EQ(harness().postJson("/api/v1/auth/password-reset/request", reset)->statusCode(),
+              drogon::k429TooManyRequests);
+}
 
 // Proves the filter is actually attached to the route; the algorithm itself is covered
 // deterministically by RateLimiterTest.
