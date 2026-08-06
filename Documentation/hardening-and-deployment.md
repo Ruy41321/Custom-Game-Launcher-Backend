@@ -115,7 +115,8 @@ refuses it.
 
 Outside development the server refuses to start when `auth.jwtSecret` is shorter than 32
 characters, when `storage.secureLinkSecret` or the database password is empty, **and when either
-secret still holds a development placeholder**.
+secret still holds a development placeholder**. Three more refusals are about mail and are in
+§6.3, because what they need is not a secret but a relay.
 
 The last one is not redundant. The placeholder `docker-compose.yml` falls back to is
 thirty-eight characters long and committed to a public repository, so it passed the length check
@@ -178,7 +179,49 @@ header is whatever the original caller chose to send, so an implementation takin
 entry would let anybody hand themselves a fresh bucket per request. With no proxies configured
 the header is ignored outright, which is the right answer for a server clients reach directly.
 
-### 6.3 The rest, briefly
+### 6.3 A relay to send from, and the address the links point at
+
+This is the other half of §6.1 and easy to meet late, because the server tells you: outside
+development it **refuses to start** rather than accepting registrations nobody can finish.
+Three shapes are refused, and each names the variable to set:
+
+- `MAIL_TRANSPORT=smtp` with no `SMTP_HOST` or no `MAIL_FROM_ADDRESS`;
+- `MAIL_TRANSPORT=log`, which is the development transport and writes the *body* of every
+  message into the log — and the body of a password-reset message is a live credential;
+- `MAIL_TRANSPORT=none` together with `REQUIRE_VERIFIED_EMAIL=true`, which is the combination
+  that produces accounts nobody can ever sign in to. Turning mail off is legitimate; it just
+  has to come with a deployment that does not wait for a link.
+
+What a deployment supplies:
+
+| Variable | What it is |
+|---|---|
+| `SMTP_HOST`, `SMTP_PORT` | The relay. Anything that speaks SMTP: a provider, or a local Postfix |
+| `SMTP_USERNAME`, `SMTP_PASSWORD` | Left empty for a relay that authenticates by network |
+| `SMTP_SECURITY` | `starttls` (default), `tls` for implicit TLS on 465, `none` only on a private network |
+| `MAIL_FROM_ADDRESS` | The envelope sender. Whatever domain it names has to be one the relay is allowed to send as, or the messages land in spam — see below |
+| `MAIL_LINK_BASE_URL` | The origin the links are built from |
+
+Two things worth planning rather than discovering:
+
+- **`MAIL_LINK_BASE_URL` must be the public HTTPS origin once §6.1 is done**, and it is the one
+  setting here that is *not* derived from the request. That is deliberate — a `Host` header is
+  chosen by whoever is calling, and building a link from it would let a stranger pick the domain
+  that appears in somebody else's inbox — but it means an origin that changes has to change
+  here too, or every link points at the old one. The pages at `/verify-email` and
+  `/password-reset` are served by the API, so this origin must reach the API.
+- **Deliverability is a DNS problem, not a code one.** SPF, DKIM and a reverse record for the
+  sending host are what decide whether a verification link arrives or is filed as spam, and
+  none of them can be configured from this repository. A relay that handles them for you — a
+  transactional mail provider — is the shortest path; a VPS sending directly on port 25 is the
+  longest.
+
+`SmtpMailSender` verifies the relay's certificate and there is **no switch to turn that off**:
+a private certificate authority belongs in the image's trust store. `starttls` is mandatory
+when selected, so a relay that does not offer it fails the send rather than quietly carrying
+credentials in the clear.
+
+### 6.4 The rest, briefly
 
 - **The host firewall**: nothing but 80 and 443 needs to be reachable. The database publishes no
   port at all and should stay that way.
@@ -202,3 +245,7 @@ the header is ignored outright, which is the right answer for a server clients r
 - **No per-route body limits.** Drogon reads a body before routing; see §4.
 - **No secret rotation machinery.** Rotating means editing `.env` and restarting, with the
   consequences in §5.
+- **Nothing watches what happens to a message after the relay accepts it.** There is no bounce
+  handling, no suppression list and no delivery tracking: a send either was accepted by the
+  relay or was not, and that is the whole of what this server knows. An address that starts
+  bouncing is a thing an operator learns from their relay, not from here.

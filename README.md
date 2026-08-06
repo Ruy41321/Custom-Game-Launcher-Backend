@@ -9,19 +9,30 @@ Written in C++20 with [Drogon](https://github.com/drogonframework/drogon). The w
 API, database and file server — comes up with one `docker compose` command and is meant to
 run comfortably on a cheap VPS.
 
-> **Status:** early development. Scaffolding, the database schema and the full authentication
-> surface are in place; the catalog and build-upload APIs are next. See
-> [CLAUDE.md](CLAUDE.md#11-progress) for the current state.
+> **Status:** in development, and feature-complete for what a small deployment needs.
+> Authentication with real email delivery, the catalog, resumable uploads with quotas, delta
+> downloads over signed URLs, artwork and the devlog, a loopback operator console, GDPR
+> erasure and crash reports are all in place. Nothing has been through a production
+> deployment yet, and there is **no TLS in the compose stack** — see
+> [hardening-and-deployment.md](Documentation/hardening-and-deployment.md) §6 for what a real
+> machine still has to do. What is missing next is a *release* surface for the launcher to
+> update itself from. See [CLAUDE.md](CLAUDE.md#11-progress) for the current state.
 
 ## Features
 
 - JWT authentication with rotating refresh tokens and Argon2id password hashing
+- Email verification and password recovery that actually send: SMTP over libcurl, with the
+  pages the links land on served by the API itself
 - Table-driven roles and permissions, extensible without destructive migrations
 - Content-addressed build storage: files are stored once by SHA-256, so the delta between
   any two versions is a manifest diff and unchanged files are never re-uploaded
 - Resumable downloads via signed URLs and HTTP `Range`
-- Per-user cumulative upload quotas
-- Download analytics per title
+- Per-user cumulative upload quotas, charged race-free and refunded when storage is reclaimed
+- Covers, screenshots and a per-game devlog
+- A localhost-only operator console: users, roles, quotas, an obligatory audit trail,
+  download analytics and the crashes launchers reported
+- GDPR erasure that anonymises rather than deletes, so other people's installs keep updating
+- Per-address and per-account rate limiting, security headers on every response
 - Structured JSON logging and a single error envelope across every endpoint
 
 ## Requirements
@@ -55,6 +66,20 @@ Check that it is alive:
 ```bash
 curl -s http://localhost:8080/api/v1/health
 ```
+
+The development stack also starts a **mail catcher**, so registration and password recovery
+work end to end with no relay of your own. Every message the server sends lands in its inbox
+instead of in somebody's:
+
+```
+http://localhost:8025
+```
+
+Development does not require a confirmed address, so a registration signs straight in. To see
+the deployed shape — where a link has to be followed first — restart the API with
+`REQUIRE_VERIFIED_EMAIL=true docker compose up -d api`. What a real deployment has to supply
+instead of the catcher is in
+[hardening-and-deployment.md](Documentation/hardening-and-deployment.md) §6.3.
 
 Migrations run automatically at container start. To apply them by hand:
 
