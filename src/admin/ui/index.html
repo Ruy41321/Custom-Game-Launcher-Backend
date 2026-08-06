@@ -29,6 +29,7 @@
   section[hidden] { display: none; }
   .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
            padding: 16px; margin-bottom: 16px; }
+  .panel[hidden] { display: none; }
   h2 { font-size: 14px; margin: 0 0 12px; font-weight: 600; }
   label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
   input, select, button.action {
@@ -45,7 +46,13 @@
            white-space: nowrap; }
   th { color: var(--muted); font-weight: 500; }
   tr.detail > td { white-space: normal; background: var(--bg); }
+  td .action + .action { margin-left: 6px; }
   code { font-family: ui-monospace, monospace; font-size: 12px; color: var(--muted); }
+  pre { font-family: ui-monospace, monospace; font-size: 12px; white-space: pre-wrap;
+        word-break: break-word; background: var(--bg); border: 1px solid var(--line);
+        border-radius: 6px; padding: 10px; margin: 12px 0 0; max-height: 340px; overflow: auto; }
+  .fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+  .muted { color: var(--muted); font-size: 12px; }
   .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
   .tile { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 12px; }
   .tile b { display: block; font-size: 20px; font-weight: 600; }
@@ -88,6 +95,7 @@
   <nav>
     <button data-tab="users" aria-selected="true">Users</button>
     <button data-tab="analytics" aria-selected="false">Downloads</button>
+    <button data-tab="crashes" aria-selected="false">Crashes</button>
     <button data-tab="audit" aria-selected="false">Audit</button>
   </nav>
   <p id="notice" class="error"></p>
@@ -152,6 +160,63 @@
             <tbody></tbody>
           </table>
         </div>
+      </div>
+    </section>
+
+    <section id="tab-crashes" hidden>
+      <div class="panel">
+        <h2>Distinct bugs</h2>
+        <div class="scroll">
+          <table id="crash-groups-table">
+            <thead><tr>
+              <th>Last seen</th><th>Exception</th><th>Message</th>
+              <th>Reports</th><th>First seen</th><th></th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="row" style="margin:12px 0 0">
+          <button class="action" id="crash-groups-previous">Previous</button>
+          <button class="action" id="crash-groups-next">Next</button>
+          <span class="muted" id="crash-groups-total"></span>
+        </div>
+        <p class="muted">
+          One row is one bug, not one crash: reports are grouped by a fingerprint the server
+          computes from the exception type and the shape of the stack, so a rebuild stays the
+          same bug. The message shown is the newest report's.
+        </p>
+      </div>
+
+      <div class="panel">
+        <h2>Reports</h2>
+        <div class="row">
+          <button class="action" id="crash-reports-all">Every bug</button>
+          <span class="muted" id="crash-reports-filter"></span>
+        </div>
+        <div class="scroll">
+          <table id="crash-reports-table">
+            <thead><tr>
+              <th>Received</th><th>Occurred</th><th>Kind</th><th>Launcher</th>
+              <th>Platform</th><th>Exception</th><th></th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="row" style="margin:12px 0 0">
+          <button class="action" id="crash-reports-previous">Previous</button>
+          <button class="action" id="crash-reports-next">Next</button>
+          <span class="muted" id="crash-reports-total"></span>
+        </div>
+      </div>
+
+      <div class="panel" id="crash-report" hidden>
+        <h2>Report</h2>
+        <div class="fields" id="crash-report-fields"></div>
+        <pre id="crash-report-stack"></pre>
+        <p class="muted">
+          No report names an account or a machine: the launcher strips its own directories out
+          of the text before writing the file, and the server records nothing about who sent it.
+        </p>
       </div>
     </section>
 
@@ -232,6 +297,27 @@ function cell(row, text) {
   return td;
 }
 
+function when(timestamp) {
+  return timestamp ? timestamp.replace("T", " ").replace("Z", "") : "";
+}
+
+// A long field is cut so the table stays one line per row; the whole of it stays on the title,
+// so nothing shown here is the only copy of anything.
+function brief(text, limit) {
+  const value = text || "";
+  return value.length > limit ? value.slice(0, limit) + "…" : value;
+}
+
+// One place decides what a pager may do, so two lists cannot disagree about when there is a
+// next page. The counts are the endpoint's, not what this page happens to be holding.
+function paging(controls, page, noun) {
+  const pages = Math.max(1, Math.ceil(page.total / page.pageSize));
+  $(controls + "-total").textContent =
+    page.total + " " + noun + "(s) — page " + page.page + " of " + pages;
+  $(controls + "-previous").disabled = page.page <= 1;
+  $(controls + "-next").disabled = page.page >= pages;
+}
+
 // --- sign in ---------------------------------------------------------------
 
 $("signin-form").addEventListener("submit", async (event) => {
@@ -268,7 +354,8 @@ $("signout").addEventListener("click", async () => {
 
 // --- tabs ------------------------------------------------------------------
 
-const loaders = { users: loadUsers, analytics: loadAnalytics, audit: loadAudit };
+const loaders = { users: loadUsers, analytics: loadAnalytics, crashes: loadCrashes,
+                  audit: loadAudit };
 
 document.querySelectorAll("nav button").forEach((button) => {
   button.addEventListener("click", () => {
@@ -463,6 +550,131 @@ async function loadAnalytics() {
 
 $("days").addEventListener("change", loadAnalytics);
 
+// --- crashes ---------------------------------------------------------------
+
+// The two lists page independently, because they answer different questions: an operator
+// narrows the reports to one fingerprint and walks them while the list of bugs stays put.
+// A page number is only remembered once its request came back, so a refused one — an expired
+// session, a missing permission — leaves the pager where the operator can still see it.
+const crashes = { groupPage: 1, reportPage: 1, fingerprint: "" };
+
+function loadCrashes() {
+  loadCrashGroups();
+  loadCrashReports();
+}
+
+async function loadCrashGroups(wanted) {
+  let page;
+  try {
+    page = await api("/admin/api/crashes?page=" + Math.max(1, wanted || crashes.groupPage));
+  } catch (error) { return notice(error.message); }
+
+  const body = $("crash-groups-table").querySelector("tbody");
+  body.textContent = "";
+  page.items.forEach((group) => body.appendChild(crashGroupRow(group)));
+  crashes.groupPage = page.page;
+  paging("crash-groups", page, "bug");
+}
+
+function crashGroupRow(group) {
+  const row = document.createElement("tr");
+  cell(row, when(group.lastSeenAt));
+  cell(row, brief(group.exceptionType, 44)).title = group.exceptionType;
+  cell(row, brief(group.message, 60)).title = group.message;
+  cell(row, group.occurrences);
+  cell(row, when(group.firstSeenAt));
+
+  const actions = document.createElement("td");
+  actions.appendChild(button("Reports", () => {
+    crashes.fingerprint = group.fingerprint;
+    loadCrashReports(1);
+  }));
+  // The group carries its newest report's id, so opening the one an operator is about to read
+  // costs no search of its own.
+  actions.appendChild(button("Latest", () => openCrashReport(group.latestReportId)));
+  row.appendChild(actions);
+  return row;
+}
+
+async function loadCrashReports(wanted) {
+  const parameters = new URLSearchParams();
+  if (crashes.fingerprint) parameters.set("fingerprint", crashes.fingerprint);
+  parameters.set("page", Math.max(1, wanted || crashes.reportPage));
+
+  let page;
+  try {
+    page = await api("/admin/api/crashes/reports?" + parameters.toString());
+  } catch (error) { return notice(error.message); }
+
+  const body = $("crash-reports-table").querySelector("tbody");
+  body.textContent = "";
+  page.items.forEach((report) => body.appendChild(crashReportRow(report)));
+  $("crash-reports-filter").textContent = crashes.fingerprint
+    ? "one bug — fingerprint " + crashes.fingerprint.slice(0, 16)
+    : "every bug, newest first";
+  crashes.reportPage = page.page;
+  paging("crash-reports", page, "report");
+}
+
+function crashReportRow(report) {
+  const row = document.createElement("tr");
+  cell(row, when(report.receivedAt));
+  cell(row, when(report.occurredAt));
+  cell(row, report.kind);
+  cell(row, report.launcherVersion);
+  cell(row, brief(report.platform, 30)).title = report.platform;
+  cell(row, brief(report.exceptionType, 44)).title = report.exceptionType;
+
+  const actions = document.createElement("td");
+  actions.appendChild(button("Open", () => openCrashReport(report.id)));
+  row.appendChild(actions);
+  return row;
+}
+
+async function openCrashReport(reportId) {
+  if (!reportId) return notice("That bug has no report to open.");
+
+  let report;
+  try {
+    report = await api("/admin/api/crashes/reports/" + encodeURIComponent(reportId));
+  } catch (error) { return notice(error.message); }
+
+  const fields = $("crash-report-fields");
+  fields.textContent = "";
+  [["Received", when(report.receivedAt)],
+   ["Occurred", when(report.occurredAt)],
+   ["Kind", report.kind],
+   ["Launcher", report.launcherVersion],
+   ["Platform", report.platform],
+   ["Exception", report.exceptionType],
+   ["Message", report.message],
+   ["Fingerprint", report.fingerprint]].forEach(([name, value]) => {
+    const field = document.createElement("div");
+    const label = document.createElement("label");
+    label.textContent = name;
+    const shown = document.createElement("div");
+    // An absent optional field is said to be absent rather than left as a blank an operator
+    // has to guess the meaning of.
+    shown.textContent = value || "not reported";
+    field.append(label, shown);
+    fields.appendChild(field);
+  });
+
+  $("crash-report-stack").textContent = report.stackTrace || "No stack trace.";
+  $("crash-report").hidden = false;
+  $("crash-report").scrollIntoView({ block: "nearest" });
+}
+
+$("crash-groups-previous").addEventListener("click", () => loadCrashGroups(crashes.groupPage - 1));
+$("crash-groups-next").addEventListener("click", () => loadCrashGroups(crashes.groupPage + 1));
+$("crash-reports-previous").addEventListener("click",
+                                             () => loadCrashReports(crashes.reportPage - 1));
+$("crash-reports-next").addEventListener("click", () => loadCrashReports(crashes.reportPage + 1));
+$("crash-reports-all").addEventListener("click", () => {
+  crashes.fingerprint = "";
+  loadCrashReports(1);
+});
+
 // --- audit -----------------------------------------------------------------
 
 async function loadAudit() {
@@ -478,7 +690,7 @@ async function loadAudit() {
   body.textContent = "";
   page.items.forEach((entry) => {
     const row = document.createElement("tr");
-    cell(row, entry.createdAt.replace("T", " ").replace("Z", ""));
+    cell(row, when(entry.createdAt));
     // A null actor is the command line, which is how the first administrator is granted.
     cell(row, entry.actorEmail || "command line");
     cell(row, entry.action);

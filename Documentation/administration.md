@@ -265,8 +265,8 @@ on the public API, and does not exist yet.
 
 ## 7. The console
 
-`GET /admin` (and `/admin/`) serves one self-contained HTML page: sign in, then users, downloads
-and audit.
+`GET /admin` (and `/admin/`) serves one self-contained HTML page: sign in, then users, downloads,
+crashes and audit.
 
 It is **embedded in the binary** at build time from `src/admin/ui/index.html`. The deployed
 image then has no path to mount, the page cannot get out of step with the API it talks to, and
@@ -276,7 +276,16 @@ file and configures `cmake/AdminUi.cpp.in` into a string literal;
 edit.
 
 Vanilla JavaScript, no build step. In a C++ repository that is not a compromise: adding npm to
-get a console that shows three tables would cost more than the console is worth.
+get a console that shows a handful of tables would cost more than the console is worth.
+
+The crash screen is the one with two lists rather than one, because the routes behind it answer
+two different questions (see [crash-reports.md](crash-reports.md)). The upper list is one row per
+*bug*; **Reports** narrows the lower list to that fingerprint and **Latest** opens the newest
+report behind it, using the `latestReportId` the group already carries so opening one costs no
+search. The two page independently: narrowing the reports and walking them leaves the list of
+bugs where the operator left it. A page number is only remembered once its request came back, so
+a refused one — an expired session, a revoked `admin.crashes.read` — leaves the pager where it
+was instead of skipping a page nobody saw.
 
 Only the listener gate applies to the route. The page must load before anybody can sign in, and
 it carries no data — every number on it arrives from an endpoint that does check — so an

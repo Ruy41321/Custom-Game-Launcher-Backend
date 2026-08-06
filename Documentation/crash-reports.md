@@ -141,8 +141,12 @@ this one is permission to send something about the user.
 ## What this deliberately does not do
 
 - **No symbolication and no source mapping.** The stack arrives as the runtime formatted it.
-- **No alerting.** Nothing emails an operator when a new fingerprint appears; the console has to
-  be looked at. A deployment that wants alerts can poll `/admin/api/crashes`.
+- **No alerting.** Nothing emails an operator when a new fingerprint appears; the **Crashes** tab
+  of the console has to be looked at. A deployment that wants alerts can poll
+  `/admin/api/crashes`.
+- **No filtering by version or platform.** The console narrows by fingerprint and by nothing
+  else, because that is the only filter the routes take. Narrowing by who sent a report is not a
+  missing feature: no report names an account and no column exists for one.
 - **No deduplication on write.** Every report is stored, even the four hundredth of one bug —
   the count is the signal, and a `lastSeenAt` with no rows behind it could not answer "is this
   still happening on the new version".

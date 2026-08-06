@@ -662,11 +662,24 @@ the first permission seeded outside 0001.
 - ✅ [Documentation/crash-reports.md](Documentation/crash-reports.md)
 - ✅ 589/589 tests green (390 unit, 199 integration), `clang-format` clean
 
+#### The console screen for them — 2026-08-06
+
+The three routes had answered nobody since the day they shipped.
+
+- ✅ A **Crashes** tab in `src/admin/ui/index.html`, built on the audit screen's shape: same
+  `api()` helper, same error envelope handling, same tables, no dependency and nothing the
+  `default-src 'none'` policy has to be relaxed for
+- ✅ Two lists, because the routes answer two questions: one row per bug above, the reports
+  behind one of them below, and the full report — stack trace included — under both. They page
+  independently, and a page number is only remembered once its request came back
+- ✅ Four integration tests over the served bytes, the shape this page's assertions already
+  took: the tab is reachable, all three routes are called, and the reports are narrowed by
+  fingerprint rather than by an account there is no column for
+- ✅ 592/592 tests green (390 unit, 202 integration), `clang-format` clean
+
 ### Next up
 - ⬜ **M10**, the third that is left: security hardening. Rate limiting exists on the auth
   endpoints and now on crash submission; HTTPS, security headers and everything else do not
-- ⬜ No console screen for crash reports: the three routes answer, and `src/admin/ui/index.html`
-  has no tab that calls them
 
 Still deliberately absent, and worth stating so a later session does not assume otherwise:
 there is no automatic retention policy — nothing deletes an *old* build on its own, only what a

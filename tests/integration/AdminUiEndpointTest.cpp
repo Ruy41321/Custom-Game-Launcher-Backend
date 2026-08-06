@@ -73,6 +73,33 @@ TEST(AdminUiEndpointTest, KeepsTheTokenOutOfPersistentStorage) {
     EXPECT_EQ(body.find("document.cookie"), std::string::npos);
 }
 
+TEST(AdminUiEndpointTest, ReachesCrashReportsFromTheNavigation) {
+    const auto body = harness().adminGet("/admin")->body();
+
+    EXPECT_NE(body.find("data-tab=\"crashes\""), std::string::npos);
+    EXPECT_NE(body.find("id=\"tab-crashes\""), std::string::npos);
+}
+
+TEST(AdminUiEndpointTest, CallsEveryCrashRouteTheServerExposes) {
+    // Three routes because an operator asks two questions, and the answer to the second is a
+    // report in full. A screen that only listed the groups would leave the other two answering
+    // nobody, which is what this page was for a day.
+    const auto body = harness().adminGet("/admin")->body();
+
+    EXPECT_NE(body.find("/admin/api/crashes?page="), std::string::npos);
+    EXPECT_NE(body.find("/admin/api/crashes/reports?"), std::string::npos);
+    EXPECT_NE(body.find("/admin/api/crashes/reports/\""), std::string::npos);
+}
+
+TEST(AdminUiEndpointTest, NarrowsTheReportsByFingerprintRatherThanByAccount) {
+    // There is no account to narrow by, and there is no column for one. Asserted on the served
+    // bytes so a later edit cannot quietly add a filter the server would have to grow a field
+    // for.
+    const auto body = harness().adminGet("/admin")->body();
+
+    EXPECT_NE(body.find("parameters.set(\"fingerprint\""), std::string::npos);
+}
+
 TEST(AdminUiEndpointTest, LoadsNothingFromTheNetworkBesidesItsOwnApi) {
     // The CSP is the enforcement; this is the check that the page does not need it relaxed.
     const auto body = harness().adminGet("/admin")->body();
