@@ -7,8 +7,9 @@ published, stored, served and checked. Implemented in `src/domain/LauncherReleas
 `src/repositories/postgres/PgLauncherReleaseRepository.*` and
 `src/controllers/v1/LauncherController.*`.
 
-The client half — checking, downloading and swapping — lives in the launcher repository and is
-**not implemented yet**. This page describes the surface it will talk to.
+The client half — checking, downloading and swapping — lives in the launcher repository and has
+been **complete since 2026-08-07**. This page describes the surface it talks to; its answer to
+the five rules at the end of this document is `Documentation/self-update.md` there.
 
 Related: [builds-and-uploads.md](builds-and-uploads.md) for the content-addressed storage this
 reuses, [downloads-and-deltas.md](downloads-and-deltas.md) for why *those* URLs are signed and
