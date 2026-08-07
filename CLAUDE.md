@@ -445,26 +445,36 @@ curl -s http://localhost:8080/api/v1/health
 - Atomic, well-described commits. Conventional-commit prefixes: `feat:`, `fix:`, `refactor:`,
   `test:`, `docs:`, `chore:`, `ci:`.
 - Optional feature branches off `dev`, merged back into `dev` via pull request.
-- CI runs on every push and pull request targeting `dev`.
+- **CI runs on `main`**, not on `dev`. Since `main` is merged by hand by the repository owner,
+  no run is triggered by anything this repository's work does — which makes the local check the
+  real gate.
+
+### The gate before a push is local, and it is not optional
+
+Nothing on GitHub will catch a red suite on `dev` any more, so **both of these have to pass
+before `git push`**, every time:
+
+```powershell
+./scripts/test.ps1            # builds incrementally, then runs the whole suite
+./scripts/test.ps1 -Format    # and check `git diff` is empty afterwards
+```
+
+A push made without running them is a push made on hope. What they cannot cover is the `docker`
+job — a clean image build and the ownership guard on the data volumes — so a change touching
+`docker/`, `vcpkg.json` or the compose files is worth saying out loud as unverified rather than
+quietly assuming.
 
 ### Finishing a milestone
 
-Pushing `dev` at the end of a milestone is **not** something to ask permission for — do it,
-then watch the run it triggers. A milestone is not finished until CI is green:
+Pushing `dev` at the end of a milestone is **not** something to ask permission for — run the two
+commands above, then push. Mid-milestone pushes are still the maintainer's call.
 
 ```bash
 git push origin dev
 # gh lives in "C:\Program Files\GitHub CLI" and is not on an already-open shell's PATH
-gh run list --branch dev --limit 3          # the new run appears a few seconds after the push
-gh run watch <id>                           # or poll `gh run list` until it completes
+gh run list --branch main --limit 3         # only after the owner has merged into main
 gh run view <id> --log-failed               # only what failed, not the whole log
 ```
-
-A red run is part of the same milestone, not the next session's problem: fix it, push the fix,
-and check again. `Docker image builds` takes around twelve minutes, so the whole run is worth
-waiting for rather than guessing at.
-
-This applies to finishing a milestone. Mid-milestone pushes are still the maintainer's call.
 
 ---
 
@@ -480,7 +490,7 @@ Legend: ✅ done · 🚧 in progress · ⬜ not started
 - ✅ Structured JSON logging, `Result<T>`, central error envelope
 - ✅ `/api/v1/health`
 - ✅ `docker-compose.yml` (api + postgres + nginx fileserver) and Dockerfiles
-- ✅ GoogleTest wiring, CTest labels, GitHub Actions CI on `dev`
+- ✅ GoogleTest wiring, CTest labels, GitHub Actions CI (on `dev` then; on `main` since 2026-08-07)
 
 ### Milestone 2 — Database schema ✅
 - ✅ `0001_initial_schema.sql`: identity/RBAC, catalog, CAS blobs, analytics, GDPR — 19 tables
@@ -859,7 +869,27 @@ button for it on the console.
 
 ## Session protocol
 
-At the end of every working session, update:
+### Every finished task ends with a recap of what is left
+
+**Not optional, and not only at the end of a milestone.** Whenever a task is finished — a
+feature, a fix, a piece of documentation — the last thing said is a short written recap of
+**what remains to be done**, in the conversation itself rather than only in a file.
+
+It says three things and stops:
+
+1. what was delivered, in a line;
+2. **what is left in the piece just touched**, including anything deliberately left out and why;
+3. what is next, and anything that is now blocked or newly known — a bug found in passing, a
+   claim elsewhere that this work has just made false.
+
+The reason is that this repository's memory lives in files a later session has to *choose* to
+read, while the person deciding what to do next is reading the conversation. A task that ends
+with "done" leaves them to reconstruct the remainder from a diff. It is also the moment a
+half-finished thing is most honestly describable: an hour later it looks finished.
+
+Keep it short. If the recap needs more than a screen, the work needed a `HANDOFF.md` entry too.
+
+### At the end of every working session, update:
 
 1. **§11 Progress** — move items between ✅/🚧/⬜, add what is genuinely next.
 2. **§4 Technical decisions** — append any new decision *with its rationale and the
@@ -872,7 +902,8 @@ Keep it accurate over optimistic: a wrong progress table is worse than no progre
 
 ### At the end of a milestone, additionally
 
-5. **Push `dev` and see CI through to green** — see §10. Not something to ask about.
+5. **Run the suite and the formatter locally, then push `dev`** — see §10. Not something to ask
+   about. CI runs on `main`, which only the owner merges, so there is no run to watch.
 6. **Update `HANDOFF.md`**, which lives one directory above both repositories
    (`C:\Users\Luigi\Developing\Personal\GameLauncher\HANDOFF.md`) and is deliberately outside
    version control, so it never lands in a commit. It is the first thing the next session

@@ -1,10 +1,14 @@
 name: CI
 
+# Runs on `main`, which is where work arrives once the maintainer has merged it. `dev` is
+# checked locally instead — `./scripts/test.ps1` and `clang-format` before every push — so a run
+# here is a second opinion about a clean machine and the Docker image rather than the first time
+# anybody has seen the suite.
 on:
   push:
-    branches: [dev]
+    branches: [main]
   pull_request:
-    branches: [dev]
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
