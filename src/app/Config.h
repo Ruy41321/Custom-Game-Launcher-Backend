@@ -93,6 +93,32 @@ struct MediaConfig {
     int64_t maxBytes{5LL * 1024 * 1024};
 };
 
+/// Where releases of the *launcher itself* live, and the key that says which ones are real.
+struct LauncherReleaseConfig {
+    /// A third root, separate from the blobs and from the artwork, for the reason the second one
+    /// is separate: this one is served publicly and unsigned. A launcher binary is the most
+    /// public thing a deployment holds, and the client asking for it has no token to be handed a
+    /// signed URL with — the launcher that most needs an update is the one that cannot sign in.
+    std::string root{"/data/launcher"};
+    std::string publicBaseUrl{"http://localhost:8081/launcher"};
+
+    /// base64 DER SubjectPublicKeyInfo for the P-256 key releases are signed with — the body of
+    /// a PEM `BEGIN PUBLIC KEY` block.
+    ///
+    /// **Empty is the default and turns the surface off entirely.** There is deliberately no
+    /// way to serve an unsigned release: an automatic update is code a machine runs without
+    /// anybody looking at it, so a mechanism with the checking switched off would be a channel
+    /// straight into every installation that trusts it — worse than having no mechanism.
+    ///
+    /// The private half is never here, never in this repository and never in its CI. A release
+    /// is signed on the machine of whoever cuts it, and this server can only ever check. That is
+    /// what makes an attacker holding this deployment able to stop updates and unable to forge
+    /// one; see Documentation/hardening-and-deployment.md §6.5.
+    std::string publicKey;
+
+    bool enabled() const { return !publicKey.empty(); }
+};
+
 struct AuthConfig {
     std::string jwtSecret;
     std::string issuer{"custom-game-launcher"};
@@ -246,6 +272,7 @@ struct AppConfig {
     LoggingConfig logging;
     StorageConfig storage;
     MediaConfig media;
+    LauncherReleaseConfig launcherReleases;
     AuthConfig auth;
     MailConfig mail;
     RateLimitConfig rateLimit;

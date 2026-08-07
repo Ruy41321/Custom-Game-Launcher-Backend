@@ -171,6 +171,7 @@ server has and, more usefully, why each one works the way it does.
 | [storage-lifecycle.md](Documentation/storage-lifecycle.md) | Deleting builds, collecting unreferenced blobs, quota refunds |
 | [administration.md](Documentation/administration.md) | The loopback operator console, roles, quotas, audit |
 | [crash-reports.md](Documentation/crash-reports.md) | Receiving launcher crashes, fingerprinting and grouping them |
+| [launcher-releases.md](Documentation/launcher-releases.md) | Releases of the launcher itself: the signed document, the publish command, why nothing here can sign |
 | [hardening-and-deployment.md](Documentation/hardening-and-deployment.md) | Headers, per-account limits, body caps — and what TLS leaves to a deployment |
 
 ## Project layout

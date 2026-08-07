@@ -62,6 +62,19 @@ services:
       MEDIA_ROOT: /data/media
       MEDIA_PUBLIC_BASE_URL: ${MEDIA_PUBLIC_BASE_URL:-http://localhost:8081/media}
       MEDIA_MAX_BYTES: ${MEDIA_MAX_BYTES:-5242880}
+
+      # Releases of the launcher itself. A third root again, for the same reason: the file
+      # server publishes this one unsigned, because the launcher that most needs an update is
+      # the one that cannot sign in yet and so has no token to be handed a signed URL with.
+      #
+      # LAUNCHER_RELEASE_PUBLIC_KEY is the *public* half of the key releases are signed with,
+      # and empty — the default — turns the whole surface off. The private half is never here,
+      # never in this repository and never in its CI: a release is signed on the machine of
+      # whoever cuts it, and this server can only ever check. See
+      # Documentation/hardening-and-deployment.md section 6.5.
+      LAUNCHER_RELEASE_ROOT: /data/launcher
+      LAUNCHER_PUBLIC_BASE_URL: ${LAUNCHER_PUBLIC_BASE_URL:-http://localhost:8081/launcher}
+      LAUNCHER_RELEASE_PUBLIC_KEY: ${LAUNCHER_RELEASE_PUBLIC_KEY:-}
       FILE_PUBLIC_BASE_URL: ${FILE_PUBLIC_BASE_URL:-http://localhost:8081/files}
       FILE_SECURE_LINK_SECRET: ${FILE_SECURE_LINK_SECRET:-dev-insecure-secure-link-secret}
       SIGNED_URL_TTL: ${SIGNED_URL_TTL:-3600}
@@ -115,6 +128,7 @@ services:
     volumes:
       - blob-data:/data/blobs
       - media-data:/data/media
+      - launcher-data:/data/launcher
       - api-logs:/var/log/launcher
     restart: unless-stopped
 
@@ -128,10 +142,12 @@ services:
     volumes:
       - blob-data:/data/blobs:ro
       - media-data:/data/media:ro
+      - launcher-data:/data/launcher:ro
     restart: unless-stopped
 
 volumes:
   db-data:
   blob-data:
   media-data:
+  launcher-data:
   api-logs:

@@ -134,7 +134,7 @@ jobs:
         run: |
           # --entrypoint, because the image's own entrypoint runs the migrations and would
           # take `stat` as an argument rather than being replaced by it.
-          for path in /data/blobs /data/media /var/log/launcher; do
+          for path in /data/blobs /data/media /data/launcher /var/log/launcher; do
             owner=$(docker run --rm --entrypoint stat -v "ci-vol-check:$path" \
               launcher-api:ci -c '%U' "$path")
             echo "$path -> $owner"

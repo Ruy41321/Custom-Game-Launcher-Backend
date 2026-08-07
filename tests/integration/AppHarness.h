@@ -104,6 +104,10 @@ class AppHarness : public ::testing::Environment {
     /// keeps them apart — the file server publishes this one without a signature.
     const std::filesystem::path& mediaRoot() const { return mediaRoot_.path(); }
 
+    /// Where published launcher artifacts land. A third root, for the same reason the second
+    /// one exists: this one is also served publicly and unsigned.
+    const std::filesystem::path& releaseRoot() const { return releaseRoot_.path(); }
+
     /// Clears the shared auth throttle so one test's attempts cannot affect the next.
     void resetRateLimiter();
 
@@ -133,6 +137,7 @@ class AppHarness : public ::testing::Environment {
 
     TemporaryDirectory blobRoot_{"launcher-blobs"};
     TemporaryDirectory mediaRoot_{"launcher-media"};
+    TemporaryDirectory releaseRoot_{"launcher-releases"};
     std::unique_ptr<TestDatabase> database_;
     /// Owned by the AppContext; borrowed here for the length of the run.
     FakeMailSender* mail_{nullptr};

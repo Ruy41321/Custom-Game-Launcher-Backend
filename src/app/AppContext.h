@@ -16,6 +16,7 @@
 #include "repositories/IDownloadRepository.h"
 #include "repositories/IGameRepository.h"
 #include "repositories/IGameVersionRepository.h"
+#include "repositories/ILauncherReleaseRepository.h"
 #include "repositories/ILibraryRepository.h"
 #include "repositories/IMediaRepository.h"
 #include "repositories/IPatchNoteRepository.h"
@@ -32,6 +33,7 @@
 #include "services/CrashReportService.h"
 #include "services/DownloadService.h"
 #include "services/IMailSender.h"
+#include "services/LauncherReleaseService.h"
 #include "services/MediaService.h"
 #include "services/PasswordHasher.h"
 #include "services/PatchNoteService.h"
@@ -91,6 +93,8 @@ class AppContext {
 
     const services::CrashReportService& crashReportService() const;
 
+    const services::LauncherReleaseService& launcherReleaseService() const;
+
     /// Shared by the authentication endpoints; see common::RateLimiter for why it is
     /// in-process.
     common::RateLimiter& authRateLimiter() const;
@@ -145,6 +149,7 @@ class AppContext {
     std::unique_ptr<repositories::IUploadSessionRepository> uploadSessions_;
     std::unique_ptr<repositories::IDownloadRepository> downloads_;
     std::unique_ptr<repositories::ICrashReportRepository> crashReports_;
+    std::unique_ptr<repositories::ILauncherReleaseRepository> launcherReleases_;
 
     std::unique_ptr<services::IMailSender> mailSender_;
     std::unique_ptr<services::IPasswordHasher> passwordHasher_;
@@ -160,6 +165,7 @@ class AppContext {
     std::unique_ptr<services::DownloadService> downloadService_;
     std::unique_ptr<services::RetentionService> retentionService_;
     std::unique_ptr<services::CrashReportService> crashReportService_;
+    std::unique_ptr<services::LauncherReleaseService> launcherReleaseService_;
 
     std::unique_ptr<common::RateLimiter> authRateLimiter_;
     std::unique_ptr<common::RateLimiter> crashRateLimiter_;

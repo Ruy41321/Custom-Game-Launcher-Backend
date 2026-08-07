@@ -67,6 +67,36 @@ server {
         tcp_nopush on;
     }
 
+    # Launcher releases. A third root, public and unsigned like the artwork above and for a
+    # sharper version of the same reason: a launcher binary is the most public thing this
+    # deployment holds, and the client asking for it has no token to be handed a signed URL
+    # with — the launcher that most needs an update is the one that cannot sign in yet.
+    #
+    # Serving it unsigned weakens nothing. The integrity guarantee comes from a signature over
+    # the release document and the content address inside it, neither of which a URL takes part
+    # in: rewriting this URL entirely would still leave an attacker having to produce bytes that
+    # hash to something somebody signed.
+    #
+    # A regex location, so the only paths that resolve are ones the publish command can have
+    # written: two levels of hex fan-out, a hashed name, and the one extension it stores.
+    location ~ "^/launcher/([0-9a-f]{2})/([0-9a-f]{2})/([0-9a-f]{64}\.zip)$" {
+        alias /data/launcher/$1/$2/$3;
+
+        # Named after the hash of its own contents, so it can never change.
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Content-Security-Policy "default-src 'none'; sandbox" always;
+
+        # An archive is a download, never something a browser should try to render.
+        default_type application/zip;
+        add_header Content-Disposition "attachment" always;
+
+        sendfile   on;
+        tcp_nopush on;
+        # A release is fetched whole by the launcher, but a resumed download still asks for one.
+        max_ranges 64;
+    }
+
     location / {
         return 404;
     }

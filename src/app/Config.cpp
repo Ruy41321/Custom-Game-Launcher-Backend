@@ -5,6 +5,8 @@
 #include <fstream>
 #include <sstream>
 
+#include "common/Signature.h"
+
 namespace launcher::app {
 namespace {
 
@@ -162,6 +164,14 @@ Result<AppConfig> AppConfig::parse(std::string_view json, const common::EnvLooku
     config.media.root = readString(media, "root", config.media.root);
     config.media.publicBaseUrl = readString(media, "publicBaseUrl", config.media.publicBaseUrl);
     config.media.maxBytes = readInt<int64_t>(media, "maxBytes", config.media.maxBytes);
+
+    const auto& launcherReleases = root["launcherReleases"];
+    config.launcherReleases.root =
+        readString(launcherReleases, "root", config.launcherReleases.root);
+    config.launcherReleases.publicBaseUrl =
+        readString(launcherReleases, "publicBaseUrl", config.launcherReleases.publicBaseUrl);
+    config.launcherReleases.publicKey =
+        readString(launcherReleases, "publicKey", config.launcherReleases.publicKey);
 
     const auto& retention = root["retention"];
     config.retention.blobGraceSeconds =
@@ -356,6 +366,24 @@ common::VoidResult AppConfig::validate() const {
             ErrorCode::InvalidInput,
             "mail.host and mail.fromAddress are required when mail.transport is smtp: set "
             "SMTP_HOST and MAIL_FROM_ADDRESS");
+    }
+    // Checked in every environment, including development, because the failure it prevents is
+    // the same everywhere and is silent: a key that is not a key would leave the release route
+    // answering 404 and every launcher concluding there is nothing to update to. An empty value
+    // is not a mistake — it is how a deployment says it publishes no launcher releases.
+    if (!launcherReleases.publicKey.empty()) {
+        if (const auto valid = common::validateP256PublicKey(launcherReleases.publicKey);
+            !valid.ok()) {
+            return common::VoidResult::failure(ErrorCode::InvalidInput,
+                                               "launcherReleases.publicKey is not usable: " +
+                                                   valid.error().detail);
+        }
+        if (launcherReleases.root.empty() || launcherReleases.publicBaseUrl.empty()) {
+            return common::VoidResult::failure(
+                ErrorCode::InvalidInput,
+                "launcherReleases.root and launcherReleases.publicBaseUrl are required when a "
+                "release signing key is configured");
+        }
     }
     if (uploads.sessionTtlSeconds == 0 || uploads.maxOpenSessionsPerUser <= 0) {
         return common::VoidResult::failure(

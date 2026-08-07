@@ -7,6 +7,7 @@
 #include "repositories/postgres/PgCatalogRepositories.h"
 #include "repositories/postgres/PgCrashReportRepository.h"
 #include "repositories/postgres/PgDownloadRepositories.h"
+#include "repositories/postgres/PgLauncherReleaseRepository.h"
 #include "repositories/postgres/PgRepositories.h"
 #include "repositories/postgres/PgUploadRepositories.h"
 #include "services/DisabledMailSender.h"
@@ -83,6 +84,8 @@ void AppContext::initialize(AppConfig config,
         std::make_unique<repositories::postgres::PgUploadSessionRepository>(database_);
     downloads_ = std::make_unique<repositories::postgres::PgDownloadRepository>(database_);
     crashReports_ = std::make_unique<repositories::postgres::PgCrashReportRepository>(database_);
+    launcherReleases_ =
+        std::make_unique<repositories::postgres::PgLauncherReleaseRepository>(database_);
 
     passwordHasher_ =
         std::make_unique<services::Argon2idPasswordHasher>(services::PasswordHashingSettings{
@@ -175,6 +178,11 @@ void AppContext::initialize(AppConfig config,
 
     crashReportService_ = std::make_unique<services::CrashReportService>(
         *crashReports_, services::CrashReportSettings{config_.crashReports.retentionSeconds});
+
+    launcherReleaseService_ = std::make_unique<services::LauncherReleaseService>(
+        *launcherReleases_,
+        services::LauncherReleaseSettings{config_.launcherReleases.publicKey,
+                                          config_.launcherReleases.publicBaseUrl});
 
     crashRateLimiter_ = std::make_unique<common::RateLimiter>(
         config_.crashReports.submitAttempts,
@@ -273,6 +281,11 @@ const services::CrashReportService& AppContext::crashReportService() const {
     return *crashReportService_;
 }
 
+const services::LauncherReleaseService& AppContext::launcherReleaseService() const {
+    requireInitialized();
+    return *launcherReleaseService_;
+}
+
 common::RateLimiter& AppContext::authRateLimiter() const {
     requireInitialized();
     return *authRateLimiter_;
@@ -299,6 +312,7 @@ void AppContext::reset() {
     authRateLimiter_.reset();
     crashRateLimiter_.reset();
     accountRateLimiter_.reset();
+    launcherReleaseService_.reset();
     crashReportService_.reset();
     retentionService_.reset();
     downloadService_.reset();
@@ -313,6 +327,7 @@ void AppContext::reset() {
     tokenService_.reset();
     passwordHasher_.reset();
     mailSender_.reset();
+    launcherReleases_.reset();
     crashReports_.reset();
     downloads_.reset();
     uploadSessions_.reset();

@@ -36,6 +36,12 @@ add_executable(launcher_unit_tests
     unit/CrashReportDomainTest.cpp
     unit/CrashReportServiceTest.cpp
     unit/AdminUserServiceTest.cpp
+    unit/SignatureTest.cpp
+    unit/LauncherReleaseDomainTest.cpp
+    unit/ReleaseDocumentJsonTest.cpp
+    unit/ReleaseStoreTest.cpp
+    unit/LauncherReleaseServiceTest.cpp
+    support/ReleaseSigning.cpp
 )
 
 target_include_directories(launcher_unit_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -79,6 +85,8 @@ add_executable(launcher_integration_tests
     integration/AdminUiEndpointTest.cpp
     integration/CrashReportEndpointTest.cpp
     integration/HardeningEndpointTest.cpp
+    integration/LauncherReleaseEndpointTest.cpp
+    support/ReleaseSigning.cpp
 )
 
 target_include_directories(launcher_integration_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")

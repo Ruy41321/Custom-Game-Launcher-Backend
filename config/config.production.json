@@ -47,6 +47,12 @@
     "maxBytes": ${MEDIA_MAX_BYTES:-5242880}
   },
 
+  "launcherReleases": {
+    "root": "${LAUNCHER_RELEASE_ROOT:-/data/launcher}",
+    "publicBaseUrl": "${LAUNCHER_PUBLIC_BASE_URL:-http://localhost:8081/launcher}",
+    "publicKey": "${LAUNCHER_RELEASE_PUBLIC_KEY:-}"
+  },
+
   "crashReports": {
     "enabled": ${CRASH_REPORTS_ENABLED:-true},
     "submitAttempts": ${CRASH_REPORT_RATE_LIMIT:-20},

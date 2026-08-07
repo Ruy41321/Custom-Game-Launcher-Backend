@@ -109,8 +109,8 @@ COPY docker/api/entrypoint.sh /app/entrypoint.sh
 # left out of this line is one the server cannot write to — which is how artwork uploads failed
 # on every fresh deployment with "cannot create the media directory: Permission denied".
 RUN chmod +x /app/entrypoint.sh \
-    && mkdir -p /data/blobs /data/media /var/log/launcher \
-    && chown -R launcher:launcher /app /data/blobs /data/media /var/log/launcher
+    && mkdir -p /data/blobs /data/media /data/launcher /var/log/launcher \
+    && chown -R launcher:launcher /app /data/blobs /data/media /data/launcher /var/log/launcher
 
 USER launcher
 

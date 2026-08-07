@@ -4,6 +4,8 @@
 #include <cctype>
 #include <unordered_set>
 
+#include "domain/CanonicalJson.h"
+
 namespace launcher::domain {
 namespace {
 
@@ -14,47 +16,11 @@ bool isLowercaseHexDigit(char character) {
     return (character >= '0' && character <= '9') || (character >= 'a' && character <= 'f');
 }
 
-/// JSON string escaping for the canonical document. Written here rather than delegated to
-/// jsoncpp because the canonical form is a wire contract: it must not change if the JSON
-/// library ever changes how it emits non-ASCII or solidus characters.
+/// The escaper moved to domain/CanonicalJson.h once a second canonical document — a launcher
+/// release — came to depend on producing byte-identical output. Both hashes cover exactly what
+/// it emits, so the two must not be able to drift apart.
 void appendJsonString(std::string& out, std::string_view value) {
-    out.push_back('"');
-    for (const char character : value) {
-        switch (character) {
-        case '"':
-            out.append("\\\"");
-            break;
-        case '\\':
-            out.append("\\\\");
-            break;
-        case '\b':
-            out.append("\\b");
-            break;
-        case '\f':
-            out.append("\\f");
-            break;
-        case '\n':
-            out.append("\\n");
-            break;
-        case '\r':
-            out.append("\\r");
-            break;
-        case '\t':
-            out.append("\\t");
-            break;
-        default:
-            if (static_cast<unsigned char>(character) < 0x20) {
-                static constexpr char HEX[] = "0123456789abcdef";
-                out.append("\\u00");
-                out.push_back(HEX[(static_cast<unsigned char>(character) >> 4) & 0x0F]);
-                out.push_back(HEX[static_cast<unsigned char>(character) & 0x0F]);
-            } else {
-                out.push_back(character);
-            }
-            break;
-        }
-    }
-    out.push_back('"');
+    appendCanonicalJsonString(out, value);
 }
 
 } // namespace

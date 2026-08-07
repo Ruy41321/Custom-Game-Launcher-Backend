@@ -167,6 +167,10 @@ layout accepts it later as an additional blob kind, with no schema change.
 | D53 | **A registration survives a verification message that could not be sent, and says so** | The account is created, the answer carries `verificationEmailSent: false`, and `POST /auth/verify-email/resend` is the way back. Undoing the registration was the obvious alternative and is worse: creating an account is not one statement, so unwinding it is a compensating delete that can fail on its own — and when it does, the address is held by an account that cannot sign in and cannot be created again, which turns an outage at the relay into a lost account. The send is *awaited*, bounded by `mail.timeoutSeconds`, precisely so the answer can distinguish the two cases: telling somebody to check an inbox nothing was sent to is a wait with no end. A password reset cannot say the same thing — its answer is identical whether or not the address exists — so there a failed send is a log line and nothing more. The raw token never leaves `AuthService`: it is generated, hashed, composed into a message and dropped inside one function, so the `dev*` fields are gone rather than moved. | Failing the registration and unwinding the row (a compensating delete that strands an address when it fails); fire-and-forget with an optimistic answer (the client tells people to wait for something that never left); a retry queue (an outbox table and a sweeper, for a message that arrives at most once per registration) |
 | D54 | **The links land on two pages this server serves, and neither page changes anything by being opened** | Every authentication route here is a JSON `POST` and an inbox opens URLs with a browser, so without a page a verification link is a URL nobody can follow — and the launcher has no screen for either flow, so "the client will handle it" was not available either. `/verify-email` and `/password-reset` are self-contained pages embedded from `src/auth/ui/` the way the console is, outside `/api/v1/` because the version in a path is a promise about a wire contract and these are for a person. The load-bearing part is that a `GET` decides nothing: a mail provider's link scanner fetches every URL in a message, so a page that confirmed on load would spend the token before its owner clicked and show them "this link is invalid" for having done nothing wrong. Each states its own CSP and `Cache-Control: no-store`, because the URL carries a single-use token. | Confirming on `GET` (link scanners consume it); a plain HTML form posting form-encoded (a second body format on a JSON route, and `form-action` would have to be opened); two screens in the launcher (a client release before anybody can register, and the reset flow needs a screen that does not exist); no page at all (the status quo: a link nobody can follow) |
 | D55 | **The routes that send a message have their own bucket, and a deployment that cannot send refuses to start** | Same shape as D46 and the same reason it is not the authentication bucket: that one is tight because every attempt behind it costs an Argon2id hash, while these cost no CPU and spend something scarcer — a stranger's inbox and the deployment's standing with its relay. Sharing would make one of the two sets of numbers wrong and would let a burst of resend requests lock somebody out of signing in; the reset request carries both filters, because it is both things at once. The start-up refusals are the other half: `smtp` with no relay, `log` outside development (it writes the body, and the body of a reset message is a live credential), and `none` together with `requireVerifiedEmail` (nothing delivers the link, nothing lets anybody in without it, so every account is one that can never sign in) — which is exactly the state this repository shipped in until now, discovered at the first registration rather than at boot. With `none` the routes that send answer **404**, as a disabled crash-report route does. | Reusing the auth bucket (one of two numbers is wrong, and reports lock out sign-in); a warning at start-up (D52's argument: a line in a log nobody reads while the deployment appears to work); allowing `log` in production (credentials in a log with a retention policy); leaving the combination unchecked (the debt this closes, rediscovered by the first user) |
+| D56 | **A launcher release lives in its own table behind its own unauthenticated route, not in the catalog** | The catalog was the obvious home and is the wrong one: every catalog route carries an `Actor` and asks `mayViewGame`, and **the launcher that most needs an update is the one that cannot sign in** — pointed at a server it has never reached, holding an address nobody confirmed, or carrying the very bug the update fixes. Reaching a release through the catalog would mean an unauthenticated path inside `CatalogService`, which is the one place four milestones have spent concentrating authorization. What *is* reused is the layer underneath, which knows nothing about games: content addressing, and the artwork rule that what a root is served as decides which root it is (D27) — so this is a third root, public and unsigned. Serving it unsigned weakens nothing, because the integrity guarantee comes from the signature and the content address inside it, neither of which a URL takes part in; what a signed URL protects is confidentiality, and a launcher binary has none. No deltas either: a self-contained build changes almost every file between .NET releases, so blob negotiation would cost a round trip to learn that everything is needed. | The launcher as a catalog row (an unauthenticated hole inside CatalogService, plus a publisher, a visibility, a library and a detail page that mean nothing); signed download URLs (an expiry on a public binary, and a token the asking client does not have); per-file deltas (a round trip to learn that everything changed) |
+| D57 | **The signature covers a canonical release *document*, never the artifact, and a document that is not byte-for-byte canonical is refused at publish time** | A signature over the bytes of a zip says only that somebody with the key once produced that zip — nothing about which version, channel or platform it is. An attacker holding the database could then serve a genuine, genuinely signed artifact as something it is not: last year's build as the newest, or the Linux build to a Windows launcher. One document binding all of it together makes that impossible; it is D18's reasoning about what a hash covers, applied to what a key covers. The round-trip check in `parseReleaseDocument` — parse, re-serialise, compare with the input — is the load-bearing half: without it the row would store bytes whose meaning had only partly been captured (an extra key, a reordering, a trailing newline from a text editor) while the columns derived from that parse described something subtly different. The escaper moved to `domain/CanonicalJson.h` because two documents whose hashes depend on identical output must not be able to drift apart. | Signing the artifact (a real signed file served as a different release); storing a re-serialised document (the bytes a client verifies stop being the bytes that were signed); accepting any equivalent JSON (the stored document and the columns beside it come to mean two different things) |
+| D58 | **ECDSA over P-256 with SHA-256, pinned rather than read out of the configured key** | Ed25519 is the better modern choice and was rejected for a reason that lives entirely on the *client* side: libsodium is already linked here so it would cost this repository nothing, but .NET 9 has no Ed25519 in its base class library, so the launcher would carry either a native binding across four self-contained runtime identifiers or a managed crypto library — in a client whose maintainers refused a dependency over thirty lines of test code (its D11). P-256 costs zero new dependencies on either side: OpenSSL is already here for the `secure_link` digests, and `System.Security.Cryptography.ECDsa` is in the client's runtime. ECDSA's two known weaknesses do not reach this use — nonce quality is a property of *signing*, which happens on somebody's own machine a few times a year, and malleability matters when a signature is an identifier, which this one never is. Pinning matters as much: an algorithm taken from the key would let a deployment configure an RSA key this server verifies happily and the client cannot read at all, so anything but a P-256 key is a start-up refusal naming the variable. | Ed25519 (a native crypto dependency in four client RIDs, or a managed one, for a repository that counts them); RSA (larger signatures for no gain); reading the algorithm from the key (a launcher that stops updating for a reason nothing reports) |
+| D59 | **A release is published from the command line against a document signed on another machine, and this server holds no private key at all** | The authority that fits is shell access, as it is for `--grant-role` (D38) — but here the consequence is the feature rather than a convenience: **somebody who takes this server, its database and its disks can stop launchers from updating and cannot make them update to anything.** No other surface in this repository survives a full compromise, and this is the one where it matters, because an automatic update is code a machine runs without anybody looking at it. Two more things fall out: the artifact never has to fit an HTTP body limit, and `ILauncherReleaseRepository` has no write method, so the serving path cannot create a release. The signature is re-checked on the way *out* as well, which turns a row edited in the database into one log line naming the release instead of a fleet quietly failing to verify. Withdrawing is `retired_at`, not a rollback: the previous release becomes newest and every client declines it for not being strictly newer, so **standing still is the intended outcome** — rolling a fleet backwards is a bigger action than the one asked for. | An endpoint (the private key would have to reach this machine, or a stolen token could publish); the server generating the key (a compromise becomes a signing oracle); a CI secret (a workflow file can print it); rolling clients back on a retire (a larger action than withdrawing, taken on somebody's behalf) |
 
 ---
 
@@ -282,6 +286,33 @@ curl -s "http://localhost:8025/api/v1/messages?limit=1"    # then GET /api/v1/me
 # in. To exercise the deployed shape, restart the API with the flag on:
 REQUIRE_VERIFIED_EMAIL=true docker compose up -d api
 
+# Launcher releases. The document is signed on the machine that cut the release; this server
+# holds no private key and can only verify. Documentation/launcher-releases.md has the whole
+# design, and hardening-and-deployment.md section 6.5 the key custody.
+#
+# Once, offline; the .key never leaves that machine and never enters this repository:
+openssl ecparam -name prime256v1 -genkey -noout -out release-signing.key
+openssl ec -in release-signing.key -pubout -outform DER | openssl base64 -A
+#   -> LAUNCHER_RELEASE_PUBLIC_KEY in .env. Empty (the default) turns the surface off entirely.
+#
+# Per release. The document must have NO trailing newline: the server refuses anything that is
+# not byte-for-byte its canonical form, which is what stops the stored bytes and the columns
+# beside them meaning two different things.
+openssl dgst -sha256 -sign release-signing.key release.json | openssl base64 -A > release.json.sig
+docker compose cp release.json     api:/tmp/release.json
+docker compose cp release.json.sig api:/tmp/release.json.sig
+docker compose cp launcher.zip     api:/tmp/artifact.zip
+docker compose exec api /app/launcher-api \
+    --publish-release /tmp/release.json --signature /tmp/release.json.sig \
+    --artifact /tmp/artifact.zip
+
+# Withdraw one. Clients fall back to the previous release and then decline it for not being
+# newer than what they run: standing still, never rolling backwards.
+docker compose exec api /app/launcher-api --retire-release stable windows x64 0.3.0
+
+# What a launcher asks, with no token at all:
+curl -s "http://localhost:8080/api/v1/launcher/releases/latest?platform=windows&arch=x64"
+
 # The admin console, once ADMIN_ENABLED=true. From anywhere but the server itself it is
 # reached through a tunnel and nothing more.
 ssh -L 9090:127.0.0.1:9090 user@your-vps    # then open http://localhost:9090/admin
@@ -383,6 +414,11 @@ curl -s http://localhost:8080/api/v1/health
 | **Adding a line to `vcpkg.json` means rebuilding the toolchain image, not just reconfiguring** | The fast loop builds against `/src/vcpkg_installed` *inside* `custom-game-launcher-api-build`, so a new dependency is invisible until `docker compose --profile tools build api-build` has run — and the failure is `find_package` not finding a package that is sitting in the manifest, which reads like a broken CMake file. With vcpkg's binary cache warm it is about half a minute; from cold it is the first-build story again |
 | **vcpkg's `curl` port only speaks SMTP with its `non-http` feature** | It is in the port's default features, so a bare `"curl"` works today — but a dependency written as `default-features: false` with only `ssl` would build a libcurl that refuses `smtp://` at runtime with "unsupported protocol", which reads as a configuration problem at the relay. The manifest names `non-http` explicitly for that reason. Nothing new is needed in the runtime image: vcpkg links it statically, and `ca-certificates` was already there |
 | **A token-bucket check against the running server needs the bucket narrowed too** | Six hundred requests against a 600/60s limit all returned 200, because the bucket refilled faster than PowerShell emptied it — the same shape as the CI rate-limit row above, met again by hand. Set the limit low in `.env` and restart the API rather than trying to out-run the refill |
+| **`Out-File -Encoding utf8` writes a BOM in Windows PowerShell 5.1** | Which is the documented way round the *other* quoting trap in this table — a `git commit -m` message containing double quotes gets split into pathspecs — so the two traps chain: the message file is written correctly and the commit subject then begins with an invisible `ï»¿`, visible only in `git log --format=%s | xxd`. Write it with `[System.IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding $false))`, which is what the client repository already says for source files, or strip the three bytes and `git commit --amend -F`. |
+| **A control character written into a source file is invisible and tests the wrong thing** | A raw string literal in `LauncherReleaseDomainTest` ended up holding an actual `0x01` byte instead of the six characters ``, so the assertion compared against a raw control character while the serialiser correctly emitted the escape. It reads as the production code being wrong, and neither the diff nor the editor shows anything. This is the same trap the client's `CLAUDE.md` already records, met here for the first time. Build such a value from its code point (`+ ''`), and when a literal really has to carry one, check with a byte dump — `python -c "print([b for b in open(f,'rb').read() if b<0x20 and b not in (9,10,13)])"` |
+| **`sh` in the toolchain image has no process substitution** | It is BusyBox, not bash, so `openssl dgst -verify <(openssl pkey ...)` fails with `Syntax error: "(" unexpected` — which reads like a broken openssl invocation. Write the intermediate to a file. Worth knowing because verifying a release signature by hand is the one check that has no automated equivalent against the running stack |
+| **A signed document must not have a trailing newline** | `openssl dgst -sign` signs whatever bytes it is given, so a `release.json` saved by a text editor is signed correctly *and* refused by `--publish-release`, because it is not the canonical form. The refusal prints the exact expected bytes; use `printf`, never `echo`, to write one |
+| **`docker compose cp` and `exec` both need `MSYS_NO_PATHCONV=1` from Git Bash** | Already recorded for `exec`; `cp` has it too, and publishing a release uses three of them in a row. PowerShell is unaffected, which is what the release commands in §7 assume |
 
 ---
 
@@ -760,11 +796,53 @@ answer 422. Then stopped the relay: the registration still succeeded in two seco
 `verificationEmailSent: false` and one error line naming only the account id, and the resend
 recovered the account once the relay was back.
 
+### Launcher releases — the server half of self-update, 2026-08-07
+
+Not a milestone, and the first of the three pieces self-update needs. The launcher could not
+update itself because there was nothing to update *from*: no table, no route, no signature, no
+notion of a release at all. That surface exists now; the client half does not.
+
+- ✅ `GET /api/v1/launcher/releases/latest?channel=&platform=&arch=`, **unauthenticated** — the
+  launcher that most needs an update is the one that cannot sign in, so a route behind a token
+  would miss exactly the installations this exists for. Its own table and its own route rather
+  than a row in the catalog, which would have meant an unauthenticated path inside
+  `CatalogService` (D56)
+- ✅ **The signature covers a canonical release document, not the artifact** (D57), so version,
+  channel, platform, architecture and content address are all inside what the key vouches for.
+  `parseReleaseDocument` refuses anything that is not byte-for-byte the form it would have
+  written, which is what keeps the stored bytes and the columns beside them from meaning two
+  different things. `domain/CanonicalJson.h` is now shared with the build manifest
+- ✅ **ECDSA P-256 with SHA-256, pinned** (D58). Ed25519 was the obvious choice and lost on the
+  *client* side: .NET 9 has none in its BCL. No new vcpkg port, no new NuGet package
+- ✅ `launcher-api --publish-release` and `--retire-release`, over libpq like `--grant-role`.
+  **This server holds no private key** (D59): an attacker who takes it can stop updates and
+  cannot forge one. Retiring stands a fleet still rather than rolling it backwards
+- ✅ A third data root, `/data/launcher`, public and unsigned like the artwork — plus the volume,
+  the nginx location, the `mkdir`/`chown` in the API image and the CI ownership guard, which is
+  the line that cost a whole bug the last time a root was added
+- ✅ `launcherReleases.publicKey` empty turns the surface off, and a key that is not a P-256 key
+  is a start-up refusal. There is no setting that serves a release without checking it
+- ✅ [Documentation/launcher-releases.md](Documentation/launcher-releases.md) (tenth page) and
+  [hardening-and-deployment.md](Documentation/hardening-and-deployment.md) §6.5 on key custody
+- ✅ 718/718 tests green (474 unit, 244 integration), `clang-format` clean
+
+**Verified by hand against the real stack**, because the suite has no file server and cannot
+hold a private key the way a person does: a key pair generated offline, an artifact signed with
+it, published through `docker compose exec`, fetched from the route **with no token**, and the
+artifact pulled **through nginx** and hash-checked. Then the refusals: an attacker's own key, a
+document with a trailing newline, an artifact that is not the one the document names, and a row
+edited directly in the database — which the server refuses to serve, with one log line naming
+the release, rather than letting every client reject it.
+
 ### Next up
 
-- ⬜ **Self-update.** `GameLauncher.Updater` is a stub with its command line already drawn, and
-  it cannot be finished client-side: it needs a release surface here first — releases, channels,
-  and signature verification — which has never been scheduled and has no milestone number.
+- ⬜ **Self-update, the client half.** Two pieces left, in the launcher repository: the update
+  check (verify the signature over the bytes as they arrived, refuse anything not strictly
+  newer, refuse bytes off-hash, and never let a failed check stop the launcher from starting),
+  and the swap in `GameLauncher.Updater`, which still moves no files. The contract it codes
+  against is in [Documentation/launcher-releases.md](Documentation/launcher-releases.md), whose
+  last section lists the five rules the client has to hold for any of this to be worth
+  anything.
 - ⬜ **TLS in the stack.** Deliberately not code, and written out in
   [Documentation/hardening-and-deployment.md](Documentation/hardening-and-deployment.md) §6
   rather than left implicit: a terminator in front of the API, the two published ports moved to

@@ -1,6 +1,7 @@
 #include "app/Capabilities.h"
 
 #include "domain/CrashReport.h"
+#include "domain/LauncherRelease.h"
 #include "domain/Manifest.h"
 #include "domain/Media.h"
 #include "launcher/Version.h"
@@ -68,6 +69,23 @@ Json::Value capabilitiesDocument(const AppConfig& config) {
     // handed a full download instead.
     updates["fullDownloadThresholdRatio"] = config.updates.fullDownloadThresholdRatio;
     json["updates"] = updates;
+
+    Json::Value launcherReleases;
+    // Whether this deployment publishes releases of the launcher at all — false when no signing
+    // key is configured. A launcher reads it at start-up and stops asking, which is the
+    // difference between "this server does not do that" and one failed request per run that
+    // looks like an outage. Nothing secret is exposed by saying so: the answer is the same for
+    // everybody, which is what makes this whole document readable with no token.
+    launcherReleases["enabled"] = config.launcherReleases.enabled();
+
+    // The channel names, from the same enum the route parses, so a channel added there appears
+    // here without anybody remembering to add it — the reasoning `media.contentTypes` uses.
+    Json::Value channels(Json::arrayValue);
+    for (const auto channel : {domain::ReleaseChannel::Stable, domain::ReleaseChannel::Beta}) {
+        channels.append(domain::nameFor(channel));
+    }
+    launcherReleases["channels"] = channels;
+    json["launcherReleases"] = launcherReleases;
 
     return json;
 }

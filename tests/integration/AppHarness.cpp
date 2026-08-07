@@ -14,6 +14,7 @@
 #include "app/HttpError.h"
 #include "app/SecurityHeaders.h"
 #include "migrations/MigrationRunner.h"
+#include "support/ReleaseSigning.h"
 
 #ifndef LAUNCHER_MIGRATIONS_DIR
 #define LAUNCHER_MIGRATIONS_DIR "migrations"
@@ -44,7 +45,8 @@ drogon::HttpResponsePtr transportFailure() {
 }
 
 app::AppConfig testConfig(const std::filesystem::path& blobRoot,
-                          const std::filesystem::path& mediaRoot) {
+                          const std::filesystem::path& mediaRoot,
+                          const std::filesystem::path& releaseRoot) {
     app::AppConfig config;
     config.environment = "development";
     config.auth.jwtSecret = "0123456789abcdef0123456789abcdef";
@@ -52,6 +54,12 @@ app::AppConfig testConfig(const std::filesystem::path& blobRoot,
     config.storage.blobRoot = blobRoot.string();
     config.media.root = mediaRoot.string();
     config.media.publicBaseUrl = "http://files.test/media";
+    config.launcherReleases.root = releaseRoot.string();
+    config.launcherReleases.publicBaseUrl = "http://files.test/launcher";
+    // The public half of a key pair that lives in tests/support. Configuring it is what turns
+    // the release surface on at all, so a harness that left it empty would make every launcher
+    // test assert on a 404 for the wrong reason.
+    config.launcherReleases.publicKey = testReleasePublicKey();
     config.server.port = TEST_PORT;
     config.server.adminEnabled = true;
     config.server.adminListenAddress = TEST_HOST;
@@ -124,7 +132,7 @@ void AppHarness::SetUp() {
         }
     }
 
-    const auto config = testConfig(blobRoot_.path(), mediaRoot_.path());
+    const auto config = testConfig(blobRoot_.path(), mediaRoot_.path(), releaseRoot_.path());
 
     // The one dependency the harness supplies rather than lets the context build: the real one
     // talks SMTP, and there is no mail server in this suite. Borrowed back as a raw pointer so

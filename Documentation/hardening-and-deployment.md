@@ -129,6 +129,10 @@ for: a new `JWT_SECRET` invalidates every access and refresh token in existence,
 launcher signs in again, and a new `FILE_SECURE_LINK_SECRET` invalidates every download URL
 already handed out, so downloads in flight fail and are retried against a fresh plan.
 
+One secret is not on this list and must not be: the **private** half of the launcher release
+signing key. It is the only one that belongs somewhere this server cannot reach, and the only
+one whose loss cannot be repaired by generating another. See §6.5.
+
 ---
 
 ## 6. What a deployment has to do, and this repository does not
@@ -233,6 +237,73 @@ credentials in the clear.
   described in [storage-lifecycle.md](storage-lifecycle.md).
 
 ---
+
+### 6.5 The launcher signing key, which is the one you cannot lose
+
+This is the only secret in the whole deployment that **must not be on the server**, and the only
+one whose loss cannot be repaired by generating another.
+
+`LAUNCHER_RELEASE_PUBLIC_KEY` is what a deployment sets, and it is public: the server verifies
+release signatures with it and can do nothing else. The **private** half belongs on the machine
+that builds and cuts releases — not in this repository, not in its CI, and not on the VPS. That
+placement is not caution, it is the entire feature:
+
+> Somebody who takes this server, its database and its disks can stop launchers from updating.
+> They cannot make them update to anything.
+
+An automatic update is code a machine runs without anybody looking at it, so this is the one
+place where a compromised server must not be able to reach a user's computer. Putting the
+private key here, or in a CI secret that a workflow file can print, gives that back.
+
+Generating the pair, once:
+
+```bash
+openssl ecparam -name prime256v1 -genkey -noout -out release-signing.key   # keep this offline
+openssl ec -in release-signing.key -pubout -outform DER | openssl base64 -A
+```
+
+The second line's output is `LAUNCHER_RELEASE_PUBLIC_KEY`. The same value is compiled into the
+launcher, which is the client's own trust root and is deliberately *not* read from
+`launcher.config.json`: the file the updater overwrites must not be the file that authorizes the
+update.
+
+Cutting a release, from the machine that holds the key:
+
+```bash
+# 1. Build, hash, and write the release document naming that hash.
+sha256sum GameLauncher-0.2.0-win-x64.zip
+
+# 2. Sign the document's exact bytes. No trailing newline — the server refuses a document that
+#    is not byte for byte canonical, which is what stops the stored bytes and the columns
+#    beside them meaning two different things.
+openssl dgst -sha256 -sign release-signing.key release.json | openssl base64 -A > release.json.sig
+
+# 3. Hand the server two files and an artifact. It verifies before it stores anything.
+docker compose cp release.json api:/tmp/release.json
+docker compose cp release.json.sig api:/tmp/release.json.sig
+docker compose cp GameLauncher-0.2.0-win-x64.zip api:/tmp/artifact.zip
+docker compose exec api /app/launcher-api \
+    --publish-release /tmp/release.json --signature /tmp/release.json.sig \
+    --artifact /tmp/artifact.zip
+```
+
+Three things worth planning rather than discovering:
+
+- **Losing the private key is unrecoverable in the way that matters.** Every launcher already
+  distributed carries the matching public key in its binary, so a new key signs releases none of
+  them will accept. The way out is a new build that everybody installs by hand — which is
+  exactly the situation self-update exists to end. Back it up somewhere offline, and note that a
+  backup of it is as sensitive as the key.
+- **Rotating it has the same shape**, so it is not something to do casually: the new key only
+  starts working for a launcher that was built with it. A rotation therefore means publishing a
+  final release signed with the *old* key that carries the *new* key inside it, and then
+  waiting for the fleet.
+- **Turning the surface off is a supported state and the default.** Leave
+  `LAUNCHER_RELEASE_PUBLIC_KEY` empty and the route answers 404, `--publish-release` refuses, and
+  launchers stop asking. There is no setting that serves a release without checking it: a
+  mechanism with the verification switched off is worse than no mechanism at all.
+
+The full design is in [launcher-releases.md](launcher-releases.md).
 
 ## 7. What this deliberately does not do
 
