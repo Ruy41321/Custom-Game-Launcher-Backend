@@ -42,6 +42,21 @@ curl -s http://localhost:8080/api/v1/health
 The development stack also runs a mail catcher at <http://localhost:8025>, so registration and
 password recovery work end to end with no relay of your own. Migrations run at container start.
 
+### On Linux, and on a machine that has never seen this
+
+`.env` is **not** in version control, which is the only thing a clone is missing here — copy
+`.env.example` over it and development runs on the placeholders. The database, the blobs and the
+artwork live in Docker volumes that are created empty on the first `up`, and migrations run at
+container start, so there is nothing else to restore. Accounts and games are seeded by hand and
+have to be seeded again.
+
+The three `scripts/*.ps1` in the two repositories carry `#!/usr/bin/env pwsh` and run on Linux
+once PowerShell 7 is installed. Without it, every command they wrap is in `CLAUDE.md` §7.
+
+Docker here is Engine plus the compose plugin rather than Desktop, and your user has to be in the
+`docker` group. Everything in `CLAUDE.md` §8 about `MSYS_NO_PATHCONV`, PowerShell quoting and BOMs
+is about running the toolchain from Windows and does not apply.
+
 ### The fast loop
 
 `docker compose build` on every change would be unbearable. The toolchain image carries
