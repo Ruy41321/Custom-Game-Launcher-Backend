@@ -9,14 +9,20 @@ Written in C++20 with [Drogon](https://github.com/drogonframework/drogon). The w
 API, database and file server — comes up with one `docker compose` command and is meant to
 run comfortably on a cheap VPS.
 
-> **Status:** in development, and feature-complete for what a small deployment needs.
-> Authentication with real email delivery, the catalog, resumable uploads with quotas, delta
-> downloads over signed URLs, artwork and the devlog, a loopback operator console, GDPR
-> erasure and crash reports are all in place. Nothing has been through a production
-> deployment yet, and there is **no TLS in the compose stack** — see
-> [hardening-and-deployment.md](Documentation/hardening-and-deployment.md) §6 for what a real
-> machine still has to do. What is missing next is a *release* surface for the launcher to
-> update itself from. See [CLAUDE.md](CLAUDE.md#11-progress) for the current state.
+> **Status:** feature-complete for what a small deployment needs, and everything this
+> repository declares is implemented. Authentication with real email delivery, the catalog,
+> resumable uploads with quotas, delta downloads over signed URLs, artwork and the devlog, a
+> loopback operator console, GDPR erasure, crash reports, and the signed **launcher release**
+> surface the client updates itself from.
+>
+> Nothing has been through a production deployment yet, and there is **no TLS in the compose
+> stack** — that is deployment rather than code, and
+> [hardening-and-deployment.md](Documentation/hardening-and-deployment.md) §6 is the checklist a
+> real machine still has to work through. [CLAUDE.md](CLAUDE.md#11-progress) has the current
+> state; [CONTRIBUTING.md](CONTRIBUTING.md) is where to start if you intend to change something.
+>
+> **Runs on Linux.** The stack is a `docker compose` deployment and is not built for anything
+> else.
 
 ## Features
 
@@ -40,6 +46,11 @@ run comfortably on a cheap VPS.
 - **Docker** with Compose v2 — the only requirement for running the stack
 - For a local (non-container) build: a C++20 compiler, CMake ≥ 3.22, Ninja and a
   bootstrapped [vcpkg](https://github.com/microsoft/vcpkg)
+
+> **Deploying this rather than developing it?**
+> [DISTRIBUTING.md](https://github.com/Ruy41321/Custom-Game-Launcher-Frontend/blob/main/DISTRIBUTING.md)
+> in the client repository walks the whole cycle — server, TLS, mail, signing key, launcher
+> build and releases — in the order it has to be done in.
 
 ## Quick start
 
@@ -193,10 +204,14 @@ Architecture, conventions and the running list of technical decisions live in
 
 ## Contributing
 
+Start with [CONTRIBUTING.md](CONTRIBUTING.md): the layers, the fast build loop, where an
+authorization rule goes, and the rules that would otherwise cost you a cycle each.
+
 Development happens on `dev`; `main` is merged by the maintainer once work is validated.
 Commits are atomic and use conventional prefixes (`feat:`, `fix:`, `test:`, `docs:`, …).
-Code, comments and commit messages are in English. CI runs formatting, the full test suite
-and the Docker image builds on every push and pull request to `dev`.
+Code, comments and commit messages are in English. **CI runs on `main`**, which only the
+maintainer merges, so the gate before a push is the local one — `./scripts/test.ps1` and
+`./scripts/test.ps1 -Format`.
 
 ## Licence
 
