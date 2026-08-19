@@ -52,8 +52,13 @@ server {
     #
     # A regex location rather than a prefix one, so the only paths that resolve at all are the
     # ones the API can actually have written: two levels of hex fan-out, a hashed name, and one
-    # of the three formats it stores. Anything else falls through to the 404 below.
-    location ~ "^/media/([0-9a-f]{2})/([0-9a-f]{2})/([0-9a-f]{64}\.(?:png|jpg|webp))$" {
+    # of the five formats it stores. Anything else falls through to the 404 below.
+    #
+    # mp4 and webm joined the three picture formats when videos did. They live on this root
+    # rather than a fourth one because what makes this root safe is that it is not the *blob*
+    # root, and one more extension does not touch that: a trailer is public content in exactly
+    # the sense a cover is, and signing it would mean an expiring URL in the middle of playback.
+    location ~ "^/media/([0-9a-f]{2})/([0-9a-f]{2})/([0-9a-f]{64}\.(?:png|jpg|webp|mp4|webm))$" {
         alias /data/media/$1/$2/$3;
 
         # Named after the hash of its own contents, so it can never change.
@@ -65,6 +70,10 @@ server {
 
         sendfile   on;
         tcp_nopush on;
+        # Seeking in a video is a Range request. nginx serves single ranges from a static file
+        # without being asked; the cap is on how many a multipart range request may ask for at
+        # once, which is the part worth bounding on a public location.
+        max_ranges 64;
     }
 
     # Launcher releases. A third root, public and unsigned like the artwork above and for a

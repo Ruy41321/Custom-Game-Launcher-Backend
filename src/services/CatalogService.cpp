@@ -8,11 +8,13 @@
 #include "common/Logging.h"
 #include "domain/Role.h"
 #include "domain/Validation.h"
+#include "domain/ValidationRules.h"
 
 namespace launcher::services {
 namespace {
 
 using common::ErrorCode;
+using common::invalidInput;
 using common::Result;
 using common::VoidResult;
 using domain::Actor;
@@ -36,20 +38,26 @@ bool mayEdit(const Game& game, const Actor& actor) {
     return domain::mayEditGame(game, actor);
 }
 
-VoidResult checkLength(std::string_view value, std::size_t limit, const char* field) {
+/// The rule is passed rather than derived from `field`, because turning `releaseNotes` into
+/// `release_notes_too_long` by string surgery would put the wire contract at the mercy of a
+/// C++ identifier somebody renames.
+VoidResult
+checkLength(std::string_view value, std::size_t limit, const char* field, const char* rule) {
     if (value.size() > limit) {
-        return VoidResult::failure(ErrorCode::InvalidInput,
-                                   std::string(field) + " must be at most " +
-                                       std::to_string(limit) + " characters");
+        return VoidResult::failure(invalidInput(std::string(field) + " must be at most " +
+                                                    std::to_string(limit) + " characters",
+                                                rule,
+                                                {std::to_string(limit)}));
     }
     return VoidResult::success();
 }
 
 VoidResult checkTitle(std::string_view title) {
     if (title.empty()) {
-        return VoidResult::failure(ErrorCode::InvalidInput, "title must not be empty");
+        return VoidResult::failure(
+            invalidInput("title must not be empty", domain::rules::TITLE_REQUIRED));
     }
-    return checkLength(title, domain::MAX_TITLE_LENGTH, "title");
+    return checkLength(title, domain::MAX_TITLE_LENGTH, "title", domain::rules::TITLE_TOO_LONG);
 }
 
 VoidResult checkOptionalDate(const std::string& date) {
@@ -98,11 +106,15 @@ drogon::Task<Result<Game>> CatalogService::createGame(Actor actor,
     if (auto check = checkTitle(game.title); !check.ok()) {
         co_return Result<Game>::failure(check.error());
     }
-    if (auto check = checkLength(game.summary, domain::MAX_SUMMARY_LENGTH, "summary");
+    if (auto check = checkLength(
+            game.summary, domain::MAX_SUMMARY_LENGTH, "summary", domain::rules::SUMMARY_TOO_LONG);
         !check.ok()) {
         co_return Result<Game>::failure(check.error());
     }
-    if (auto check = checkLength(game.description, domain::MAX_DESCRIPTION_LENGTH, "description");
+    if (auto check = checkLength(game.description,
+                                 domain::MAX_DESCRIPTION_LENGTH,
+                                 "description",
+                                 domain::rules::DESCRIPTION_TOO_LONG);
         !check.ok()) {
         co_return Result<Game>::failure(check.error());
     }
@@ -143,14 +155,19 @@ CatalogService::updateGame(Actor actor, std::string gameId, domain::GameUpdate c
         }
     }
     if (changes.summary.has_value()) {
-        if (auto check = checkLength(*changes.summary, domain::MAX_SUMMARY_LENGTH, "summary");
+        if (auto check = checkLength(*changes.summary,
+                                     domain::MAX_SUMMARY_LENGTH,
+                                     "summary",
+                                     domain::rules::SUMMARY_TOO_LONG);
             !check.ok()) {
             co_return Result<Game>::failure(check.error());
         }
     }
     if (changes.description.has_value()) {
-        if (auto check =
-                checkLength(*changes.description, domain::MAX_DESCRIPTION_LENGTH, "description");
+        if (auto check = checkLength(*changes.description,
+                                     domain::MAX_DESCRIPTION_LENGTH,
+                                     "description",
+                                     domain::rules::DESCRIPTION_TOO_LONG);
             !check.ok()) {
             co_return Result<Game>::failure(check.error());
         }
@@ -268,8 +285,10 @@ CatalogService::createVersion(Actor actor, std::string gameId, CreateVersionComm
     if (!parsed.ok()) {
         co_return Result<domain::GameVersion>::failure(parsed.error());
     }
-    if (auto check =
-            checkLength(command.releaseNotes, domain::MAX_RELEASE_NOTES_LENGTH, "releaseNotes");
+    if (auto check = checkLength(command.releaseNotes,
+                                 domain::MAX_RELEASE_NOTES_LENGTH,
+                                 "releaseNotes",
+                                 domain::rules::RELEASE_NOTES_TOO_LONG);
         !check.ok()) {
         co_return Result<domain::GameVersion>::failure(check.error());
     }
@@ -282,6 +301,53 @@ CatalogService::createVersion(Actor actor, std::string gameId, CreateVersionComm
     version.publish = command.publish;
 
     co_return co_await versions_.create(std::move(version));
+}
+
+drogon::Task<Result<domain::GameVersion>>
+CatalogService::updateVersion(Actor actor,
+                              std::string gameId,
+                              std::string versionId,
+                              domain::GameVersionUpdate changes) const {
+    if (!actor.can(domain::permissions::GAME_PUBLISH)) {
+        co_return Result<domain::GameVersion>::failure(ErrorCode::Forbidden,
+                                                       "you cannot publish games");
+    }
+
+    auto game = co_await editableGame(actor, gameId);
+    if (!game.ok()) {
+        co_return Result<domain::GameVersion>::failure(game.error());
+    }
+
+    if (!domain::isUuid(versionId)) {
+        co_return Result<domain::GameVersion>::failure(ErrorCode::NotFound, NO_SUCH_VERSION);
+    }
+
+    const auto existing = co_await versions_.findById(versionId);
+    // The same check `createBuild` makes, for the same reason: pairing somebody else's version
+    // with a game you do own must not reach it.
+    if (!existing.has_value() || existing->gameId != game.value().id) {
+        co_return Result<domain::GameVersion>::failure(ErrorCode::NotFound, NO_SUCH_VERSION);
+    }
+
+    if (changes.empty()) {
+        co_return Result<domain::GameVersion>::success(*existing);
+    }
+
+    if (changes.releaseNotes.has_value()) {
+        if (auto check = checkLength(*changes.releaseNotes,
+                                     domain::MAX_RELEASE_NOTES_LENGTH,
+                                     "releaseNotes",
+                                     domain::rules::RELEASE_NOTES_TOO_LONG);
+            !check.ok()) {
+            co_return Result<domain::GameVersion>::failure(check.error());
+        }
+    }
+
+    auto updated = co_await versions_.update(versionId, std::move(changes));
+    if (!updated.has_value()) {
+        co_return Result<domain::GameVersion>::failure(ErrorCode::NotFound, NO_SUCH_VERSION);
+    }
+    co_return Result<domain::GameVersion>::success(std::move(*updated));
 }
 
 drogon::Task<Result<domain::Build>>
@@ -306,8 +372,18 @@ CatalogService::createBuild(Actor actor, std::string gameId, CreateBuildCommand 
         co_return Result<domain::Build>::failure(ErrorCode::NotFound, "no such version");
     }
 
+    command.name = domain::trim(command.name);
+    if (auto check = checkLength(command.name,
+                                 domain::MAX_BUILD_NAME_LENGTH,
+                                 "name",
+                                 domain::rules::BUILD_NAME_TOO_LONG);
+        !check.ok()) {
+        co_return Result<domain::Build>::failure(check.error());
+    }
+
     domain::NewBuild build;
     build.gameVersionId = version->id;
+    build.name = std::move(command.name);
     build.platform = command.platform;
     build.architecture = command.architecture;
 

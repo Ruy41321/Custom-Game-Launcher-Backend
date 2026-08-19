@@ -14,6 +14,7 @@ namespace {
 
 using launcher::common::sha256Hex;
 using launcher::domain::ImageFormat;
+using launcher::domain::storedFormatOf;
 using launcher::storage::MediaStore;
 using launcher::testing::TemporaryDirectory;
 
@@ -27,7 +28,7 @@ std::string readFile(const std::filesystem::path& path) {
 TEST(MediaStoreTest, DerivesAFannedOutKeyThatCarriesTheExtension) {
     const auto digest = sha256Hex(PNG_BODY);
 
-    const auto key = MediaStore::storageKeyFor(digest, ImageFormat::Png);
+    const auto key = MediaStore::storageKeyFor(digest, storedFormatOf(ImageFormat::Png));
 
     // The extension is not decoration: nginx answers with a content type from its own mime
     // table, and a hashed name with no suffix is served as application/octet-stream.
@@ -35,20 +36,23 @@ TEST(MediaStoreTest, DerivesAFannedOutKeyThatCarriesTheExtension) {
 }
 
 TEST(MediaStoreTest, RefusesToBuildAKeyFromSomethingThatIsNotAHash) {
-    EXPECT_TRUE(MediaStore::storageKeyFor("", ImageFormat::Png).empty());
-    EXPECT_TRUE(MediaStore::storageKeyFor("../../etc/passwd", ImageFormat::Png).empty());
-    EXPECT_TRUE(MediaStore::storageKeyFor(std::string(64, 'Z'), ImageFormat::Png).empty());
+    EXPECT_TRUE(MediaStore::storageKeyFor("", storedFormatOf(ImageFormat::Png)).empty());
+    EXPECT_TRUE(
+        MediaStore::storageKeyFor("../../etc/passwd", storedFormatOf(ImageFormat::Png)).empty());
+    EXPECT_TRUE(
+        MediaStore::storageKeyFor(std::string(64, 'Z'), storedFormatOf(ImageFormat::Png)).empty());
 }
 
 TEST(MediaStoreTest, WritesTheImageAtItsContentAddress) {
     TemporaryDirectory root;
     const MediaStore store(root.path());
 
-    const auto stored = store.store(PNG_BODY, ImageFormat::Png);
+    const auto stored = store.store(PNG_BODY, storedFormatOf(ImageFormat::Png));
 
     ASSERT_TRUE(stored.ok());
     const auto key = stored.value();
-    EXPECT_EQ(key, MediaStore::storageKeyFor(sha256Hex(PNG_BODY), ImageFormat::Png));
+    EXPECT_EQ(key,
+              MediaStore::storageKeyFor(sha256Hex(PNG_BODY), storedFormatOf(ImageFormat::Png)));
     EXPECT_TRUE(store.contains(key));
     EXPECT_EQ(readFile(root.path() / key), PNG_BODY);
 }
@@ -57,7 +61,7 @@ TEST(MediaStoreTest, LeavesNothingBehindInStaging) {
     TemporaryDirectory root;
     const MediaStore store(root.path());
 
-    ASSERT_TRUE(store.store(PNG_BODY, ImageFormat::Png).ok());
+    ASSERT_TRUE(store.store(PNG_BODY, storedFormatOf(ImageFormat::Png)).ok());
 
     const auto staging = root.path() / "staging";
     if (std::filesystem::exists(staging)) {
@@ -69,8 +73,8 @@ TEST(MediaStoreTest, StoringTheSameImageTwiceWritesOneFile) {
     TemporaryDirectory root;
     const MediaStore store(root.path());
 
-    const auto first = store.store(PNG_BODY, ImageFormat::Png);
-    const auto second = store.store(PNG_BODY, ImageFormat::Png);
+    const auto first = store.store(PNG_BODY, storedFormatOf(ImageFormat::Png));
+    const auto second = store.store(PNG_BODY, storedFormatOf(ImageFormat::Png));
 
     ASSERT_TRUE(first.ok());
     ASSERT_TRUE(second.ok());
@@ -84,8 +88,8 @@ TEST(MediaStoreTest, DifferentBytesTakeDifferentAddresses) {
     TemporaryDirectory root;
     const MediaStore store(root.path());
 
-    const auto first = store.store(PNG_BODY, ImageFormat::Png);
-    const auto second = store.store(PNG_BODY + " again", ImageFormat::Png);
+    const auto first = store.store(PNG_BODY, storedFormatOf(ImageFormat::Png));
+    const auto second = store.store(PNG_BODY + " again", storedFormatOf(ImageFormat::Png));
 
     ASSERT_TRUE(first.ok());
     ASSERT_TRUE(second.ok());
@@ -95,7 +99,7 @@ TEST(MediaStoreTest, DifferentBytesTakeDifferentAddresses) {
 TEST(MediaStoreTest, RemovesAStoredImage) {
     TemporaryDirectory root;
     const MediaStore store(root.path());
-    const auto stored = store.store(PNG_BODY, ImageFormat::Png);
+    const auto stored = store.store(PNG_BODY, storedFormatOf(ImageFormat::Png));
     ASSERT_TRUE(stored.ok());
 
     store.remove(stored.value());
@@ -109,7 +113,8 @@ TEST(MediaStoreTest, RemovingSomethingThatIsNotThereIsSilent) {
 
     // A sweep that races another one finds the file already gone, and that is the ordinary
     // outcome rather than an error.
-    EXPECT_NO_THROW(store.remove(MediaStore::storageKeyFor(sha256Hex("absent"), ImageFormat::Png)));
+    EXPECT_NO_THROW(store.remove(
+        MediaStore::storageKeyFor(sha256Hex("absent"), storedFormatOf(ImageFormat::Png))));
 }
 
 TEST(MediaStoreTest, RefusesToResolveAKeyThatWouldEscapeTheRoot) {

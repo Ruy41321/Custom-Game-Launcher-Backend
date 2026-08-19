@@ -90,6 +90,18 @@ class FakeAdminUserRepository : public repositories::IAdminUserRepository {
         co_return summarise(found->second);
     }
 
+    drogon::Task<std::optional<repositories::AdminUserSummary>> setTemporaryPassword(
+        std::string userId, std::string passwordHash, domain::NewAuditEntry audit) const override {
+        const auto found = accounts.find(userId);
+        if (found == accounts.end()) {
+            co_return std::nullopt;
+        }
+        mutable_(found->second).user.passwordHash = passwordHash;
+        mutable_(found->second).user.passwordChangeRequired = true;
+        record(std::move(audit));
+        co_return summarise(found->second);
+    }
+
     drogon::Task<repositories::RoleChange>
     grantRole(std::string userId, std::string roleKey, domain::NewAuditEntry audit) const override {
         const auto found = accounts.find(userId);

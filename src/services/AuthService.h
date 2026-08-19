@@ -117,6 +117,31 @@ class AuthService {
     drogon::Task<common::VoidResult> resetPassword(std::string token,
                                                    std::string newPassword) const;
 
+    /// Replaces the password of the signed-in account, and hands back a fresh session.
+    ///
+    /// The way out of a one-time password an operator handed over, and therefore the only
+    /// route a `passwordChangeRequired` session reaches. It is an ordinary password change
+    /// too: nothing about it is special-cased on the flag, so an account that simply wants a
+    /// new password uses the same route.
+    ///
+    /// Three rules, each with a reason:
+    ///
+    /// **The current password is asked for again**, exactly as the erasure asks (D44). A valid
+    /// access token says who is asking, not that the owner is at the keyboard — and on this
+    /// route an unattended session would otherwise be enough to take the account.
+    ///
+    /// **The new password may not be the old one.** Everywhere else that would be a harmless
+    /// no-op; here it is the whole feature defeated, because re-entering the operator's
+    /// temporary password would clear the flag and leave a credential somebody else knows.
+    ///
+    /// **Every other session dies and a new one is issued.** A password change is what somebody
+    /// does after a credential leaked, so the sessions minted under the old one cannot survive
+    /// it; and the caller needs a token without the flag, which only a new session carries.
+    drogon::Task<common::Result<AuthTokens>> changePassword(std::string userId,
+                                                            std::string currentPassword,
+                                                            std::string newPassword,
+                                                            ClientContext client) const;
+
   private:
     drogon::Task<AuthTokens> issueSession(domain::User user,
                                           std::string familyId,

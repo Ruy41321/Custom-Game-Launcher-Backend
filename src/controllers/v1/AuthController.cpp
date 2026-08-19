@@ -7,6 +7,7 @@
 #include "app/AppContext.h"
 #include "app/HttpError.h"
 #include "app/JsonBody.h"
+#include "domain/ValidationRules.h"
 #include "filters/AuthRateLimitFilter.h"
 #include "filters/JwtAuthFilter.h"
 #include "services/AuthService.h"
@@ -23,6 +24,10 @@ Json::Value userToJson(const domain::User& user) {
     json["email"] = user.email;
     json["displayName"] = user.displayName;
     json["emailVerified"] = user.emailVerified;
+    // The client learns from the session, not from a refusal: without this the first thing a
+    // launcher does after signing in is a request that comes back 403, and the screen that
+    // forces the change is reached by way of an error rather than by being told.
+    json["passwordChangeRequired"] = user.passwordChangeRequired;
     json["uploadQuotaBytes"] = static_cast<Json::Int64>(user.uploadQuotaBytes);
     json["uploadUsedBytes"] = static_cast<Json::Int64>(user.uploadUsedBytes);
     return json;
@@ -76,9 +81,10 @@ AuthController::registerUser(drogon::HttpRequestPtr request,
     const auto body = app::requireJsonObject(request);
 
     services::RegisterCommand command;
-    command.email = app::requireString(body, "email");
-    command.password = app::requireString(body, "password");
-    command.displayName = app::requireString(body, "displayName");
+    command.email = app::requireString(body, "email", domain::rules::EMAIL_REQUIRED);
+    command.password = app::requireString(body, "password", domain::rules::PASSWORD_REQUIRED);
+    command.displayName =
+        app::requireString(body, "displayName", domain::rules::DISPLAY_NAME_REQUIRED);
 
     auto result =
         co_await app::AppContext::instance().authService().registerUser(std::move(command));
@@ -104,8 +110,8 @@ AuthController::registerUser(drogon::HttpRequestPtr request,
 drogon::Task<> AuthController::login(drogon::HttpRequestPtr request,
                                      std::function<void(const drogon::HttpResponsePtr&)> callback) {
     const auto body = app::requireJsonObject(request);
-    const auto email = app::requireString(body, "email");
-    const auto password = app::requireString(body, "password");
+    const auto email = app::requireString(body, "email", domain::rules::EMAIL_REQUIRED);
+    const auto password = app::requireString(body, "password", domain::rules::PASSWORD_REQUIRED);
 
     auto result = co_await app::AppContext::instance().authService().login(
         email, password, clientContextOf(request));
@@ -168,7 +174,7 @@ drogon::Task<>
 AuthController::requestPasswordReset(drogon::HttpRequestPtr request,
                                      std::function<void(const drogon::HttpResponsePtr&)> callback) {
     const auto body = app::requireJsonObject(request);
-    const auto email = app::requireString(body, "email");
+    const auto email = app::requireString(body, "email", domain::rules::EMAIL_REQUIRED);
 
     const auto result =
         co_await app::AppContext::instance().authService().requestPasswordReset(email);
@@ -190,7 +196,7 @@ drogon::Task<>
 AuthController::resendVerification(drogon::HttpRequestPtr request,
                                    std::function<void(const drogon::HttpResponsePtr&)> callback) {
     const auto body = app::requireJsonObject(request);
-    const auto email = app::requireString(body, "email");
+    const auto email = app::requireString(body, "email", domain::rules::EMAIL_REQUIRED);
 
     const auto result =
         co_await app::AppContext::instance().authService().resendVerification(email);
@@ -212,7 +218,7 @@ AuthController::confirmPasswordReset(drogon::HttpRequestPtr request,
                                      std::function<void(const drogon::HttpResponsePtr&)> callback) {
     const auto body = app::requireJsonObject(request);
     const auto token = app::requireString(body, "token");
-    const auto password = app::requireString(body, "password");
+    const auto password = app::requireString(body, "password", domain::rules::PASSWORD_REQUIRED);
 
     const auto result =
         co_await app::AppContext::instance().authService().resetPassword(token, password);
@@ -223,6 +229,31 @@ AuthController::confirmPasswordReset(drogon::HttpRequestPtr request,
     Json::Value response;
     response["status"] = "password updated";
     callback(jsonResponse(request, response));
+    co_return;
+}
+
+drogon::Task<>
+AuthController::changePassword(drogon::HttpRequestPtr request,
+                               std::function<void(const drogon::HttpResponsePtr&)> callback) {
+    const auto body = app::requireJsonObject(request);
+    const auto currentPassword =
+        app::requireString(body, "currentPassword", domain::rules::PASSWORD_REQUIRED);
+    const auto newPassword =
+        app::requireString(body, "newPassword", domain::rules::PASSWORD_REQUIRED);
+
+    auto result = co_await app::AppContext::instance().authService().changePassword(
+        filters::requireClaims(request).userId,
+        currentPassword,
+        newPassword,
+        clientContextOf(request));
+    if (!result.ok()) {
+        fail(result.error());
+    }
+
+    // A whole session, not a 204. Every other one was just revoked, this caller's included, so
+    // answering with nothing would leave a client holding a refresh token that no longer works
+    // and an access token that still carries the flag — signed out by succeeding.
+    callback(jsonResponse(request, sessionToJson(std::move(result).value())));
     co_return;
 }
 

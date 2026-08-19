@@ -9,6 +9,7 @@
 #include "domain/Role.h"
 #include "domain/User.h"
 #include "domain/Validation.h"
+#include "domain/ValidationRules.h"
 
 namespace launcher::services {
 namespace {
@@ -41,10 +42,11 @@ drogon::Task<VoidResult> AccountService::erase(domain::Actor actor,
         co_return VoidResult::failure(ErrorCode::Unauthenticated, NO_SUCH_SESSION);
     }
     if (command.reason.size() > domain::MAX_ERASURE_REASON_LENGTH) {
-        co_return VoidResult::failure(ErrorCode::InvalidInput,
-                                      "reason must be at most " +
-                                          std::to_string(domain::MAX_ERASURE_REASON_LENGTH) +
-                                          " characters");
+        co_return VoidResult::failure(common::invalidInput(
+            "reason must be at most " + std::to_string(domain::MAX_ERASURE_REASON_LENGTH) +
+                " characters",
+            domain::rules::ERASURE_REASON_TOO_LONG,
+            {std::to_string(domain::MAX_ERASURE_REASON_LENGTH)}));
     }
 
     const auto user = co_await users_.findById(actor.userId);

@@ -36,6 +36,7 @@ struct CreateVersionCommand {
 
 struct CreateBuildCommand {
     std::string versionId;
+    std::string name;
     domain::BuildPlatform platform{domain::BuildPlatform::Windows};
     domain::BuildArchitecture architecture{domain::BuildArchitecture::X64};
 };
@@ -74,6 +75,23 @@ class CatalogService {
 
     drogon::Task<common::Result<domain::GameVersion>>
     createVersion(domain::Actor actor, std::string gameId, CreateVersionCommand command) const;
+
+    /// Changes a version after it exists: its stage, its release notes, and whether it is
+    /// published.
+    ///
+    /// The last one is why this route exists. A version created without "publish now" could
+    /// not be published by any route, so a publisher who left the box unticked had no way back
+    /// short of deleting the version and its builds and starting again.
+    ///
+    /// Withdrawing is allowed, and its cost is real: a player who has the game installed stops
+    /// being offered the update, and one who has not installed it stops seeing the version at
+    /// all. That is the same trade `visibility: draft` already makes for a whole game, and it
+    /// is the reversible thing standing next to a delete that is not.
+    drogon::Task<common::Result<domain::GameVersion>>
+    updateVersion(domain::Actor actor,
+                  std::string gameId,
+                  std::string versionId,
+                  domain::GameVersionUpdate changes) const;
 
     drogon::Task<common::Result<domain::Build>>
     createBuild(domain::Actor actor, std::string gameId, CreateBuildCommand command) const;

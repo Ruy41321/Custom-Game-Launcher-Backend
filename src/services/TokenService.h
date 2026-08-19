@@ -16,6 +16,19 @@ struct AccessTokenClaims {
     std::string email;
     std::vector<std::string> permissions;
 
+    /// The account is holding a password an operator chose for it and has not replaced it yet.
+    ///
+    /// It rides in the token for the same reason the permissions do: `JwtAuthFilter` refuses
+    /// every route but the password change on the strength of it, and a database read there
+    /// would put a round trip on every authenticated request to catch a state almost no
+    /// account is ever in. The price is the same one the permissions pay — the flag is as
+    /// stale as the access token, so clearing it takes effect at the next sign-in, which is
+    /// exactly what changing the password issues.
+    ///
+    /// Absent from an older token and read as false, which is what makes deploying this
+    /// change not invalidate every session in flight.
+    bool passwordChangeRequired{false};
+
     bool hasPermission(std::string_view permission) const;
 };
 

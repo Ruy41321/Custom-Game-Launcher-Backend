@@ -67,6 +67,9 @@ app::AppConfig testConfig(const std::filesystem::path& blobRoot,
 
     // Small enough that a test can send an oversized image without allocating megabytes.
     config.media.maxBytes = 4096;
+    // Larger than the picture limit and still tiny, so a test can show that a body refused as a
+    // screenshot is accepted as a video — which is the whole point of the second number.
+    config.media.maxVideoBytes = 16384;
 
     // No grace period here. In a deployment it is what stops the collector eating a build that
     // is still being uploaded, and it has to outlast the slowest publish; in a test it would

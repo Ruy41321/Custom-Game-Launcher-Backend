@@ -26,7 +26,7 @@ const services::MediaService& media() {
     return app::AppContext::instance().mediaService();
 }
 
-constexpr const char* KIND_VALUES = "cover, banner, logo, screenshot";
+constexpr const char* KIND_VALUES = "cover, banner, logo, screenshot, video";
 
 domain::MediaKind requireKind(const drogon::HttpRequestPtr& request) {
     const auto kind = request->getParameter("kind");

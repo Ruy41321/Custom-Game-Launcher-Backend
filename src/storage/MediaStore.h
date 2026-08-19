@@ -22,15 +22,20 @@ namespace launcher::storage {
 /// public location over the build blobs would hand out every game's files to anyone who knew
 /// a hash.
 ///
-/// There is no staging protocol here. An image arrives whole in one request, so the write is
-/// a temporary file, a hash check, and a rename — the same guarantee the blob store gives
-/// across many requests, without the machinery for resuming.
+/// There is no staging protocol here. An image — or a video, which is the same problem an order
+/// of magnitude larger — arrives whole in one request, so the write is a temporary file, a hash
+/// check, and a rename: the same guarantee the blob store gives across many requests, without
+/// the machinery for resuming.
 class MediaStore {
   public:
     explicit MediaStore(std::filesystem::path root);
 
     /// `ab/cd/<sha256>.<ext>`, or empty when the hash is not one.
-    static std::string storageKeyFor(std::string_view sha256, domain::ImageFormat format);
+    ///
+    /// Takes a `StoredFormat` rather than one of the two format enums so that there is one
+    /// write path for a picture and for a video: what this class needs is an extension and a
+    /// content type, and which enum the caller sniffed with is the caller's business.
+    static std::string storageKeyFor(std::string_view sha256, domain::StoredFormat format);
 
     const std::filesystem::path& root() const { return root_; }
 
@@ -43,7 +48,7 @@ class MediaStore {
     /// The hash is computed here, from the bytes about to be written, rather than accepted
     /// from a caller: an image is small enough that there is nothing to gain from trusting a
     /// declared address, and the file ends up on a public URL.
-    common::Result<std::string> store(std::string_view bytes, domain::ImageFormat format) const;
+    common::Result<std::string> store(std::string_view bytes, domain::StoredFormat format) const;
 
     /// Removes the file behind a storage key. Silent when it is already gone, which is the
     /// normal outcome of a sweep that raced another one.

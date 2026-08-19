@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <utility>
 
+#include "common/Random.h"
 #include "domain/AuditEntry.h"
 #include "domain/Validation.h"
 
@@ -71,9 +72,11 @@ Result<AdminUserSummary> roleChangeToResult(RoleChange change, const std::string
 } // namespace
 
 AdminUserService::AdminUserService(const repositories::IAdminUserRepository& users,
-                                   const repositories::IAuditRepository& audit)
+                                   const repositories::IAuditRepository& audit,
+                                   const IPasswordHasher& passwordHasher)
     : users_(users),
-      audit_(audit) {}
+      audit_(audit),
+      passwordHasher_(passwordHasher) {}
 
 drogon::Task<Result<repositories::AdminUserPage>>
 AdminUserService::list(domain::Actor actor, repositories::AdminUserQuery query) const {
@@ -167,6 +170,46 @@ AdminUserService::setActive(domain::Actor actor, std::string userId, bool active
         co_return Result<AdminUserSummary>::failure(ErrorCode::NotFound, "no such account");
     }
     co_return Result<AdminUserSummary>::success(std::move(*updated));
+}
+
+drogon::Task<Result<TemporaryPassword>>
+AdminUserService::setTemporaryPassword(domain::Actor actor, std::string userId) const {
+    if (auto allowed = requirePermission(actor, permissions::ADMIN_USERS_MANAGE); !allowed.ok()) {
+        co_return Result<TemporaryPassword>::failure(allowed.error());
+    }
+
+    if (auto valid = requireUserId(userId); !valid.ok()) {
+        co_return Result<TemporaryPassword>::failure(valid.error());
+    }
+
+    // The console has no password-change route, and the flag this sets refuses every route but
+    // one — so an operator doing this to themselves would be locked out of the surface they
+    // are standing on. Refused rather than special-cased, the same answer deactivation gives.
+    if (actor.owns(userId)) {
+        co_return Result<TemporaryPassword>::failure(
+            ErrorCode::InvalidInput,
+            "an operator cannot set a temporary password on their own account; ask another one");
+    }
+
+    const auto password = common::randomTemporaryPassword();
+    auto passwordHash = passwordHasher_.hash(password);
+    if (!passwordHash.ok()) {
+        co_return Result<TemporaryPassword>::failure(passwordHash.error());
+    }
+
+    // Nothing about the password goes into the entry: what an operator needs to answer for is
+    // that they did this and to whom, and a trail carrying the credential would be a place the
+    // credential outlives the minute it is meant to exist for.
+    auto entry = auditFor(actor, actions::USER_TEMPORARY_PASSWORD_SET, userId, {});
+
+    auto updated = co_await users_.setTemporaryPassword(
+        userId, std::move(passwordHash).value(), std::move(entry));
+
+    if (!updated.has_value()) {
+        co_return Result<TemporaryPassword>::failure(ErrorCode::NotFound, "no such account");
+    }
+
+    co_return Result<TemporaryPassword>::success(TemporaryPassword{std::move(*updated), password});
 }
 
 drogon::Task<Result<AdminUserSummary>>

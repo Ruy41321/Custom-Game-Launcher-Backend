@@ -118,6 +118,7 @@ Json::Value buildToJson(const domain::Build& build) {
     Json::Value json;
     json["id"] = build.id;
     json["versionId"] = build.gameVersionId;
+    json["name"] = build.name;
     json["platform"] = domain::toString(build.platform);
     json["architecture"] = domain::toString(build.architecture);
     json["status"] = domain::toString(build.status);

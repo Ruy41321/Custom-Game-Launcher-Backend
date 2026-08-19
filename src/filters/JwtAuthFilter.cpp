@@ -68,6 +68,20 @@ void JwtAuthFilter::doFilter(const drogon::HttpRequestPtr& request,
         return;
     }
 
+    // An account holding a password an operator chose for it reaches exactly one route. The
+    // check is here, after verification, for the reason the limiter above is: every
+    // authenticated route on this server runs through this filter, so no route can be added
+    // later that a flagged session reaches because somebody forgot a line. It costs no
+    // database read — the flag rides in the token, and is therefore as stale as the token,
+    // which is what changing the password re-issues.
+    if (claims.value().passwordChangeRequired && request->path() != PASSWORD_CHANGE_PATH) {
+        reject(app::makeErrorResponse(
+            Error{ErrorCode::PasswordChangeRequired,
+                  "this account is using a temporary password and must choose a new one"},
+            requestId));
+        return;
+    }
+
     request->attributes()->insert(AUTH_CLAIMS_ATTRIBUTE, std::move(claims).value());
     proceed();
 }

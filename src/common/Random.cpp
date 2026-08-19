@@ -47,6 +47,30 @@ std::string randomUrlSafeToken(std::size_t bytes) {
     return encoded;
 }
 
+std::string randomTemporaryPassword() {
+    if (!initCrypto()) {
+        return {};
+    }
+
+    // No l, 1, o or 0: the value is read aloud or copied off a note at least once.
+    static constexpr char ALPHABET[] = "abcdefghijkmnpqrstuvwxyz23456789";
+    static constexpr std::size_t ALPHABET_SIZE = sizeof(ALPHABET) - 1;
+    static constexpr std::size_t GROUPS = 3;
+    static constexpr std::size_t GROUP_SIZE = 5;
+
+    std::string password;
+    password.reserve(GROUPS * GROUP_SIZE + (GROUPS - 1));
+    for (std::size_t group = 0; group < GROUPS; ++group) {
+        if (group > 0) {
+            password.push_back('-');
+        }
+        for (std::size_t i = 0; i < GROUP_SIZE; ++i) {
+            password.push_back(ALPHABET[randombytes_uniform(ALPHABET_SIZE)]);
+        }
+    }
+    return password;
+}
+
 std::string randomUuid() {
     if (!initCrypto()) {
         return {};

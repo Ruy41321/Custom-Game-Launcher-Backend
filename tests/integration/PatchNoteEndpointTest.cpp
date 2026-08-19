@@ -254,4 +254,41 @@ TEST(PatchNoteEndpointTest, RejectsANoteWithNoTitle) {
     EXPECT_EQ(response->statusCode(), drogon::k422UnprocessableEntity) << response->body();
 }
 
+// ---------------------------------------------------------------------------
+// A devlog on a game somebody else publishes
+//
+// Editing was covered; writing and removing were not, and the covered case for the whole
+// surface was a draft, where the refusal comes from not being able to see the game (D30).
+// §9.5 wants the denial path for each, on a game the intruder *can* see.
+// ---------------------------------------------------------------------------
+
+TEST(PatchNoteEndpointTest, RefusesToWriteADevlogOnAnotherPublishersGame) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto owner = developer();
+    const auto game = createGame(owner, "Guarded Devlog Title");
+    const auto intruder = developer();
+
+    const auto refused = postNote(intruder, game["id"].asString(), "Not my announcement");
+
+    EXPECT_EQ(refused->statusCode(), drogon::k403Forbidden) << refused->body();
+}
+
+TEST(PatchNoteEndpointTest, RefusesToRemoveSomebodyElsesNote) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto owner = developer();
+    const auto game = createGame(owner, "Guarded Note Removal Title");
+    const auto written = postNote(owner, game["id"].asString(), "Stays put");
+    ASSERT_EQ(written->statusCode(), drogon::k201Created) << written->body();
+    const auto intruder = developer();
+
+    const auto refused = harness().remove("/api/v1/patch-notes/" + bodyOf(written)["id"].asString(),
+                                          tokenOf(intruder));
+
+    EXPECT_EQ(refused->statusCode(), drogon::k403Forbidden) << refused->body();
+
+    const auto listed =
+        harness().get("/api/v1/games/" + game["id"].asString() + "/patch-notes", tokenOf(owner));
+    EXPECT_EQ(bodyOf(listed)["total"].asInt(), 1) << "the entry must still be there";
+}
+
 } // namespace

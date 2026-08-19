@@ -79,18 +79,29 @@ void configureBodyLimits(const AppConfig& config) {
     // megabyte — well under a single upload chunk, so without this every chunk is rejected
     // before reaching the controller.
     //
-    // Two budgets, not one. The largest body the server accepts at all is whichever of the two
-    // is bigger: an upload chunk, or the largest document a route takes — in practice the
-    // manifest of a big build. Until `maxDocumentBytes` existed only the chunk size was here,
-    // so how many files a build could contain was a silent consequence of a number about
-    // something else.
+    // Three budgets, not one. The largest body the server accepts at all is whichever is
+    // biggest: an upload chunk, the largest document a route takes — in practice the manifest of
+    // a big build — or a video, which arrives whole in one POST because it is one file and not a
+    // resumable upload. Until `maxDocumentBytes` existed only the chunk size was here, so how
+    // many files a build could contain was a silent consequence of a number about something
+    // else; `media.maxVideoBytes` joined it for the same reason, and the failure it prevents is
+    // sharper than that one. Drogon refuses an oversized body itself, before any handler runs,
+    // with a bare 413 carrying **no** RFC 7807 envelope — measured against the running stack on
+    // 2026-08-18 — so a video the framework rejects is a refusal no client can explain to
+    // anybody. `media.maxBytes` is deliberately not in the maximum: it is smaller than the chunk
+    // on every configuration that makes sense, and folding it in would say otherwise.
     //
     // The *memory* limit stays at the chunk size on purpose: a chunk is read straight back, so
     // spilling it to a temporary file would be pure loss, while the rare manifest that exceeds
-    // it is better on disk than held in RAM once per concurrent request.
+    // it — and every video, which is the point — is better on disk than held in RAM once per
+    // concurrent request. A spilled body is still readable through `request->getBody()`, which
+    // was verified against the running server rather than assumed: a 10 MiB upload with an 8 MiB
+    // memory limit reached the handler with its length intact.
     const auto chunk = static_cast<std::size_t>(config.uploads.maxChunkBytes) + BODY_SIZE_HEADROOM;
-    const auto largest = std::max(
-        chunk, static_cast<std::size_t>(config.server.maxDocumentBytes) + BODY_SIZE_HEADROOM);
+    const auto largest =
+        std::max({chunk,
+                  static_cast<std::size_t>(config.server.maxDocumentBytes) + BODY_SIZE_HEADROOM,
+                  static_cast<std::size_t>(config.media.maxVideoBytes) + BODY_SIZE_HEADROOM});
 
     drogon::app().setClientMaxBodySize(largest);
     drogon::app().setClientMaxMemoryBodySize(chunk);

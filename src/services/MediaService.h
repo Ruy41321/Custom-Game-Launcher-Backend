@@ -20,16 +20,22 @@ struct UploadMediaCommand {
     domain::MediaKind kind{domain::MediaKind::Screenshot};
     std::string altText;
     int sortOrder{0};
-    /// The image itself. Small enough to arrive whole, and bounded by MediaLimits::maxBytes
-    /// before the controller ever calls in.
+    /// The file itself — a picture, or a video, which is the same request an order of magnitude
+    /// larger. Bounded by whichever of the two MediaLimits applies to the kind, and by Drogon's
+    /// own body limit before the controller ever calls in.
     std::string bytes;
 };
 
 struct MediaLimits {
     int64_t maxBytes{5LL * 1024 * 1024};
+    /// A trailer, not a film, and its own number rather than a multiple of the one above: the
+    /// two are refused by the same code path but they are not the same order of magnitude, and a
+    /// deployment that wants larger pictures has no reason to be made to accept larger videos.
+    int64_t maxVideoBytes{64LL * 1024 * 1024};
 };
 
-/// Game artwork: covers, banners, logos and screenshots.
+/// Game artwork: covers, banners, logos, screenshots — and videos, which travel the same route
+/// because they are the same problem: one public, content-addressed file that describes a game.
 ///
 /// Separate from CatalogService because it owns a different kind of storage and a different
 /// failure mode — a write here touches the filesystem — while sharing the authorization rules,

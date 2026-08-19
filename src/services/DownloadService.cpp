@@ -103,16 +103,23 @@ DownloadService::plan(Actor actor, std::string buildId, std::string fromBuildId)
     std::string fromVersionId;
     if (!fromBuildId.empty()) {
         auto source = co_await downloadableBuild(actor, fromBuildId);
+        // A source is a claim about what is already on the caller's disk, not something being
+        // served: nothing about it reaches the answer except which bytes may be skipped. So a
+        // source this caller may no longer read — the publisher withdrew that version, or
+        // deleted it — costs a full download of the target rather than a refusal. Refusing
+        // would leave a player who installed a version that was later withdrawn unable to
+        // update at all, which is a larger consequence than the one the withdrawal chose.
         if (!source.ok()) {
-            co_return Result<DownloadPlan>::failure(source.error());
-        }
-        if (source.value().gameId != target.value().gameId) {
+            spdlog::info("planning a full download: the source build is not readable buildId={}",
+                         common::escapeJson(fromBuildId));
+        } else if (source.value().gameId != target.value().gameId) {
             co_return Result<DownloadPlan>::failure(
                 ErrorCode::InvalidInput,
                 "the build you are updating from belongs to a different game");
+        } else {
+            fromVersionId = source.value().gameVersionId;
+            installed = co_await builds_.filesFor(fromBuildId);
         }
-        fromVersionId = source.value().gameVersionId;
-        installed = co_await builds_.filesFor(fromBuildId);
     }
 
     const auto build = co_await builds_.findById(buildId);

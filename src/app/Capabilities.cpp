@@ -47,6 +47,21 @@ Json::Value capabilitiesDocument(const AppConfig& config) {
         formats.append(domain::contentTypeOf(format));
     }
     media["contentTypes"] = formats;
+
+    // Videos get their own limit, their own cap and their own list, because a client that read
+    // only `maxBytes` would offer a trailer upload and watch it refused at 5 MiB — and because a
+    // server too old to carry these keys is one that cannot store a video at all. That is the
+    // asymmetry with `mail.enabled`, whose absence means "an ordinary server that sends mail":
+    // here absence means the feature does not exist, so a client reading nothing here is right
+    // to offer nothing.
+    media["maxVideoBytes"] = static_cast<Json::Int64>(config.media.maxVideoBytes);
+    media["maxVideosPerGame"] = domain::MAX_VIDEOS_PER_GAME;
+
+    Json::Value videoFormats(Json::arrayValue);
+    for (const auto format : {domain::VideoFormat::Mp4, domain::VideoFormat::WebM}) {
+        videoFormats.append(domain::contentTypeOf(format));
+    }
+    media["videoContentTypes"] = videoFormats;
     json["media"] = media;
 
     Json::Value catalog;
@@ -63,6 +78,16 @@ Json::Value capabilitiesDocument(const AppConfig& config) {
     crashReports["maxMessageLength"] = static_cast<Json::Int64>(domain::MAX_CRASH_MESSAGE_LENGTH);
     crashReports["maxStackLength"] = static_cast<Json::Int64>(domain::MAX_CRASH_STACK_LENGTH);
     json["crashReports"] = crashReports;
+
+    Json::Value mail;
+    // Whether this deployment can send a message at all. A launcher reads it to decide whether
+    // to offer "forgotten your password?", which is otherwise a button that answers 404 — the
+    // routes that send are already switched off with the transport, and a client left to infer
+    // that from a failed request shows the offer first and the failure second. Where it is
+    // false the way back in is an operator handing out a one-time password, so the sentence
+    // that replaces the link is "contact the administrator" rather than an error.
+    mail["enabled"] = config.mail.enabled();
+    json["mail"] = mail;
 
     Json::Value updates;
     // Advisory, and worth publishing: it is why a client that asked for a delta is sometimes

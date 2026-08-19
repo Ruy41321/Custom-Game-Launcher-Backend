@@ -25,9 +25,15 @@ class IGameVersionRepository {
     virtual drogon::Task<std::vector<domain::GameVersion>>
     listForGame(std::string gameId, bool includeUnpublished) const = 0;
 
-    /// Idempotent: publishing an already published version keeps its original timestamp.
-    /// False when no such version exists.
-    virtual drogon::Task<bool> publish(std::string id) const = 0;
+    /// Applies a partial update, the shape `IGameRepository::update` has for a game. Nullopt
+    /// when no such version exists.
+    ///
+    /// Publishing is idempotent: a version published twice keeps its original timestamp, so
+    /// the date a release went out cannot be moved by pressing a button again. This replaced a
+    /// `publish(id)` that had existed since migration 0001 and that **nothing ever called** —
+    /// the ability was in the repository the whole time and no route reached it.
+    virtual drogon::Task<std::optional<domain::GameVersion>>
+    update(std::string id, domain::GameVersionUpdate changes) const = 0;
 
     /// Deletes a version and cascades to its builds. Nothing is done about the blobs those
     /// builds referenced; the collector notices them on its next pass.

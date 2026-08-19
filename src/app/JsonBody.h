@@ -20,7 +20,12 @@ Json::Value optionalJsonObject(const drogon::HttpRequestPtr& request);
 
 /// Reads a required string field. An absent, non-string or blank value is a validation
 /// error naming the field, so the client can point at the right input.
-std::string requireString(const Json::Value& body, const char* field);
+///
+/// `rule` is one of `domain/ValidationRules.h` and travels in the envelope so a client can
+/// translate the refusal. It is optional because most required strings are protocol values a
+/// client computed — a blob hash, a manifest path — and a refusal there is that client's bug,
+/// not something to dress up as the user's mistake. Pass one for a field somebody types.
+std::string requireString(const Json::Value& body, const char* field, const char* rule = nullptr);
 
 /// Reads an optional string field, returning the fallback when absent or not a string.
 std::string

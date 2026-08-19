@@ -9,6 +9,7 @@ int httpStatusFor(ErrorCode code) {
     case ErrorCode::Unauthenticated:
         return 401;
     case ErrorCode::Forbidden:
+    case ErrorCode::PasswordChangeRequired:
         return 403;
     case ErrorCode::NotFound:
         return 404;
@@ -34,6 +35,8 @@ const char* titleFor(ErrorCode code) {
         return "Authentication required";
     case ErrorCode::Forbidden:
         return "Forbidden";
+    case ErrorCode::PasswordChangeRequired:
+        return "Password change required";
     case ErrorCode::NotFound:
         return "Not found";
     case ErrorCode::Conflict:
@@ -58,6 +61,8 @@ const char* nameFor(ErrorCode code) {
         return "unauthenticated";
     case ErrorCode::Forbidden:
         return "forbidden";
+    case ErrorCode::PasswordChangeRequired:
+        return "password_change_required";
     case ErrorCode::NotFound:
         return "not_found";
     case ErrorCode::Conflict:

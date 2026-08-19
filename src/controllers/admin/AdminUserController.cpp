@@ -97,6 +97,27 @@ AdminUserController::update(drogon::HttpRequestPtr request,
     co_return;
 }
 
+drogon::Task<> AdminUserController::setTemporaryPassword(
+    drogon::HttpRequestPtr request,
+    std::function<void(const drogon::HttpResponsePtr&)> callback,
+    std::string userId) {
+    auto result = co_await service().setTemporaryPassword(actorOf(request), std::move(userId));
+    if (!result.ok()) {
+        fail(result.error());
+    }
+
+    auto issued = std::move(result).value();
+
+    Json::Value response;
+    response["user"] = userToJson(issued.user);
+    // The only place this value ever appears. It is not stored, not logged and not
+    // recoverable: an operator who loses it issues another one.
+    response["temporaryPassword"] = issued.password;
+
+    callback(jsonResponse(request, response));
+    co_return;
+}
+
 drogon::Task<>
 AdminUserController::grantRole(drogon::HttpRequestPtr request,
                                std::function<void(const drogon::HttpResponsePtr&)> callback,

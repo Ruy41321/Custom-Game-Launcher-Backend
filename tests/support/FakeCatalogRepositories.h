@@ -361,16 +361,30 @@ class FakeGameVersionRepository : public repositories::IGameVersionRepository {
         co_return versions.size() != before;
     }
 
-    drogon::Task<bool> publish(std::string id) const override {
+    drogon::Task<std::optional<domain::GameVersion>>
+    update(std::string id, domain::GameVersionUpdate changes) const override {
         for (auto& version : versions) {
-            if (version.id == id) {
-                if (version.publishedAt.empty()) {
+            if (version.id != id) {
+                continue;
+            }
+            if (changes.stage.has_value()) {
+                version.stage = *changes.stage;
+            }
+            if (changes.releaseNotes.has_value()) {
+                version.releaseNotes = *changes.releaseNotes;
+            }
+            if (changes.published.has_value()) {
+                // Mirrors the COALESCE in the real statement: publishing twice must not move
+                // the date a release went out.
+                if (!*changes.published) {
+                    version.publishedAt.clear();
+                } else if (version.publishedAt.empty()) {
                     version.publishedAt = "2026-01-01T00:00:00Z";
                 }
-                co_return true;
             }
+            co_return version;
         }
-        co_return false;
+        co_return std::nullopt;
     }
 };
 
@@ -405,6 +419,7 @@ class FakeBuildRepository : public repositories::IBuildRepository {
         domain::Build created;
         created.id = common::randomUuid();
         created.gameVersionId = candidate.gameVersionId;
+        created.name = candidate.name;
         created.platform = candidate.platform;
         created.architecture = candidate.architecture;
         created.status = domain::BuildStatus::Uploading;

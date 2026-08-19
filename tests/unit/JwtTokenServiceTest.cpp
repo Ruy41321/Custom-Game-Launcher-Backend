@@ -140,4 +140,27 @@ TEST(JwtTokenServiceTest, CarriesAnEmptyPermissionListWithoutError) {
     EXPECT_TRUE(verified.value().permissions.empty());
 }
 
+TEST(JwtTokenServiceTest, CarriesTheForcedPasswordChange) {
+    const JwtTokenService service(settings());
+    AccessTokenClaims claims = sampleClaims();
+    claims.passwordChangeRequired = true;
+
+    const auto verified = service.verifyAccessToken(service.issueAccessToken(claims));
+
+    ASSERT_TRUE(verified.ok()) << verified.error().detail;
+    EXPECT_TRUE(verified.value().passwordChangeRequired);
+}
+
+// An ordinary session, and — the case that matters for deploying this — a token minted before
+// the claim existed. Both have to read as false, or rolling the flag out would refuse every
+// request holding a token issued a minute earlier.
+TEST(JwtTokenServiceTest, AnAbsentForcedChangeClaimIsNotAForcedChange) {
+    const JwtTokenService service(settings());
+
+    const auto verified = service.verifyAccessToken(service.issueAccessToken(sampleClaims()));
+
+    ASSERT_TRUE(verified.ok()) << verified.error().detail;
+    EXPECT_FALSE(verified.value().passwordChangeRequired);
+}
+
 } // namespace

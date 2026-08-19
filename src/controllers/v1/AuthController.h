@@ -43,6 +43,20 @@ class AuthController : public drogon::HttpController<AuthController> {
                   "/api/v1/auth/password-reset/confirm",
                   drogon::Post,
                   "launcher::filters::AuthRateLimitFilter");
+    // On `/me` rather than under `/auth`, because it acts on the signed-in account — and
+    // registered on *this* controller because the answer is a session document, which is
+    // built here. `filters::PASSWORD_CHANGE_PATH` names the same path: a session holding an
+    // operator's one-time password reaches this route and nothing else, so the two have to
+    // agree, and the constant is what makes that checkable.
+    //
+    // It carries the auth rate-limit bucket for D46's reason: every attempt costs an Argon2id
+    // verification and then a hash, which is the most expensive thing an unattended caller
+    // can ask this server to do.
+    ADD_METHOD_TO(AuthController::changePassword,
+                  "/api/v1/me/password",
+                  drogon::Post,
+                  "launcher::filters::AuthRateLimitFilter",
+                  "launcher::filters::JwtAuthFilter");
     ADD_METHOD_TO(AuthController::currentUser,
                   "/api/v1/auth/me",
                   drogon::Get,
@@ -74,6 +88,10 @@ class AuthController : public drogon::HttpController<AuthController> {
     drogon::Task<>
     confirmPasswordReset(drogon::HttpRequestPtr request,
                          std::function<void(const drogon::HttpResponsePtr&)> callback);
+
+    /// Replaces the password of the signed-in account and answers with a fresh session.
+    drogon::Task<> changePassword(drogon::HttpRequestPtr request,
+                                  std::function<void(const drogon::HttpResponsePtr&)> callback);
 
     drogon::Task<> currentUser(drogon::HttpRequestPtr request,
                                std::function<void(const drogon::HttpResponsePtr&)> callback);

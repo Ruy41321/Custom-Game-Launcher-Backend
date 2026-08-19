@@ -91,6 +91,10 @@ struct MediaConfig {
     /// A cover, not a texture pack. Enforced before any byte is written, and mirrored into
     /// Drogon's own body limit so an oversized upload is refused rather than buffered.
     int64_t maxBytes{5LL * 1024 * 1024};
+    /// A trailer, not a film. Separate from `maxBytes` because the two are different orders of
+    /// magnitude and a deployment has no reason to raise both together, and it is the number
+    /// that decides the largest body this server accepts at all — see `configureBodyLimits`.
+    int64_t maxVideoBytes{64LL * 1024 * 1024};
 };
 
 /// Where releases of the *launcher itself* live, and the key that says which ones are real.

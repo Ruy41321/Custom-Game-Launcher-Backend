@@ -41,6 +41,18 @@ drogon::HttpResponsePtr makeErrorResponse(const Error& error, const std::string&
     body["status"] = httpStatusFor(error.code);
     body["code"] = nameFor(error.code);
     body["detail"] = error.detail;
+    // Only written when there is one: an absent key is how a client tells "this refusal has no
+    // rule" from "this server is older than the rule", and both mean the same thing to it.
+    if (!error.rule.empty()) {
+        body["rule"] = error.rule;
+        if (!error.ruleArgs.empty()) {
+            Json::Value arguments(Json::arrayValue);
+            for (const auto& argument : error.ruleArgs) {
+                arguments.append(argument);
+            }
+            body["ruleArgs"] = std::move(arguments);
+        }
+    }
     if (!requestId.empty()) {
         body["requestId"] = requestId;
     }

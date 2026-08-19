@@ -85,7 +85,8 @@ struct DownloadFixture {
     std::string seedBuild(std::vector<ManifestEntry> files,
                           GameVisibility visibility = GameVisibility::Public,
                           BuildStatus status = BuildStatus::Ready,
-                          std::string ownerGameId = {}) {
+                          std::string ownerGameId = {},
+                          bool versionPublished = true) {
         Build build;
         build.gameVersionId = launcher::common::randomUuid();
         build.status = status;
@@ -97,6 +98,7 @@ struct DownloadFixture {
         ownership.gameId = ownerGameId.empty() ? gameId : ownerGameId;
         ownership.publisherUserId = PUBLISHER;
         ownership.visibility = visibility;
+        ownership.versionPublished = versionPublished;
 
         const auto id = builds.seed(build, ownership).id;
         builds.files[id] = std::move(files);
@@ -373,6 +375,62 @@ TEST(DownloadServiceTest, RefusesToVerifyAgainstABuildTheCallerCannotSee) {
 
     ASSERT_FALSE(report.ok());
     EXPECT_EQ(report.error().code, ErrorCode::NotFound);
+}
+
+// The hole the maintainer's testing found: a game may be public while one of its versions has
+// never been published, and until now only the game was asked about. A build under an
+// unpublished version was downloadable by anybody who could name it.
+TEST(DownloadServiceTest, HidesABuildWhoseVersionWasNeverPublished) {
+    DownloadFixture fixture;
+    const auto unreleased = fixture.seedBuild({file("Game.exe", 'a')},
+                                              GameVisibility::Public,
+                                              BuildStatus::Ready,
+                                              {},
+                                              /*versionPublished=*/false);
+
+    const auto refused = drogon::sync_wait(fixture.service.plan(player(), unreleased, ""));
+    ASSERT_FALSE(refused.ok());
+    EXPECT_EQ(refused.error().code, ErrorCode::NotFound)
+        << "404, never 403: a refusal must not confirm there is an unreleased version";
+
+    EXPECT_TRUE(drogon::sync_wait(fixture.service.plan(publisher(), unreleased, "")).ok())
+        << "its own publisher tests it before releasing it, which is the point of the state";
+}
+
+TEST(DownloadServiceTest, RefusesToVerifyAgainstAnUnpublishedVersion) {
+    DownloadFixture fixture;
+    const auto unreleased = fixture.seedBuild({file("Game.exe", 'a')},
+                                              GameVisibility::Public,
+                                              BuildStatus::Ready,
+                                              {},
+                                              /*versionPublished=*/false);
+
+    const auto report = drogon::sync_wait(
+        fixture.service.verifyInstall(player(), unreleased, {{"Game.exe", blob('a')}}));
+
+    ASSERT_FALSE(report.ok());
+    EXPECT_EQ(report.error().code, ErrorCode::NotFound);
+}
+
+// A player who installed a version that was withdrawn afterwards still has it on their disk.
+// The source of a delta is a claim about that disk and nothing about it is served, so it costs
+// a full download rather than an update they cannot perform at all.
+TEST(DownloadServiceTest, AnUnreadableSourceCostsAFullDownloadRatherThanARefusal) {
+    DownloadFixture fixture;
+    const auto withdrawn = fixture.seedBuild({file("Game.exe", 'a'), file("data/pak", 'b')},
+                                             GameVisibility::Public,
+                                             BuildStatus::Ready,
+                                             {},
+                                             /*versionPublished=*/false);
+    const auto current =
+        fixture.seedBuild({file("Game.exe", 'c'), file("data/pak", 'b')}, GameVisibility::Public);
+
+    const auto plan = drogon::sync_wait(fixture.service.plan(player(), current, withdrawn));
+
+    ASSERT_TRUE(plan.ok());
+    EXPECT_EQ(plan.value().kind, DownloadKind::Full);
+    EXPECT_EQ(plannedPaths(plan.value()), (std::vector<std::string>{"Game.exe", "data/pak"}))
+        << "nothing is skipped on the strength of a build this caller may not read";
 }
 
 } // namespace

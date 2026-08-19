@@ -16,7 +16,9 @@ constexpr const char* REQUEST_ID_ATTRIBUTE = "requestId";
 std::string requestIdOf(const drogon::HttpRequestPtr& request);
 
 /// Builds the single error envelope used by every endpoint (RFC 7807 flavoured):
-/// `{ "type", "title", "status", "detail", "code", "requestId" }`.
+/// `{ "type", "title", "status", "detail", "code", "requestId" }`, plus `"rule"` and
+/// `"ruleArgs"` for the refusals that name a specific validation rule — see
+/// `domain/ValidationRules.h`. Both are omitted rather than sent empty.
 /// Controllers must never assemble an error body themselves.
 drogon::HttpResponsePtr makeErrorResponse(const common::Error& error, const std::string& requestId);
 

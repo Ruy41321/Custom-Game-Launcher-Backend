@@ -44,7 +44,8 @@
   "media": {
     "root": "${MEDIA_ROOT:-/data/media}",
     "publicBaseUrl": "${MEDIA_PUBLIC_BASE_URL:-http://localhost:8081/media}",
-    "maxBytes": ${MEDIA_MAX_BYTES:-5242880}
+    "maxBytes": ${MEDIA_MAX_BYTES:-5242880},
+    "maxVideoBytes": ${MEDIA_MAX_VIDEO_BYTES:-67108864}
   },
 
   "launcherReleases": {

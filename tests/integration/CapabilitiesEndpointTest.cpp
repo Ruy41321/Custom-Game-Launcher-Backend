@@ -41,6 +41,26 @@ TEST(CapabilitiesEndpointTest, ReportsTheLimitsThisProcessIsActuallyRunningWith)
     EXPECT_GT((*body)["media"]["maxBytes"].asInt64(), 0);
     EXPECT_GT((*body)["manifest"]["maxFiles"].asInt64(), 0);
     EXPECT_TRUE((*body)["media"]["contentTypes"].isArray());
+    // A server that does not carry these two says, by saying nothing, that it cannot store a
+    // video — which is exactly how the launcher reads their absence.
+    EXPECT_GT((*body)["media"]["maxVideoBytes"].asInt64(), 0);
+    EXPECT_TRUE((*body)["media"]["videoContentTypes"].isArray());
+}
+
+// The switch a launcher cannot infer without failing first. Without it the sign-in screen
+// offers "forgotten your password?" and finds out from the 404 that nothing will be sent.
+TEST(CapabilitiesEndpointTest, SaysWhetherThisDeploymentSendsMail) {
+    const auto response = harness().get("/api/v1/capabilities");
+
+    ASSERT_NE(response, nullptr);
+    const auto body = response->getJsonObject();
+    ASSERT_NE(body, nullptr);
+
+    ASSERT_TRUE((*body)["mail"].isMember("enabled")) << body->toStyledString();
+    EXPECT_TRUE((*body)["mail"]["enabled"].isBool());
+    // The harness delivers into a fake sender, which is a transport: it has to read as one, or
+    // every test below that asks for a link would be describing a server that sends nothing.
+    EXPECT_TRUE((*body)["mail"]["enabled"].asBool());
 }
 
 TEST(CapabilitiesEndpointTest, CarriesARequestIdLikeEveryOtherRoute) {

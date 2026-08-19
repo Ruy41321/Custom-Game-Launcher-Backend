@@ -27,7 +27,7 @@ using common::Result;
 constexpr const char* USER_COLUMNS =
     "id, email, display_name, password_hash, "
     "(email_verified_at IS NOT NULL) AS email_verified, is_active, "
-    "upload_quota_bytes, upload_used_bytes";
+    "password_change_required, upload_quota_bytes, upload_used_bytes";
 
 domain::User mapUser(const drogon::orm::Row& row) {
     domain::User user;
@@ -37,6 +37,7 @@ domain::User mapUser(const drogon::orm::Row& row) {
     user.passwordHash = row["password_hash"].as<std::string>();
     user.emailVerified = row["email_verified"].as<bool>();
     user.isActive = row["is_active"].as<bool>();
+    user.passwordChangeRequired = row["password_change_required"].as<bool>();
     user.uploadQuotaBytes = row["upload_quota_bytes"].as<int64_t>();
     user.uploadUsedBytes = row["upload_used_bytes"].as<int64_t>();
     return user;
@@ -110,6 +111,20 @@ drogon::Task<void> PgUserRepository::markEmailVerified(std::string userId) const
 
 drogon::Task<void> PgUserRepository::updatePasswordHash(std::string userId,
                                                         std::string passwordHash) const {
+    // Choosing a password clears the flag in the same statement that stores it, whichever
+    // path chose it — the reset link or the forced change. Two statements would leave an
+    // account that has a new password and is still refused every route but the one that sets
+    // it, which is a lockout with no way out that reads like a broken server.
+    co_await database_->execSqlCoro("UPDATE users SET password_hash = $2, "
+                                    "password_change_required = false WHERE id = $1::uuid",
+                                    userId,
+                                    passwordHash);
+    co_return;
+}
+
+drogon::Task<void> PgUserRepository::rehashPassword(std::string userId,
+                                                    std::string passwordHash) const {
+    // The same password, re-encoded. The flag is untouched on purpose: see IUserRepository.
     co_await database_->execSqlCoro(
         "UPDATE users SET password_hash = $2 WHERE id = $1::uuid", userId, passwordHash);
     co_return;

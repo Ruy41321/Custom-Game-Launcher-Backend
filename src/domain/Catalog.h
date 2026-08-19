@@ -41,6 +41,10 @@ inline constexpr std::size_t MAX_DESCRIPTION_LENGTH = 20000;
 inline constexpr std::size_t MAX_RELEASE_NOTES_LENGTH = 20000;
 inline constexpr std::size_t MAX_LAUNCH_ARGS_LENGTH = 1000;
 
+/// Mirrors the builds_name_length CHECK of migration 0006. A label, not a description: long
+/// enough for "Nightly, with the demo levels" and short enough to sit on one row of a list.
+inline constexpr std::size_t MAX_BUILD_NAME_LENGTH = 100;
+
 /// Mirrors the games_slug_format CHECK: lowercase alphanumeric groups joined by single
 /// hyphens. The slug is part of every catalog URL, so it must stay path-safe.
 common::VoidResult validateSlug(std::string_view slug);
@@ -125,9 +129,30 @@ struct NewGameVersion {
     bool publish{false};
 };
 
+/// A partial update to a version, the same shape `GameUpdate` has for a game: an absent field
+/// is left alone.
+///
+/// `published` is the field this type exists for. A version created without it could not be
+/// published afterwards by any route — the repository has been able to do it since migration
+/// 0001 and nothing ever asked — so "publish it now" was a decision a publisher got exactly one
+/// chance to make, at the moment they had least information. It goes both ways: withdrawing a
+/// version is the reversible thing next to deleting it, which is what somebody who published by
+/// mistake actually wants. What that costs is stated where it is done — see
+/// `CatalogService::updateVersion`.
+struct GameVersionUpdate {
+    std::optional<BuildStage> stage;
+    std::optional<std::string> releaseNotes;
+    std::optional<bool> published;
+
+    bool empty() const { return !stage && !releaseNotes && !published; }
+};
+
 struct Build {
     std::string id;
     std::string gameVersionId;
+    /// The publisher's own label, empty when they did not give one. Not an identifier: two
+    /// builds of one version may share a name, and migration 0006 says why.
+    std::string name;
     BuildPlatform platform{BuildPlatform::Windows};
     BuildArchitecture architecture{BuildArchitecture::X64};
     BuildStatus status{BuildStatus::Uploading};
@@ -142,6 +167,7 @@ struct Build {
 
 struct NewBuild {
     std::string gameVersionId;
+    std::string name;
     BuildPlatform platform{BuildPlatform::Windows};
     BuildArchitecture architecture{BuildArchitecture::X64};
 };
@@ -155,6 +181,11 @@ struct BuildOwnership {
     std::string publisherUserId;
     GameVisibility visibility{GameVisibility::Draft};
     BuildStatus status{BuildStatus::Uploading};
+    /// Whether the version this build hangs off has been published. It is here because
+    /// authorization needs it: a public game may perfectly well carry a version nobody has
+    /// released yet, and without this the check could only ask about the game. The default is
+    /// the closed one, so a query that forgets to select it refuses rather than admits.
+    bool versionPublished{false};
 };
 
 /// May act on a build as its publisher: its owner, or an operator who manages any game.
@@ -164,9 +195,14 @@ struct BuildOwnership {
 /// see a draft — and two copies of an authorization rule is one copy too many.
 bool mayPublishBuild(const BuildOwnership& ownership, const Actor& actor);
 
-/// May see that a build exists at all. A game still in draft is visible only to its publisher,
-/// and to everyone else the build is reported missing rather than forbidden: a 403 would
-/// confirm it exists.
+/// May see that a build exists at all. A build is readable when its game is not a draft **and**
+/// its version has been published; either half missing makes it the publisher's alone. To
+/// everyone else the build is reported missing rather than forbidden: a 403 would confirm it
+/// exists, and "there is an unpublished 2.0" is exactly what a refusal must not say.
+///
+/// The version half was absent until 2026-08-17 (D62), which meant a version created and never
+/// published was downloadable by anybody who could name one of its builds — `gameDetail`
+/// filtered those versions out of the listing while the download path never asked.
 bool mayReadBuild(const BuildOwnership& ownership, const Actor& actor);
 
 /// A game together with the versions and builds a particular caller is allowed to see.

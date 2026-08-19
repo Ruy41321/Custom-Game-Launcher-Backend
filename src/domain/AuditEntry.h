@@ -15,6 +15,10 @@ namespace auditActions {
 inline constexpr const char* USER_QUOTA_CHANGED = "user.quota.changed";
 inline constexpr const char* USER_ACTIVATED = "user.activated";
 inline constexpr const char* USER_DEACTIVATED = "user.deactivated";
+/// An operator handed the account a one-time password. Nothing about the password itself is
+/// recorded — the metadata says it happened, and the value exists in the response for as long
+/// as it takes the operator to read it.
+inline constexpr const char* USER_TEMPORARY_PASSWORD_SET = "user.password.temporary_set";
 inline constexpr const char* ROLE_GRANTED = "user.role.granted";
 inline constexpr const char* ROLE_REVOKED = "user.role.revoked";
 /// Written by the account itself, so the actor and the entity are the same id. The row stays

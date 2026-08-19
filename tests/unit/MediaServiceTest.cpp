@@ -2,6 +2,8 @@
 
 #include <drogon/utils/coroutine.h>
 
+#include <algorithm>
+#include <cstddef>
 #include <string>
 
 #include "common/Random.h"
@@ -57,8 +59,11 @@ Actor administrator() {
 
 /// Keeps the fakes and the store alive for the whole test.
 struct MediaFixture {
-    MediaFixture()
-        : service(games, media, MediaStore{root.path()}, MediaLimits{1024}) {}
+    /// Two limits, tiny, and deliberately different from each other: a body that is too large
+    /// for a picture and small enough for a video is the only way to show that the service
+    /// picks the budget from the kind rather than from one number.
+    explicit MediaFixture(MediaLimits limits = MediaLimits{1024, 4096})
+        : service(games, media, MediaStore{root.path()}, limits) {}
 
     TemporaryDirectory root;
     FakeGameRepository games;
@@ -90,6 +95,21 @@ UploadMediaCommand cover(std::string bytes = pngBody()) {
 UploadMediaCommand screenshot(std::string bytes) {
     UploadMediaCommand command;
     command.kind = MediaKind::Screenshot;
+    command.bytes = std::move(bytes);
+    return command;
+}
+
+/// An ISO base media header with an ordinary MP4 brand, padded to whatever length a test needs
+/// so that the size checks have something to measure.
+std::string mp4Body(const std::string& suffix = "one", std::size_t size = 64) {
+    auto body = std::string("\x00\x00\x00\x20", 4) + "ftypisom" + suffix;
+    body.resize(std::max(size, body.size()), '\x00');
+    return body;
+}
+
+UploadMediaCommand video(std::string bytes) {
+    UploadMediaCommand command;
+    command.kind = MediaKind::Video;
     command.bytes = std::move(bytes);
     return command;
 }
@@ -225,6 +245,98 @@ TEST(MediaServiceTest, ScreenshotsAccumulateUpToTheCap) {
     EXPECT_EQ(beyond.error().code, ErrorCode::Conflict);
     EXPECT_EQ(fixture.media.media.size(),
               static_cast<std::size_t>(launcher::domain::MAX_SCREENSHOTS_PER_GAME));
+}
+
+// ---------------------------------------------------------------------------
+// Video
+// ---------------------------------------------------------------------------
+
+TEST(MediaServiceTest, StoresAVideoAndRecordsWhatItIs) {
+    MediaFixture fixture;
+    const auto game = fixture.seedGame();
+
+    const auto uploaded =
+        drogon::sync_wait(fixture.service.upload(publisher(), game.id, video(mp4Body())));
+
+    ASSERT_TRUE(uploaded.ok()) << uploaded.error().detail;
+    EXPECT_EQ(uploaded.value().kind, MediaKind::Video);
+    EXPECT_EQ(uploaded.value().contentType, "video/mp4");
+    // The extension is part of the storage key, and it is what makes the file server answer
+    // with a content type a player will accept.
+    EXPECT_NE(uploaded.value().storageKey.find(".mp4"), std::string::npos);
+    EXPECT_TRUE(fixture.fileExists(uploaded.value().storageKey));
+}
+
+/// The kind and the bytes have to agree, and the kind is what every client switches on to
+/// decide whether to draw something or play it. Migration 0008 refuses the row as well; this
+/// is the refusal that happens before anything is written.
+TEST(MediaServiceTest, RefusesAPictureSentAsAVideo) {
+    MediaFixture fixture;
+    const auto game = fixture.seedGame();
+
+    const auto uploaded =
+        drogon::sync_wait(fixture.service.upload(publisher(), game.id, video(pngBody())));
+
+    ASSERT_FALSE(uploaded.ok());
+    EXPECT_EQ(uploaded.error().code, ErrorCode::InvalidInput);
+    EXPECT_NE(uploaded.error().detail.find("video"), std::string::npos);
+}
+
+TEST(MediaServiceTest, RefusesAVideoSentAsAScreenshot) {
+    MediaFixture fixture;
+    const auto game = fixture.seedGame();
+
+    const auto uploaded =
+        drogon::sync_wait(fixture.service.upload(publisher(), game.id, screenshot(mp4Body())));
+
+    ASSERT_FALSE(uploaded.ok());
+    EXPECT_EQ(uploaded.error().code, ErrorCode::InvalidInput);
+}
+
+TEST(MediaServiceTest, MeasuresAVideoAgainstItsOwnLimit) {
+    MediaFixture fixture;
+    const auto game = fixture.seedGame();
+
+    // Larger than the picture limit and smaller than the video one: refused as a screenshot,
+    // accepted as a video, from the same fixture and the same two thousand bytes.
+    const auto tooBigForAPicture = drogon::sync_wait(
+        fixture.service.upload(publisher(), game.id, screenshot(pngBody(std::string(2000, 'x')))));
+    ASSERT_FALSE(tooBigForAPicture.ok());
+    EXPECT_EQ(tooBigForAPicture.error().code, ErrorCode::InvalidInput);
+
+    const auto accepted =
+        drogon::sync_wait(fixture.service.upload(publisher(), game.id, video(mp4Body("a", 2000))));
+    ASSERT_TRUE(accepted.ok()) << accepted.error().detail;
+
+    const auto tooBig =
+        drogon::sync_wait(fixture.service.upload(publisher(), game.id, video(mp4Body("b", 8000))));
+    ASSERT_FALSE(tooBig.ok());
+    EXPECT_EQ(tooBig.error().code, ErrorCode::InvalidInput);
+    EXPECT_NE(tooBig.error().detail.find("4096"), std::string::npos);
+    // Refused before anything reached the disk: one accepted video and nothing else.
+    EXPECT_EQ(fixture.media.media.size(), 1U);
+}
+
+TEST(MediaServiceTest, VideosAccumulateUpToTheirOwnCapAndLeaveScreenshotsAlone) {
+    MediaFixture fixture;
+    const auto game = fixture.seedGame();
+
+    for (int index = 0; index < launcher::domain::MAX_VIDEOS_PER_GAME; ++index) {
+        const auto uploaded = drogon::sync_wait(
+            fixture.service.upload(publisher(), game.id, video(mp4Body(std::to_string(index)))));
+        ASSERT_TRUE(uploaded.ok()) << uploaded.error().detail;
+    }
+
+    const auto beyond =
+        drogon::sync_wait(fixture.service.upload(publisher(), game.id, video(mp4Body("last"))));
+    ASSERT_FALSE(beyond.ok());
+    EXPECT_EQ(beyond.error().code, ErrorCode::Conflict);
+
+    // The two galleries are counted separately, which is what `countForGame` taking a kind
+    // buys: a game at its video cap can still take a screenshot.
+    const auto still =
+        drogon::sync_wait(fixture.service.upload(publisher(), game.id, screenshot(pngBody("s"))));
+    EXPECT_TRUE(still.ok()) << still.error().detail;
 }
 
 // ---------------------------------------------------------------------------

@@ -8,6 +8,7 @@
 #include "app/HttpError.h"
 #include "app/JsonBody.h"
 #include "controllers/v1/CatalogJson.h"
+#include "domain/ValidationRules.h"
 #include "filters/JwtAuthFilter.h"
 #include "services/AccountService.h"
 
@@ -19,7 +20,7 @@ AccountController::requestErasure(drogon::HttpRequestPtr request,
     const auto body = app::requireJsonObject(request);
 
     services::EraseAccountCommand command;
-    command.password = app::requireString(body, "password");
+    command.password = app::requireString(body, "password", domain::rules::PASSWORD_REQUIRED);
     command.reason = app::optionalString(body, "reason");
 
     const auto erased = co_await app::AppContext::instance().accountService().erase(

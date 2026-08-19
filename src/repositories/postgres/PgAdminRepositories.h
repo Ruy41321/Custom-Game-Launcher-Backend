@@ -29,6 +29,9 @@ class PgAdminUserRepository : public IAdminUserRepository {
     drogon::Task<std::optional<AdminUserSummary>>
     setActive(std::string userId, bool active, domain::NewAuditEntry audit) const override;
 
+    drogon::Task<std::optional<AdminUserSummary>> setTemporaryPassword(
+        std::string userId, std::string passwordHash, domain::NewAuditEntry audit) const override;
+
     drogon::Task<RoleChange>
     grantRole(std::string userId, std::string roleKey, domain::NewAuditEntry audit) const override;
 

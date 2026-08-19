@@ -31,15 +31,21 @@ Json::Value optionalJsonObject(const drogon::HttpRequestPtr& request) {
     return requireJsonObject(request);
 }
 
-std::string requireString(const Json::Value& body, const char* field) {
+std::string requireString(const Json::Value& body, const char* field, const char* rule) {
+    // Absent, of the wrong type and blank are one refusal to whoever is looking at the form:
+    // the box is empty. They stay three sentences in the log and are one rule on the wire.
+    const std::string named = rule == nullptr ? std::string{} : std::string(rule);
+
     if (!body.isMember(field) || !body[field].isString()) {
-        throw ApiException(ErrorCode::InvalidInput,
-                           std::string(field) + " is required and must be a string");
+        throw ApiException(common::Error{ErrorCode::InvalidInput,
+                                         std::string(field) + " is required and must be a string",
+                                         named});
     }
 
     std::string value = body[field].asString();
     if (domain::trim(value).empty()) {
-        throw ApiException(ErrorCode::InvalidInput, std::string(field) + " must not be empty");
+        throw ApiException(common::Error{
+            ErrorCode::InvalidInput, std::string(field) + " must not be empty", named});
     }
     return value;
 }

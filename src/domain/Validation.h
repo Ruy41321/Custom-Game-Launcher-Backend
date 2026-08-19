@@ -9,8 +9,9 @@ namespace launcher::domain {
 
 /// Minimum password length. Length is the only composition rule enforced: mandatory
 /// symbol/digit classes measurably push users towards predictable substitutions without
-/// buying entropy, so this follows the NIST 800-63B guidance of a long minimum instead.
-inline constexpr std::size_t MIN_PASSWORD_LENGTH = 12;
+/// buying entropy, so this follows NIST 800-63B, which puts the floor for a secret the
+/// user chooses at eight characters and asks for no character classes at all.
+inline constexpr std::size_t MIN_PASSWORD_LENGTH = 8;
 
 /// Upper bound so a multi-megabyte "password" cannot be turned into an Argon2id
 /// denial-of-service.

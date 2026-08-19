@@ -1,5 +1,7 @@
 #include "services/MediaService.h"
 
+#include <optional>
+#include <string>
 #include <utility>
 
 #include "domain/Catalog.h"
@@ -60,13 +62,18 @@ MediaService::upload(Actor actor, std::string gameId, UploadMediaCommand command
         co_return Uploaded::failure(ErrorCode::Forbidden, NOT_YOURS);
     }
 
+    // Which of the two budgets, which sniffer and which gallery cap apply is one question with
+    // one answer, asked once here rather than three times below.
+    const bool video = domain::isVideoKind(command.kind);
+
     if (command.bytes.empty()) {
         co_return Uploaded::failure(ErrorCode::InvalidInput, "the request body is empty");
     }
-    if (static_cast<int64_t>(command.bytes.size()) > limits_.maxBytes) {
+    const auto limit = video ? limits_.maxVideoBytes : limits_.maxBytes;
+    if (static_cast<int64_t>(command.bytes.size()) > limit) {
         co_return Uploaded::failure(ErrorCode::InvalidInput,
-                                    "an image must be at most " + std::to_string(limits_.maxBytes) +
-                                        " bytes");
+                                    std::string(video ? "a video" : "an image") +
+                                        " must be at most " + std::to_string(limit) + " bytes");
     }
     if (auto check = domain::validateAltText(command.altText); !check.ok()) {
         co_return Uploaded::failure(check.error());
@@ -74,21 +81,36 @@ MediaService::upload(Actor actor, std::string gameId, UploadMediaCommand command
 
     // What the bytes are, not what the request said they are. This value becomes the
     // Content-Type of a public URL, so it is decided here and nowhere else.
-    const auto format = domain::sniffImageFormat(command.bytes);
+    //
+    // A video is sniffed by the kind the caller asked for rather than by trying both sniffers:
+    // a picture posted as `kind=video` has to be refused, because the kind is what every client
+    // switches on to decide whether to draw it or play it, and a row whose two halves disagree
+    // is one the database now refuses to hold anyway (migration 0008).
+    std::optional<domain::StoredFormat> format;
+    if (video) {
+        if (const auto sniffed = domain::sniffVideoFormat(command.bytes); sniffed.has_value()) {
+            format = domain::storedFormatOf(*sniffed);
+        }
+    } else {
+        if (const auto sniffed = domain::sniffImageFormat(command.bytes); sniffed.has_value()) {
+            format = domain::storedFormatOf(*sniffed);
+        }
+    }
     if (!format.has_value()) {
         co_return Uploaded::failure(ErrorCode::InvalidInput,
-                                    "the body is not a PNG, JPEG or WebP image");
+                                    video ? "the body is not an MP4 or WebM video"
+                                          : "the body is not a PNG, JPEG or WebP image");
     }
 
     // Counted before anything is written: a refusal that arrives after the file is on disk
     // leaves a blob nothing references.
     if (!domain::isSingletonKind(command.kind)) {
+        const auto cap = video ? domain::MAX_VIDEOS_PER_GAME : domain::MAX_SCREENSHOTS_PER_GAME;
         const auto existing = co_await media_.countForGame(game->id, command.kind);
-        if (existing >= domain::MAX_SCREENSHOTS_PER_GAME) {
+        if (existing >= cap) {
             co_return Uploaded::failure(ErrorCode::Conflict,
-                                        "a game may have at most " +
-                                            std::to_string(domain::MAX_SCREENSHOTS_PER_GAME) +
-                                            " screenshots");
+                                        "a game may have at most " + std::to_string(cap) +
+                                            (video ? " videos" : " screenshots"));
         }
     }
 
@@ -102,7 +124,7 @@ MediaService::upload(Actor actor, std::string gameId, UploadMediaCommand command
     row.kind = command.kind;
     row.storageKey = std::move(stored).value();
     row.sha256 = row.storageKey.substr(6, 64);
-    row.contentType = domain::contentTypeOf(*format);
+    row.contentType = format->contentType;
     row.sizeBytes = static_cast<int64_t>(command.bytes.size());
     row.altText = command.altText;
     row.sortOrder = command.sortOrder;

@@ -171,6 +171,11 @@ layout accepts it later as an additional blob kind, with no schema change.
 | D57 | **The signature covers a canonical release *document*, never the artifact, and a document that is not byte-for-byte canonical is refused at publish time** | A signature over the bytes of a zip says only that somebody with the key once produced that zip — nothing about which version, channel or platform it is. An attacker holding the database could then serve a genuine, genuinely signed artifact as something it is not: last year's build as the newest, or the Linux build to a Windows launcher. One document binding all of it together makes that impossible; it is D18's reasoning about what a hash covers, applied to what a key covers. The round-trip check in `parseReleaseDocument` — parse, re-serialise, compare with the input — is the load-bearing half: without it the row would store bytes whose meaning had only partly been captured (an extra key, a reordering, a trailing newline from a text editor) while the columns derived from that parse described something subtly different. The escaper moved to `domain/CanonicalJson.h` because two documents whose hashes depend on identical output must not be able to drift apart. | Signing the artifact (a real signed file served as a different release); storing a re-serialised document (the bytes a client verifies stop being the bytes that were signed); accepting any equivalent JSON (the stored document and the columns beside it come to mean two different things) |
 | D58 | **ECDSA over P-256 with SHA-256, pinned rather than read out of the configured key** | Ed25519 is the better modern choice and was rejected for a reason that lives entirely on the *client* side: libsodium is already linked here so it would cost this repository nothing, but .NET 9 has no Ed25519 in its base class library, so the launcher would carry either a native binding across four self-contained runtime identifiers or a managed crypto library — in a client whose maintainers refused a dependency over thirty lines of test code (its D11). P-256 costs zero new dependencies on either side: OpenSSL is already here for the `secure_link` digests, and `System.Security.Cryptography.ECDsa` is in the client's runtime. ECDSA's two known weaknesses do not reach this use — nonce quality is a property of *signing*, which happens on somebody's own machine a few times a year, and malleability matters when a signature is an identifier, which this one never is. Pinning matters as much: an algorithm taken from the key would let a deployment configure an RSA key this server verifies happily and the client cannot read at all, so anything but a P-256 key is a start-up refusal naming the variable. | Ed25519 (a native crypto dependency in four client RIDs, or a managed one, for a repository that counts them); RSA (larger signatures for no gain); reading the algorithm from the key (a launcher that stops updating for a reason nothing reports) |
 | D59 | **A release is published from the command line against a document signed on another machine, and this server holds no private key at all** | The authority that fits is shell access, as it is for `--grant-role` (D38) — but here the consequence is the feature rather than a convenience: **somebody who takes this server, its database and its disks can stop launchers from updating and cannot make them update to anything.** No other surface in this repository survives a full compromise, and this is the one where it matters, because an automatic update is code a machine runs without anybody looking at it. Two more things fall out: the artifact never has to fit an HTTP body limit, and `ILauncherReleaseRepository` has no write method, so the serving path cannot create a release. The signature is re-checked on the way *out* as well, which turns a row edited in the database into one log line naming the release instead of a fleet quietly failing to verify. Withdrawing is `retired_at`, not a rollback: the previous release becomes newest and every client declines it for not being strictly newer, so **standing still is the intended outcome** — rolling a fleet backwards is a bigger action than the one asked for. | An endpoint (the private key would have to reach this machine, or a stolen token could publish); the server generating the key (a compromise becomes a signing oracle); a CI secret (a workflow file can print it); rolling clients back on a retire (a larger action than withdrawing, taken on somebody's behalf) |
+| D60 | **A refusal may name the *rule* that refused, beside the category that already named its kind — and only for a field a person types** | `code` says what kind of refusal happened, which is enough to decide whether retrying could help and nothing like enough to tell somebody what to do. Every rejected form shares `invalid_input`, so the only thing separating "your password is too short" from "that is not an email address" was `detail` — English prose, written for whoever reads the logs. A client had two options and both were bad: show the English, or match on it, which makes rewording a message a breaking change and puts the wording of every refusal under a compatibility freeze. `Error` therefore carries an optional `rule` from `domain/ValidationRules.h`, plus `ruleArgs` for the values its sentence needs — the limit, almost always, because a translated message that cannot say *twelve* characters is only half an answer. Three things make it a contract rather than a field: the names are **frozen** while `detail` stays free; there is **one rule per corrective action**, so six malformed-address branches are one `email_invalid` and a limit is its own rule; and both keys are **omitted rather than empty**, so a server too old to send one and a refusal that names none read identically and adding a rule needs no coordinated release. The scope is the load-bearing part: manifest paths, blob hashes, upload offsets, crash reports and release documents are values a *client* computed, so a refusal there is that client's bug and stays unnamed — translating it would dress up a bug as somebody's mistake. | Matching on `detail` (rewording becomes a breaking change); a field name plus a generic rule (`{0} is too long` composes badly in languages with agreement, and the field name is English); a rule per branch (six sentences for one thing to do); a `422` body listing per-field errors (a second envelope shape, for forms that submit one field's worth of mistake at a time); putting the limits in `/capabilities` instead of the refusal (a second round trip, and the client would have to know which limit each rule meant) |
+| D61 | **A version is a PATCH like a game, publishing is idempotent, withdrawing is allowed — and a build carries a name it is not identified by** | Two halves of one gap the maintainer walked into. A version created without `publish: true` **could not be published by any route**: `GameController` had POST and DELETE on a version and nothing between them, so the only way past a box left unticked was to delete the version, its builds and its uploads and do the whole thing again. What makes that worth a decision row rather than a bug fix is where the ability already was — `IGameVersionRepository::publish` had existed since migration 0001 and **nothing had ever called it**, so the fix was to notice, not to build. It is now `update`, a partial update in the shape `GameUpdate` already had, because a version whose stage or notes are wrong is the same dead end wearing different clothes; three states for `published` rather than two is the load-bearing part, since a PATCH carrying only new notes must not withdraw a release. Publishing twice keeps the original `published_at`: *when* a release went out is not something a second press of a button may move. Withdrawing is offered because it is the reversible thing standing next to a DELETE that is not, and its cost is written down rather than discovered. The **name** answers the other half: `builds` is unique on (version, platform, architecture), which is precisely the identity a publisher looking at four rows of "windows x64 ready" cannot use — what tells them apart is which directory each came out of, and nothing stored here can derive that. It is deliberately **not unique**, because the same "Nightly" belongs on the Windows and the Linux build of one version, and empty stays valid, because every build published before migration 0006 has no name and never will. | Publishing as its own verb (`POST /versions/{id}/publish` — a second write path onto one column, and stage and notes stay unreachable); a full PUT (a client that omitted a field would blank it, which is how a fixed typo silently withdraws a release); refusing to withdraw (leaves DELETE as the only way to un-publish a mistake, which takes the builds too); `published_at` moved on every publish (the release date becomes whenever somebody last pressed the button); a unique name per version (the natural label for a cross-platform pair is the same on both); naming builds by generating one (a label nobody chose is a label nobody reads) |
+| D62 | **A build is readable only when its game is out *and* its version is published — and an unreadable *source* costs a full download rather than a refusal** | `mayReadBuild` asked one of the two questions. `BuildOwnership` carried the game's visibility and the build's status and nothing at all about the version, so on a `public` game a version created and never published — the ordinary state of a build being tested before release — handed its builds to anybody who could name one. `CatalogService::gameDetail` had been filtering those versions out of the listing since M4, which is what made it invisible: the id was not *advertised*, and every id in this system is a UUID somebody may still have from before a withdrawal. The struct now carries `versionPublished`, defaulting to **false** so a query that forgets to select it refuses instead of admitting, and the one repository query that fills it selects `(published_at IS NOT NULL)`. It stays a 404 for the reason D41 gives: "there is an unreleased 2.0" is exactly what a refusal must not say. The second half is the case the fix would otherwise have broken. A player who installed a version that was later withdrawn still has it on disk, and `fromBuildId` is a claim about *that disk* — nothing about the source reaches the plan except which bytes may be skipped — so an unreadable source now yields a full download of the target instead of a refusal. Refusing would mean the withdrawal took away not just the old version but the ability to leave it. | Checking the version inside each service (D26's argument again: two copies of one authorization rule); a second repository call from the services to ask about the version (a round trip per check, and a rule that lives in the caller); `versionPublished` defaulting to true (a future query that forgets the column opens the hole again, silently); 403 for an unpublished version (confirms it exists); refusing an unreadable source (a withdrawn version becomes a player who cannot update at all); ignoring *any* absent source id (hides a client bug — a source that simply does not exist is still a 404) |
+| D63 | **A deployment that cannot send mail says so in `/capabilities`, and the way back in is a one-time password an operator hands over — enforced by a flag the access token carries** | `mail.transport = none` already refused the routes that send with a 404 (D55), which left two holes. The client could only *infer* the deployment's nature by pressing a button and reading the failure, so `/capabilities` now carries `mail.enabled` — D40's argument exactly: a limit, or a switch, that a client has to guess is one that breaks the moment somebody reconfigures the deployment. And somebody who forgot their password had no route back at all, because every route back was a link in an inbox. So an operator sets a password on the loopback surface, the server generates it rather than the operator choosing one — 75 bits from an alphabet with `l`, `1`, `o` and `0` removed, because it is read out loud — and it exists **only in the response**, never stored, logged or recoverable. What makes it one-time is `users.password_change_required`, raised by the same statement that stores the hash and revokes the account's sessions and reset links (D36), and honoured by `JwtAuthFilter`, which refuses every route but `POST /api/v1/me/password`. The claim rides **in the token** rather than being read per request: a database round trip on every authenticated call, to catch a state almost no account is ever in, is the cost the permissions already declined to pay — and the price is the same one they pay, a flag as stale as a 15-minute access token, which is why the operator route revokes the refresh tokens rather than pretending it can revoke the access tokens. **An operator cannot do this to their own account**: the console has no password-change route, so they would lock themselves out of the surface they administer. The refusal is its own category, `password_change_required`, and not a `Forbidden` a client would have to tell apart by its prose — there is exactly one thing to do about it, and the category is what says so. | Leaving the client to infer it from a 404 (an offer whose only outcome is a failure, on the one screen somebody is already stuck on); an operator-chosen password (`hunter2`, on a route whose whole purpose is a credential somebody else will hold for a few minutes); mailing it (there is no mail — that is the premise); storing it or putting it in the audit metadata (a credential that outlives the minute it exists for); reading the flag from the database in the filter (a round trip per request for a state almost nobody is in); a `Forbidden` with a distinguishing `detail` (matching on prose, which D60 exists to end); letting an operator set their own (a lockout with no endpoint left to escape it); a table of pending changes instead of a column (an expiry, a cancellation and two places that can disagree, for a property the account simply has) |
+| D64 | **A video is a fifth kind of game media, identified by its container and its brand, measured against a limit of its own, and stored on the same public root the pictures are** | The maintainer asked for a trailer on a game's page and settled both open questions on 2026-08-17: **uploaded files, not external links**, and playback inside the launcher. Uploaded is the half this repository owes, and every part of it falls out of what artwork already decided. It rides on the **media root** (D27) rather than a fourth one, because what makes that root safe is that it is not the *blob* root — one more extension does not touch that, while a trailer is public in exactly the sense a cover is and signing it would mean a URL expiring in the middle of playback. What it is, is decided by the **bytes** (D28), and here that means more than a signature: the ISO base media `ftyp` box says nothing on its own, since HEIC and AVIF are ISO base media files too, so the **major brand** is checked against a list and QuickTime is deliberately not on it. WebM and Matroska share the EBML magic, so the **DocType** inside the header is what separates them — read from the first 64 bytes and nowhere else, because a file that says "webm" a megabyte in is telling you about an attacker's choice of bytes. And the sniff is honest about its reach: it answers *which container this is*, never *whether this plays*, which is the only thing a server deciding a public `Content-Type` needs to answer. The **limit is its own number** (`media.maxVideoBytes`, 64 MiB) and its own **cap** (`MAX_VIDEOS_PER_GAME`, 3, against the gallery's 12) because the two are different orders of magnitude — three videos are 192 MiB where twelve screenshots are 60 — and a deployment raising one has no reason to be made to raise the other. It is also the number that now sets the largest body this server accepts at all, which is the sharp end: Drogon refuses an oversized body itself, before any handler runs, with a **bare 413 carrying no RFC 7807 envelope** — measured, not assumed — so a video the framework rejects is a refusal no client can explain, which is why the limit is published in `/capabilities` for the launcher to enforce first. | A fourth storage root for video (a root's safety comes from what is *not* under it, and this changes nothing about that); accepting the `ftyp` box without its brand (files an HEIC as `video/mp4`); accepting Matroska and QuickTime (playable somewhere, not everywhere, over bytes uploaded once and downloaded by everyone); searching the whole body for the DocType (a container's identity read from bytes an uploader chose the position of); one `maxBytes` for both (a picture limit a trailer is refused by, or a picture limit large enough to be a video one); one `MAX_SCREENSHOTS_PER_GAME` for both galleries (twelve videos is a channel); a resumable upload for video (the whole upload-session protocol for one file that fits in a request); trusting the declared `Content-Type` (D28, and this time the type would be a public URL's *and* a player's instruction) |
 
 ---
 
@@ -220,8 +225,13 @@ Everything — identifiers, comments, docs, commit messages — is in **English*
   RFC 7807-style envelope — **controllers never format an error response by hand**:
   ```json
   { "type": "about:blank", "title": "Validation failed", "status": 422,
-    "detail": "email is not a valid address", "requestId": "01H..." }
+    "code": "invalid_input", "rule": "password_too_short", "ruleArgs": ["8"],
+    "detail": "password must be at least 8 characters", "requestId": "01H..." }
   ```
+  `rule` and `ruleArgs` are optional and appear only for a refusal about a field somebody
+  types. The names live in `domain/ValidationRules.h` and are **frozen**; `detail` is prose
+  for the log and stays free to be reworded. Adding a rule to a validator means adding its
+  name there and its sentence to the client's three `.resx` files — see D60.
 - **Comments** are sparing and explain *why*, never *what*. Self-explanatory code gets none.
 - **SQL** lives only in `repositories/`, always parameterized — never string-concatenated.
 - **Config and secrets:** every secret arrives via an environment variable. Nothing sensitive
@@ -419,6 +429,15 @@ curl -s http://localhost:8080/api/v1/health
 | **`sh` in the toolchain image has no process substitution** | It is BusyBox, not bash, so `openssl dgst -verify <(openssl pkey ...)` fails with `Syntax error: "(" unexpected` — which reads like a broken openssl invocation. Write the intermediate to a file. Worth knowing because verifying a release signature by hand is the one check that has no automated equivalent against the running stack |
 | **A signed document must not have a trailing newline** | `openssl dgst -sign` signs whatever bytes it is given, so a `release.json` saved by a text editor is signed correctly *and* refused by `--publish-release`, because it is not the canonical form. The refusal prints the exact expected bytes; use `printf`, never `echo`, to write one |
 | **`docker compose cp` and `exec` both need `MSYS_NO_PATHCONV=1` from Git Bash** | Already recorded for `exec`; `cp` has it too, and publishing a release uses three of them in a row. PowerShell is unaffected, which is what the release commands in §7 assume |
+| **`src/auth/ui/password-reset.html` is a second copy of `MIN_PASSWORD_LENGTH`, and nothing tests it** | The page is embedded in the binary and `/capabilities` does not publish the limit, so the bound is a JavaScript constant. Changing the C++ one alone leaves the page refusing what the API accepts — a refusal that never reaches the server, so no integration test can see it, and `AuthPageEndpointTest` only asserts the page is served. It is now one `MIN_PASSWORD_LENGTH` at the top of the script that the two `minLength` attributes, the hint and the check all read; keep it that way and change it in the same commit as the constant |
+| **Changing a validation constant needs the API image rebuilt, not just the suite re-run** | `./scripts/dev.ps1 -Rebuild`. A running stack keeps enforcing the old bound, and the first thing that looks wrong is the *client*, which is showing exactly what the server told it — it cost a round trip on the 12→8 change |
+| **`JwtTokenServiceTest.RejectsAnExpiredToken` is a wall-clock race and it does flake** | It mints a token with a one-second lifetime and sleeps 1500 ms. On a loaded machine — the whole suite running in a container while a client build runs on the host — the sleep can be served late enough that the assertions before it have already moved past, and it failed once on 2026-08-18 and passed on the next two runs with nothing changed. Re-run before believing it. Fixing it properly means an injectable clock in `JwtTokenService`, which jwt-cpp's `verify` does not take, so it has been left as a known flake rather than papered over with a longer sleep |
+| **`tests/CMakeLists.txt` lists every test source by hand, so a new file that is not added runs zero tests and fails nothing** | A new `MediaVideoDomainTest.cpp` built, formatted and passed the suite — because it was never compiled. The suite went green with ten tests that did not exist, and the only visible sign was a total ten lower than it should have been. It also hid a **compile error** the file contained. Either add the file to the executable's source list in the same commit, or put the tests in the existing file for that module, which is what happened here. When a suite total does not move by as much as you added, that is the reason |
+| **A hex escape in a C++ string literal is greedy: `"\x20ftyp"` is one character, not five** | `\x` consumes every hex digit that follows, so `20f` overflows and the compiler says "hex escape sequence out of range" — an error only because `-Werror` is on, and a silently wrong string otherwise. Split the literal (`"\x20" "ftyp"`) or use an octal escape. The same trap in a different costume as the control-character row below: the bytes a test compares against are not always the bytes you typed |
+| **A CHECK constraint on the storage key spelled the extension `[a-z]{3,4}`, and "mp4" has a digit in it** | Migration 0003 wrote that regex when the only extensions were `png`, `jpg` and `webp`, and it was right about all three. The first video upload came back **500** with `game_media_storage_key_shape` in the log — a constraint violation reported as an internal error, because a check nothing can reach from outside is not a validation failure. Migration 0008 widens it to `[a-z0-9]{3,4}`. Worth keeping in mind for the next format: the constraint is not what decides which formats exist — `domain::extensionOf` is — so it will silently be the last thing anybody thinks to change |
+| **`ALTER TYPE … ADD VALUE` runs inside a transaction on PostgreSQL 12+, but the value it adds cannot be *used* until that transaction commits** | And `MigrationRunner` wraps every migration file in one, so a single file that adds an enum value and then writes an index predicate, a constraint or a row mentioning it fails with "unsafe use of new value". Migration 0008 therefore names only the four kinds that already existed — which is why its partial unique index became an allow-list (`kind IN ('cover','banner','logo')`) rather than the deny-list it was. Verified against the real development database, not only the throwaway one: the migration applied to a database that already had seven, which is the case a deployment actually meets |
+| **Drogon refuses an oversized body itself, with a bare 413 and no envelope — and a body that spills to disk is still readable** | Both measured against the running stack on 2026-08-18, because the video limit depends on both. A 20 MiB POST against a 16 MiB `client_max_body_size` returns `413` with an **empty body**: no `code`, no `detail`, no request id, nothing a launcher can turn into a sentence — which is the whole argument for publishing `media.maxVideoBytes` in `/capabilities` so the client refuses first. And a 10 MiB body under an 8 MiB `client_max_memory_body_size` reached the handler with its length intact, so `request->getBody()` reads back through the framework's cache file: uploading a 60 MiB video works and does not hold 60 MiB of request in RAM |
+| **`docker run` from Git Bash rewrites a container path unless `MSYS_NO_PATHCONV=1` is set** | `-w /work` becomes `-w C:/Program Files/Git/work` and the daemon refuses it as "not an absolute path", which reads like a Docker bug. `MSYS_NO_PATHCONV=1 docker run … -w //work` works, and the doubled slash is the other half of the same trick. Worth knowing because `scripts/test.ps1` swallows the compiler's output when it fails, so driving the toolchain image by hand is how a build error actually gets read |
 
 ---
 
@@ -844,15 +863,219 @@ document with a trailing newline, an artifact that is not the one the document n
 edited directly in the database — which the server refuses to serve, with one log line naming
 the release, rather than letting every client reject it.
 
-### Next up
+### Validation rules a client can translate — 2026-08-17
 
-- ⬜ **Self-update, the client half.** Two pieces left, in the launcher repository: the update
-  check (verify the signature over the bytes as they arrived, refuse anything not strictly
-  newer, refuse bytes off-hash, and never let a failed check stop the launcher from starting),
-  and the swap in `GameLauncher.Updater`, which still moves no files. The contract it codes
-  against is in [Documentation/launcher-releases.md](Documentation/launcher-releases.md), whose
-  last section lists the five rules the client has to hold for any of this to be worth
-  anything.
+The first of the maintainer's nine remaining notes (`ClaudeContent/appunti.txt`, outside version
+control): registering with a short password read *"Some of what you entered was not accepted
+(reference 7fd59c6d…)"*, because every `invalid_input` was one sentence and the reference was
+appended to it. The server always knew which rule refused; it just had no way to say so that a
+client could act on. D60 has the reasoning.
+
+- ✅ `Error` carries an optional `rule` and `ruleArgs`, and `makeErrorResponse` writes them when
+  there are any — **omitted, never empty**, so a server too old to send one reads the same as a
+  refusal that names none
+- ✅ `src/domain/ValidationRules.h`, 29 frozen names covering every field a person types into
+  the launcher: the account fields, a game's title, summary, description, slug and release date,
+  a version and its release notes, a devlog entry, and artwork alt text
+- ✅ The required-field refusals name a rule too, which is where this nearly stopped one field
+  short. `requireString` runs *before* the domain validator, so a blank password was refused by
+  the body reader and was the one 422 on the registration form with no rule on it — **found by
+  driving the running server, not by reading the code**. Absent, wrong type and blank are one
+  rule, because to whoever is looking at the form they are one thing
+- ✅ Deliberately unnamed: manifest paths, blob hashes, upload offsets, crash reports, release
+  documents and admin console fields. A refusal there is a client's bug, not a person's mistake
+- ✅ 739/739 tests green (497 unit, 242 integration), `clang-format` clean
+
+**Verified by hand against the running stack** with the client's own dependency-injection graph
+driving real registrations: **7 of 7**, each printing the sentence in English, Italian and
+French. The note's exact case now reads *"La password deve contenere almeno 8 caratteri."*, and
+a failure that is **not** a validation failure still carries its reference, which was the other
+half of the ask.
+
+### Publishing a version afterwards, and naming a build — 2026-08-17
+
+The maintainer's notes 13 and 18. D61 has the reasoning; the shape is in
+[Documentation/catalog.md](Documentation/catalog.md) §PATCH semantics.
+
+- ✅ `PATCH /api/v1/games/{id}/versions/{versionId}` — stage, release notes and `published`,
+  with absent meaning "leave alone". **A version created without "publish now" could not be
+  published by any route**, which is the thing the maintainer went looking for and did not find
+- ✅ `IGameVersionRepository::publish` is gone, replaced by `update`. It had been there since
+  migration 0001 and **nothing had ever called it**: the ability was in the repository the whole
+  time and no route reached it
+- ✅ Publishing twice keeps the original `published_at`; withdrawing sets it back to NULL and its
+  cost is written down rather than left to be discovered
+- ✅ Migration **0006** adds `builds.name`, 100 characters, not unique, empty by default —
+  because a build's identity is (version, platform, architecture), which is exactly what a
+  publisher looking at four identical rows cannot use
+- ✅ 752/752 tests green (505 unit, 247 integration), `clang-format` clean
+
+**Verified against the running stack** with the client's dependency-injection graph driving a
+real publisher session: **15 of 15**. Migration 0006 applied to the *existing* development
+database rather than a fresh one, which is the case that actually happens on a deployment.
+
+#### The minimum password length is 8 — 2026-08-17
+
+The maintainer's call, and the constant was the smallest part of it. `MIN_PASSWORD_LENGTH` is
+now 8, which is where NIST 800-63B actually puts the floor for a secret somebody chooses; the
+comment above it used to argue for "a long minimum", which would have sat there contradicting
+the number.
+
+- ✅ `domain::MIN_PASSWORD_LENGTH` 12 → 8, and `Documentation/authentication.md`,
+  `Documentation/architecture.md` and the envelope example in §6 brought with it
+- ✅ **`src/auth/ui/password-reset.html` was a second copy of the rule that nothing tests** —
+  `minlength="12"` twice and one hand-written English sentence. Left alone it would have gone on
+  refusing 8-to-11 characters that the API accepts, entirely client-side, where no integration
+  test can see it. It is now one JavaScript constant the two `minLength` attributes, the hint and
+  the check all read, with a comment saying what it shadows; §8 carries the row
+- ✅ **Existing accounts are untouched.** Lowering a minimum invalidates nothing: `validatePassword`
+  only ever runs on a plaintext password arriving on a request, never against a stored hash
+- ✅ One integration assertion was pinned to the literal `"12"` and now reads the constant. The
+  `"12"` left in `ErrorTest` and `ValidationRulesTest` is a hand-built envelope asserting on
+  serialisation, and stays
+- ✅ 752/752 tests green (505 unit, 247 integration), `clang-format` clean
+
+**Verified against the running stack** after `./scripts/dev.ps1 -Rebuild`, which is the step that
+is easy to skip: 7 characters refused with `rule: password_too_short` and `ruleArgs: ["8"]`, 8
+accepted with a 201, blank still refused by the body reader. And the reset page **opened in a
+browser**, since it is the half no test reaches: it reads "At least 8 characters", refuses 7
+locally, and lets 8 through to the server.
+
+### A build under an unpublished version was downloadable — 2026-08-17
+
+Found by the maintainer testing the launcher, and more serious than it sounds: a version
+created and never published was reachable by anybody who could name one of its builds, on any
+game that was not itself a draft. D62 has the reasoning; the shape is in
+[Documentation/downloads-and-deltas.md](Documentation/downloads-and-deltas.md) §Endpoints.
+
+- ✅ `BuildOwnership::versionPublished`, defaulting to **false**, and the single query that
+  fills it — `PgBuildRepository::findOwnership` — selecting `(v.published_at IS NOT NULL)`
+- ✅ `domain::mayReadBuild` requires both halves. Every route that asks it inherits the fix:
+  the download plan, `verify`, the manifest, and `deleteBuild`. Uploading is unaffected, since
+  a build is uploaded to a version precisely *before* it is published
+- ✅ **404, never 403**, consistent with the rest of the catalog: a refusal must not confirm
+  there is an unreleased version
+- ✅ An unreadable **source** in a delta plan now costs a full download instead of a refusal,
+  which is the case the fix would otherwise have broken — a player who installed a version that
+  was later withdrawn
+- ✅ Denial tests on every route that asks, a unit test on `mayReadBuild` itself where the rule
+  lives, and one integration test that publishes the version afterwards to show the flag is
+  what was gating it. All of them **fail against the old rule**, checked by reverting it
+- ✅ 762/762 tests green (513 unit, 249 integration), `clang-format` clean
+
+### Every write route of a game, tried by somebody who does not own it — 2026-08-18
+
+No behaviour changed here, and that is the finding. The maintainer saw one account's dashboard
+still showing the previous account's game (the client's D70) and asked, reasonably, that the
+*server* be what stops the buttons on it from working. That was already true by reading —
+`mayEditGame` is `owns || managesAnyGame()`, and `dev` has no `admin.games.manage` — but
+reading is what missed D62 for two milestones, so it was **driven** instead.
+
+- ✅ Two publishers against the running stack, sixteen write routes tried from the account that
+  owns none of them: the game (patch, delete), its versions (create, patch, delete), its builds
+  (create, missing blobs, begin upload, finalize, delete), its artwork (upload, patch, delete)
+  and its devlog (create, patch, delete). **All sixteen refused**, and the victim's game came
+  out of it with its title, version, build, picture and devlog entry unchanged
+- ✅ The codes are the two the catalog is supposed to use: **403** where the intruder can see
+  the game and is refused by `mayEditGame` (D30), **404** for anything reached through a build
+  id, whose existence is not confirmed (D26)
+- ✅ **Nine of those refusals had no test.** Creating a version and creating a build
+  (`CatalogEndpointTest`), the three artwork routes (`MediaEndpointTest`), writing and removing
+  a devlog entry (`PatchNoteEndpointTest`), and asking which blobs are missing and finalizing a
+  manifest (`UploadEndpointTest`). §9.5 asks for exactly these
+- ✅ The tests use a **public** game on purpose: on a draft the intruder cannot see the game at
+  all and every answer is 404 through `mayViewGame`, which proves nothing about ownership
+- ✅ What was already covered, found while writing these: editing a game, patching a version,
+  beginning an upload, editing a note, and the three deletes — the last three in
+  `RetentionEndpointTest`, which is where a delete belongs, so no copy was added
+- ✅ 771/771 tests green (513 unit, 258 integration), `clang-format` clean
+
+### Mail as an option, and the way back in without it — 2026-08-18
+
+The maintainer's note 14, and the last of the eight findings but one. Most of the server half
+already existed — `mail.transport = none`, `DisabledMailSender`, and the filter that answers 404
+on the routes that send (D55) — and what it left was a deployment nobody could get back into.
+D63 has the reasoning.
+
+- ✅ **`/capabilities` declares it**: `mail.enabled`, so the launcher hides "forgotten your
+  password?" instead of offering a button whose only outcome is a 404. D40's argument on a
+  switch rather than a limit
+- ✅ **`POST /admin/api/users/{id}/temporary-password`** on the loopback surface. The server
+  generates the password — 15 symbols over a 32-character alphabet with `l`, `1`, `o` and `0`
+  removed, because somebody reads it out — and it appears **only in the response**: the hash is
+  what is stored, and the audit entry records that it happened and to whom, never what it was.
+  One statement raises the flag, stores the hash, revokes the account's sessions and burns its
+  outstanding reset links, with the audit arm inside it (D36)
+- ✅ **`users.password_change_required`**, migration **0007**, and `JwtAuthFilter` honouring it:
+  a flagged session reaches `POST /api/v1/me/password` and nothing else, at no database round
+  trip, because the claim rides in the token. `password_change_required` is its own error
+  category, so a client branches on the code rather than on English prose
+- ✅ **`POST /api/v1/me/password`**, which is also the ordinary way to change a password. It
+  re-asks for the current one (D44), refuses a new one equal to the old — the rule that makes a
+  one-time password one-time, and the 30th name in `ValidationRules.h` — revokes every other
+  session, and answers with a **whole session**, because a 204 would leave the caller holding a
+  refresh token the same request had just revoked
+- ✅ **An operator cannot do this to their own account.** The console has no password-change
+  route, so they would lock themselves out of the surface they administer; refused with the
+  same shape as the deactivation rule
+- ✅ The denial path is covered for each piece (§9.5): a non-operator, the public listener, an
+  account that does not exist, a malformed id, and the operator's own account
+- ✅ **802/802 tests green** (531 unit, 271 integration), `clang-format` clean
+
+**Driven against the running stack**, not only asserted. `MAIL_TRANSPORT=none` and a restart:
+`/capabilities` answered `"mail":{"enabled":false}` and the reset route answered 404. An operator
+on `:9090` issued `w5txe-gmzg9-neb6p` for a victim account — the same route answered **404 on
+`:8080`** — the victim's refresh token died at once, the old password stopped signing in, the
+temporary one signed in with `passwordChangeRequired: true`, and `/library`, `/auth/me`, `/games`
+and `/me/games` all answered **403 `password_change_required`**. Re-entering the temporary
+password was refused with `rule: password_unchanged`; a wrong current password was 401; choosing
+one returned a session with the flag cleared and every route answered again.
+
+**One thing worth knowing and not fixed**: the account's **access token stays valid for its
+remaining minutes** after an operator sets a temporary password. The refresh token is revoked
+immediately, so the session cannot be renewed, but a token already in somebody's hands keeps
+working for up to fifteen minutes. That is the same staleness the permissions have carried since
+M3 and that the erasure documents about itself — the price of authorizing with no database round
+trip — and it is stated here rather than left to be discovered.
+
+### Videos as uploaded files — 2026-08-18
+
+The maintainer's note 11, and the last of the eight findings. The reasoning is **D64**; the
+contract is in [Documentation/artwork-and-devlog.md](Documentation/artwork-and-devlog.md).
+
+- ✅ **Migration 0008** adds `video` to `game_media_kind`, widens the content-type allow-list to
+  `video/mp4` and `video/webm`, turns the singleton unique index into an allow-list of the three
+  kinds that *are* singular, widens the storage-key shape to admit a digit in an extension, and
+  adds a constraint pairing kind with content type so no route can store a PNG as a video
+- ✅ **`domain::sniffVideoFormat`**: the ISO base media brand, not just the `ftyp` box, and the
+  EBML DocType read from the first 64 bytes so Matroska is refused where WebM is not
+- ✅ **`media.maxVideoBytes` (64 MiB) and `MAX_VIDEOS_PER_GAME` (3)**, both published by
+  `/capabilities` beside `media.videoContentTypes`, and the first of them folded into
+  `configureBodyLimits` — a video arrives whole in one POST, so it is now the number that sets
+  the largest body this server accepts
+- ✅ The file server routes `mp4` and `webm` on the media location and bounds `max_ranges`,
+  because seeking in a video is a Range request
+- ✅ **20 new tests** — ten on the sniffer and the kinds, five on the service's two budgets and
+  two caps, one on the capabilities document, four end to end. Backend **822/822** (547 unit,
+  275 integration)
+
+**Driven against the running stack, not asserted.** Migration 0008 applied to the **existing**
+development database (seven already there, one applied), which is the case a deployment meets. A
+real `ffmpeg`-produced MP4 and WebM uploaded 201 and came back from nginx as `video/mp4` and
+`video/webm` with `Accept-Ranges: bytes`, and a byte range answered **206**. An `.mkv` was
+refused with "the body is not an MP4 or WebM video", the MP4 posted as a screenshot with "the
+body is not a PNG, JPEG or WebP image", the fourth video on one game with **409**, and a 70 MiB
+one with Drogon's **bare 413** — while a 60 MiB one was accepted, which is what proves the body
+limit moved. See §8 for the two traps that cost a cycle each.
+
+### Next up
+- ✅ ~~**Mail as an option** (note 14)~~ — done on 2026-08-18, above, D63. `/capabilities`
+  declares it, an operator hands out a one-time password on the loopback surface, and
+  `JwtAuthFilter` refuses everything but `POST /api/v1/me/password` until it is replaced.
+- ✅ ~~**Self-update, the client half**~~ — done in the launcher repository on 2026-08-07, check
+  and swap both, and verified on real Windows. This entry was stale for ten days; the contract
+  it codes against is still
+  [Documentation/launcher-releases.md](Documentation/launcher-releases.md).
 - ⬜ **TLS in the stack.** Deliberately not code, and written out in
   [Documentation/hardening-and-deployment.md](Documentation/hardening-and-deployment.md) §6
   rather than left implicit: a terminator in front of the API, the two published ports moved to

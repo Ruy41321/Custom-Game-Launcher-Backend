@@ -23,6 +23,8 @@ second set of visibility rules to keep correct for no gain. Every response carri
 | DELETE | `/api/v1/games/{idOrSlug}` | ownership | Remove the game and everything under it — see [storage-lifecycle.md](storage-lifecycle.md) |
 | GET | `/api/v1/me/games` | `game.publish` | The publisher's own games, drafts included |
 | POST | `/api/v1/games/{id}/versions` | `game.publish` + ownership | Create a version |
+| PATCH | `/api/v1/games/{id}/versions/{versionId}` | `game.publish` + ownership | Partial update: stage, notes, published |
+| DELETE | `/api/v1/games/{id}/versions/{versionId}` | `game.publish` + ownership | Remove the version and its builds |
 | POST | `/api/v1/games/{id}/versions/{versionId}/builds` | `build.upload` + ownership | Create a build |
 | GET | `/api/v1/library` | `library.read` | The account's library |
 | PUT | `/api/v1/library/{idOrSlug}` | `library.manage` | Add a game (idempotent) |
@@ -80,6 +82,7 @@ else sees the released ones.
 | `stage` | `demo`, `alpha`, `beta`, `release` |
 | `platform` | `windows`, `linux`, `macos` |
 | `architecture` | `x64`, `arm64` |
+| build `name` | at most 100 characters after trimming; optional, and empty stays valid |
 
 Dates are validated in C++ rather than left to PostgreSQL so that a typo is a 422 naming the
 field instead of a driver error surfacing as a 500. Version components are parsed and stored
@@ -95,6 +98,31 @@ omits the summary does not blank it. The SQL is a single `UPDATE … SET x = COA
 which keeps that meaning in one place rather than building a statement per combination of
 fields. `releaseDate` is the one field where an explicit empty string clears the value.
 
+`GameVersionUpdate` is the same shape for a version, and it is what makes a version publishable
+after it exists.
+
+### Publishing a version, afterwards
+
+Until 2026-08-17 `published_at` could only be set at creation, by `publish: true` on the POST.
+There was no route that changed a version at all, so **a version created with that flag unset
+could never be published** — the only way forward was to delete it, and its builds with it, and
+upload everything again. `IGameVersionRepository::publish` had existed since migration 0001 and
+was called by nothing; it has been replaced by `update`, which does the same job as part of a
+partial update rather than as a verb of its own.
+
+`published` has three states on the wire, and they are not two:
+
+| `published` | Effect |
+|---|---|
+| absent | left alone — a PATCH that carries only new release notes must not withdraw anything |
+| `true` | `published_at = COALESCE(published_at, now())`, so publishing twice **cannot move the date a release went out** |
+| `false` | `published_at = NULL` |
+
+Withdrawing is allowed, and what it costs is worth stating plainly: a player who has the game
+installed stops being offered that version as an update, and one who has not stops seeing it at
+all. That is the trade `visibility: draft` already makes for a whole game, and it is the
+reversible thing standing beside a DELETE that is not.
+
 ## Ownership
 
 `CatalogService::editableGame` resolves a game and checks ownership in one place, and every
@@ -109,6 +137,28 @@ who owns what. What it does with the rows, the files and other people's installs
 Creating a build additionally checks that the version belongs to the game named in the path.
 Without that check a publisher could hang a build off somebody else's version by pairing it
 with a game they do own.
+
+### Sixteen write routes, tried by a stranger (2026-08-18)
+
+Driven against a running server with two publishers, because reading the code is what missed
+D62. Every write route of a game, a version, a build, the artwork and the devlog was called
+from an account that owns none of them, and every one refused with the victim's game left
+unchanged:
+
+| Refused with | Routes |
+|---|---|
+| **403 forbidden** | `PATCH`/`DELETE /games/{id}`, `POST`/`PATCH`/`DELETE` on its versions, `POST .../builds`, `DELETE /builds/{id}`, `POST /games/{id}/media`, `PATCH`/`DELETE /media/{id}`, `POST /games/{id}/patch-notes`, `PATCH`/`DELETE /patch-notes/{id}` |
+| **404 not found** | `POST /builds/{id}/blobs/missing`, `POST /builds/{id}/uploads`, `POST /builds/{id}/manifest` |
+
+The split is not an inconsistency. A game the caller can *see* is refused by `mayEditGame`, and
+saying so costs nothing. A build is reached by an id alone, so confirming it exists would leak
+what a publisher has not released — `mayReadBuild` / `mayPublishBuild` answer 404 (D26), the
+same reason D62 gives.
+
+Denial tests cover all of them; the nine that had none as of 2026-08-18 are in
+`CatalogEndpointTest`, `MediaEndpointTest`, `PatchNoteEndpointTest` and `UploadEndpointTest`,
+and the three deletes are in `RetentionEndpointTest`. They use a **public** game deliberately:
+on a draft the refusal comes from `mayViewGame` and says nothing about ownership.
 
 ## The devlist
 

@@ -34,6 +34,15 @@ class AdminUserController : public drogon::HttpController<AdminUserController> {
                   "launcher::filters::AdminSurfaceFilter",
                   "launcher::filters::JwtAuthFilter",
                   "launcher::filters::AdminOperatorFilter");
+    // The way back in where no mail transport exists. A POST rather than a PATCH on the
+    // account, because it is not an edit of a field: it mints a value that exists only in the
+    // response, and a route that answers with a secret should not be one anything replays.
+    ADD_METHOD_TO(AdminUserController::setTemporaryPassword,
+                  "/admin/api/users/{1}/temporary-password",
+                  drogon::Post,
+                  "launcher::filters::AdminSurfaceFilter",
+                  "launcher::filters::JwtAuthFilter",
+                  "launcher::filters::AdminOperatorFilter");
     ADD_METHOD_TO(AdminUserController::grantRole,
                   "/admin/api/users/{1}/roles/{2}",
                   drogon::Put,
@@ -72,6 +81,12 @@ class AdminUserController : public drogon::HttpController<AdminUserController> {
     drogon::Task<> update(drogon::HttpRequestPtr request,
                           std::function<void(const drogon::HttpResponsePtr&)> callback,
                           std::string userId);
+
+    /// Gives the account a one-time password and answers with it, once.
+    drogon::Task<>
+    setTemporaryPassword(drogon::HttpRequestPtr request,
+                         std::function<void(const drogon::HttpResponsePtr&)> callback,
+                         std::string userId);
 
     drogon::Task<> grantRole(drogon::HttpRequestPtr request,
                              std::function<void(const drogon::HttpResponsePtr&)> callback,

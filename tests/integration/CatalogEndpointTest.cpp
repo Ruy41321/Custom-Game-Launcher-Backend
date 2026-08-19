@@ -290,6 +290,151 @@ TEST(CatalogEndpointTest, CreatesAVersionAndABuildForIt) {
     EXPECT_EQ(bodyOf(builtFor)["status"].asString(), "uploading");
 }
 
+// The route the maintainer went looking for and could not find, because it did not exist: a
+// version created with "publish now" unticked had no way back short of deleting it.
+TEST(CatalogEndpointTest, PublishesAVersionAfterTheFact) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto session = developer();
+    const auto game = createGame(session, "Published Later Title");
+
+    Json::Value version;
+    version["semver"] = "0.3.0";
+    const auto created = harness().postJson(
+        "/api/v1/games/" + game["id"].asString() + "/versions", version, tokenOf(session));
+    ASSERT_EQ(created->statusCode(), drogon::k201Created) << created->body();
+    ASSERT_FALSE(bodyOf(created)["published"].asBool());
+
+    const std::string path =
+        "/api/v1/games/" + game["id"].asString() + "/versions/" + bodyOf(created)["id"].asString();
+
+    Json::Value publish;
+    publish["published"] = true;
+    const auto published = harness().patchJson(path, publish, tokenOf(session));
+
+    ASSERT_EQ(published->statusCode(), drogon::k200OK) << published->body();
+    EXPECT_TRUE(bodyOf(published)["published"].asBool());
+    const auto firstPublishedAt = bodyOf(published)["publishedAt"].asString();
+    EXPECT_FALSE(firstPublishedAt.empty());
+
+    // Pressing it again must not move the date the release went out.
+    const auto again = harness().patchJson(path, publish, tokenOf(session));
+    ASSERT_EQ(again->statusCode(), drogon::k200OK) << again->body();
+    EXPECT_EQ(bodyOf(again)["publishedAt"].asString(), firstPublishedAt);
+
+    // And back: withdrawing is the reversible thing next to a delete that is not.
+    Json::Value withdraw;
+    withdraw["published"] = false;
+    const auto withdrawn = harness().patchJson(path, withdraw, tokenOf(session));
+    ASSERT_EQ(withdrawn->statusCode(), drogon::k200OK) << withdrawn->body();
+    EXPECT_FALSE(bodyOf(withdrawn)["published"].asBool());
+}
+
+TEST(CatalogEndpointTest, AVersionPatchLeavesTheFieldsItDoesNotName) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto session = developer();
+    const auto game = createGame(session, "Partially Patched Title");
+
+    Json::Value version;
+    version["semver"] = "1.1.0";
+    version["stage"] = "beta";
+    version["publish"] = true;
+    const auto created = harness().postJson(
+        "/api/v1/games/" + game["id"].asString() + "/versions", version, tokenOf(session));
+    ASSERT_EQ(created->statusCode(), drogon::k201Created) << created->body();
+
+    Json::Value patch;
+    patch["releaseNotes"] = "now with fewer crashes";
+    const auto updated = harness().patchJson("/api/v1/games/" + game["id"].asString() +
+                                                 "/versions/" + bodyOf(created)["id"].asString(),
+                                             patch,
+                                             tokenOf(session));
+
+    ASSERT_EQ(updated->statusCode(), drogon::k200OK) << updated->body();
+    EXPECT_EQ(bodyOf(updated)["releaseNotes"].asString(), "now with fewer crashes");
+    EXPECT_EQ(bodyOf(updated)["stage"].asString(), "beta");
+    EXPECT_TRUE(bodyOf(updated)["published"].asBool()) << "it must still be published";
+}
+
+TEST(CatalogEndpointTest, RefusesToPatchAnotherPublishersVersion) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto owner = developer();
+    const auto game = createGame(owner, "Somebody Elses Version");
+
+    Json::Value version;
+    version["semver"] = "1.0.0";
+    const auto created = harness().postJson(
+        "/api/v1/games/" + game["id"].asString() + "/versions", version, tokenOf(owner));
+    ASSERT_EQ(created->statusCode(), drogon::k201Created);
+
+    const auto intruder = developer();
+    Json::Value publish;
+    publish["published"] = true;
+    const auto refused = harness().patchJson("/api/v1/games/" + game["id"].asString() +
+                                                 "/versions/" + bodyOf(created)["id"].asString(),
+                                             publish,
+                                             tokenOf(intruder));
+
+    EXPECT_EQ(refused->statusCode(), drogon::k404NotFound) << refused->body();
+}
+
+// A build's identity is (version, platform, architecture), which is exactly what a publisher
+// looking at a list of identical rows cannot use to tell them apart.
+TEST(CatalogEndpointTest, ABuildKeepsTheNameItWasGiven) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto session = developer();
+    const auto game = createGame(session, "Named Build Title");
+
+    Json::Value version;
+    version["semver"] = "2.0.0";
+    const auto created = harness().postJson(
+        "/api/v1/games/" + game["id"].asString() + "/versions", version, tokenOf(session));
+    ASSERT_EQ(created->statusCode(), drogon::k201Created);
+
+    Json::Value build;
+    build["platform"] = "windows";
+    build["name"] = "Nightly, with the demo levels";
+    const auto builtFor =
+        harness().postJson("/api/v1/games/" + game["id"].asString() + "/versions/" +
+                               bodyOf(created)["id"].asString() + "/builds",
+                           build,
+                           tokenOf(session));
+
+    ASSERT_EQ(builtFor->statusCode(), drogon::k201Created) << builtFor->body();
+    EXPECT_EQ(bodyOf(builtFor)["name"].asString(), "Nightly, with the demo levels");
+
+    // And it survives to the detail response, which is where the dashboard reads it from.
+    const auto detail = harness().get("/api/v1/games/" + game["id"].asString(), tokenOf(session));
+    ASSERT_EQ(detail->statusCode(), drogon::k200OK);
+    const Json::Value body = bodyOf(detail);
+    ASSERT_EQ(body["builds"].size(), 1U);
+    EXPECT_EQ(body["builds"][0]["name"].asString(), "Nightly, with the demo levels");
+}
+
+// A build published before migration 0006, and one published by a client that sends no name,
+// are the same thing from here: the column defaults to empty and stays valid.
+TEST(CatalogEndpointTest, ABuildWithoutANameIsStillABuild) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto session = developer();
+    const auto game = createGame(session, "Unnamed Build Title");
+
+    Json::Value version;
+    version["semver"] = "2.0.0";
+    const auto created = harness().postJson(
+        "/api/v1/games/" + game["id"].asString() + "/versions", version, tokenOf(session));
+    ASSERT_EQ(created->statusCode(), drogon::k201Created);
+
+    Json::Value build;
+    build["platform"] = "linux";
+    const auto builtFor =
+        harness().postJson("/api/v1/games/" + game["id"].asString() + "/versions/" +
+                               bodyOf(created)["id"].asString() + "/builds",
+                           build,
+                           tokenOf(session));
+
+    ASSERT_EQ(builtFor->statusCode(), drogon::k201Created) << builtFor->body();
+    EXPECT_EQ(bodyOf(builtFor)["name"].asString(), "");
+}
+
 TEST(CatalogEndpointTest, RejectsAMalformedVersionNumber) {
     LAUNCHER_REQUIRE_DATABASE();
     const auto session = developer();
@@ -393,6 +538,72 @@ TEST(CatalogEndpointTest, TheLibraryShowsTheGameDetailAsAlreadyOwned) {
 
     const auto after = harness().get("/api/v1/games/" + game["id"].asString(), tokenOf(session));
     EXPECT_TRUE(bodyOf(after)["inLibrary"].asBool());
+}
+
+// ---------------------------------------------------------------------------
+// Adding to a game somebody else publishes
+//
+// The dashboard used to show one account the previous account's game, and the question that
+// followed was whether the buttons on it would have worked. Driving the real server with two
+// publishers answered it — every write route refuses — but two of them were refusing with
+// nothing asserting that they do: **creating** a version, and **creating** a build. Editing a
+// game and patching a version are covered above, and the three deletes live in
+// `RetentionEndpointTest` (`RefusesToDelete…`), which is where a delete belongs. §9.5, and D62
+// was found in this exact gap for reads.
+//
+// The game here is **public** on purpose. On a draft the intruder cannot see it at all and the
+// answer is 404 through `mayViewGame` (D30), which says nothing about whether ownership is
+// checked; on a public game the refusal has to come from `mayEditGame`.
+// ---------------------------------------------------------------------------
+
+/// A public game owned by somebody else, with a published version on it.
+struct OtherPublishersGame {
+    Json::Value owner;
+    std::string gameId;
+    std::string versionId;
+};
+
+OtherPublishersGame otherPublishersGame(const std::string& title) {
+    OtherPublishersGame theirs;
+    theirs.owner = developer();
+    theirs.gameId = createGame(theirs.owner, title, "public")["id"].asString();
+
+    Json::Value version;
+    version["semver"] = "1.0.0";
+    version["publish"] = true;
+    const auto created = harness().postJson(
+        "/api/v1/games/" + theirs.gameId + "/versions", version, tokenOf(theirs.owner));
+    EXPECT_EQ(created->statusCode(), drogon::k201Created) << created->body();
+    theirs.versionId = bodyOf(created)["id"].asString();
+    return theirs;
+}
+
+TEST(CatalogEndpointTest, RefusesToAddAVersionToAnotherPublishersGame) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto theirs = otherPublishersGame("No Versions From Strangers");
+    const auto intruder = developer();
+
+    Json::Value version;
+    version["semver"] = "9.9.9";
+    const auto refused = harness().postJson(
+        "/api/v1/games/" + theirs.gameId + "/versions", version, tokenOf(intruder));
+
+    EXPECT_EQ(refused->statusCode(), drogon::k403Forbidden) << refused->body();
+}
+
+TEST(CatalogEndpointTest, RefusesToAddABuildToAnotherPublishersVersion) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto theirs = otherPublishersGame("No Builds From Strangers");
+    const auto intruder = developer();
+
+    Json::Value build;
+    build["platform"] = "linux";
+    const auto refused = harness().postJson("/api/v1/games/" + theirs.gameId + "/versions/" +
+                                                theirs.versionId + "/builds",
+                                            build,
+                                            tokenOf(intruder));
+
+    EXPECT_EQ(refused->statusCode(), drogon::k403Forbidden) << refused->body();
 }
 
 } // namespace

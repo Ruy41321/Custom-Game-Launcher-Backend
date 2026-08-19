@@ -31,9 +31,17 @@ Both are POST although neither changes a build: they mint signed URLs, and the p
 that a download was handed out. Neither is cacheable and neither is free of consequence, which
 is exactly what a GET would promise.
 
-A build of a game the caller may not see is **404**, never 403 — the same rule the rest of the
-catalog follows, for the same reason: a 403 would confirm the build exists. A build that has
-not finished uploading is also 404: from the outside there is nothing there yet.
+A build the caller may not see is **404**, never 403 — the same rule the rest of the catalog
+follows, for the same reason: a 403 would confirm the build exists. A build that has not
+finished uploading is also 404: from the outside there is nothing there yet.
+
+**Who may see a build** is `domain::mayReadBuild`, and it asks two things: the game is not a
+draft, **and** the version the build hangs off has been published. Either half missing makes
+the build its publisher's alone — a public game may perfectly well carry a version nobody has
+released yet, and `PATCH …/versions/{id}` can withdraw one that was. Until 2026-08-17 only the
+first half was asked, so a build under an unpublished version was downloadable by anybody who
+could name it, while the game's own detail response had been filtering that version out of the
+listing all along (D62).
 
 ## The plan
 
@@ -56,6 +64,14 @@ not finished uploading is also 404: from the outside there is nothing there yet.
 `fromBuildId` is what the client currently has installed; leaving it out asks for a first
 install. It has to be a build of the **same game**, or the request is a 422 — an update from
 something unrelated is a mistake, not a plan.
+
+A source the caller may **not read** is the one case that is neither an error nor a delta: the
+plan falls back to a full download of the target. The source is a claim about what is already
+on somebody's disk and nothing about it reaches the answer except which bytes may be skipped,
+so refusing would only leave a player who installed a version that was withdrawn afterwards
+unable to update at all — a larger consequence than the withdrawal chose. Nothing is skipped on
+the strength of a build the caller may not read, and `download_events.from_version_id` is left
+empty for it.
 
 `downloadBytes` is what the transfer is expected to cost and `totalBytes` is the build as
 installed. They differ because paths are the unit of the plan while blobs are the unit of the

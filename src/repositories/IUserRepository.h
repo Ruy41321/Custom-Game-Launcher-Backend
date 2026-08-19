@@ -31,8 +31,22 @@ class IUserRepository {
 
     virtual drogon::Task<void> markEmailVerified(std::string userId) const = 0;
 
+    /// Stores a password the *owner* chose, and clears `password_change_required` in the same
+    /// statement.
+    ///
+    /// The two belong together: an operator's one-time password is refused everywhere but the
+    /// route that replaces it, so a new hash written without clearing the flag is an account
+    /// that has a password of its own and is still locked out of everything — a dead end with
+    /// no endpoint left to escape it. Use `rehashPassword` for the other kind of write.
     virtual drogon::Task<void> updatePasswordHash(std::string userId,
                                                   std::string passwordHash) const = 0;
+
+    /// Re-encodes the *same* password under stronger Argon2id parameters, on the login that
+    /// just proved it. Deliberately leaves `password_change_required` alone: nobody chose
+    /// anything here, and clearing it would let signing in with a temporary password once be
+    /// enough to keep it for ever.
+    virtual drogon::Task<void> rehashPassword(std::string userId,
+                                              std::string passwordHash) const = 0;
 
     virtual drogon::Task<void> recordSuccessfulLogin(std::string userId) const = 0;
 

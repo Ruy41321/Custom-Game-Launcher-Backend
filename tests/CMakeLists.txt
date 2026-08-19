@@ -12,6 +12,7 @@ add_executable(launcher_unit_tests
     unit/CapabilitiesTest.cpp
     unit/MigrationPlanTest.cpp
     unit/ValidationTest.cpp
+    unit/ValidationRulesTest.cpp
     unit/PasswordHasherTest.cpp
     unit/JwtTokenServiceTest.cpp
     unit/AuthServiceTest.cpp

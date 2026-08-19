@@ -9,6 +9,7 @@
 #include "app/HttpError.h"
 #include "app/JsonBody.h"
 #include "controllers/v1/CatalogJson.h"
+#include "domain/ValidationRules.h"
 #include "filters/JwtAuthFilter.h"
 #include "services/CatalogService.h"
 
@@ -88,7 +89,7 @@ GameController::createGame(drogon::HttpRequestPtr request,
     const auto body = app::requireJsonObject(request);
 
     services::CreateGameCommand command;
-    command.title = app::requireString(body, "title");
+    command.title = app::requireString(body, "title", domain::rules::TITLE_REQUIRED);
     command.slug = app::optionalString(body, "slug");
     command.summary = app::optionalString(body, "summary");
     command.description = app::optionalString(body, "description");
@@ -131,7 +132,7 @@ GameController::updateGame(drogon::HttpRequestPtr request,
     // through a default: a PATCH that omits the summary must not blank it.
     domain::GameUpdate changes;
     if (body.isMember("title")) {
-        changes.title = app::requireString(body, "title");
+        changes.title = app::requireString(body, "title", domain::rules::TITLE_REQUIRED);
     }
     if (body.isMember("summary")) {
         changes.summary = app::optionalString(body, "summary");
@@ -177,7 +178,7 @@ GameController::createVersion(drogon::HttpRequestPtr request,
     const auto body = app::requireJsonObject(request);
 
     services::CreateVersionCommand command;
-    command.semver = app::requireString(body, "semver");
+    command.semver = app::requireString(body, "semver", domain::rules::VERSION_REQUIRED);
     command.releaseNotes = app::optionalString(body, "releaseNotes");
     command.publish = app::optionalBool(body, "publish");
     command.stage = optionalEnum<domain::BuildStage>(
@@ -202,6 +203,7 @@ GameController::createBuild(drogon::HttpRequestPtr request,
 
     services::CreateBuildCommand command;
     command.versionId = std::move(versionId);
+    command.name = app::optionalString(body, "name");
     command.platform = requireEnum<domain::BuildPlatform>(
         body, "platform", domain::parseBuildPlatform, PLATFORM_VALUES);
     command.architecture = optionalEnum<domain::BuildArchitecture>(body,
@@ -217,6 +219,41 @@ GameController::createBuild(drogon::HttpRequestPtr request,
     }
 
     callback(jsonResponse(request, buildToJson(created.value()), drogon::k201Created));
+    co_return;
+}
+
+drogon::Task<>
+GameController::updateVersion(drogon::HttpRequestPtr request,
+                              std::function<void(const drogon::HttpResponsePtr&)> callback,
+                              std::string idOrSlug,
+                              std::string versionId) {
+    const auto body = app::requireJsonObject(request);
+
+    // Absent means "leave alone", as it does on a game (see updateGame). `published` is the
+    // field this route exists for, and it is read the same way: a PATCH that omits it must not
+    // withdraw a version because somebody sent only new release notes.
+    domain::GameVersionUpdate changes;
+    if (body.isMember("stage")) {
+        changes.stage =
+            requireEnum<domain::BuildStage>(body, "stage", domain::parseBuildStage, STAGE_VALUES);
+    }
+    if (body.isMember("releaseNotes")) {
+        changes.releaseNotes = app::optionalString(body, "releaseNotes");
+    }
+    if (body.isMember("published")) {
+        if (!body["published"].isBool()) {
+            throw ApiException(ErrorCode::InvalidInput, "published must be true or false");
+        }
+        changes.published = body["published"].asBool();
+    }
+
+    auto updated = co_await catalog().updateVersion(
+        actorOf(request), std::move(idOrSlug), std::move(versionId), std::move(changes));
+    if (!updated.ok()) {
+        fail(updated.error());
+    }
+
+    callback(jsonResponse(request, versionToJson(updated.value())));
     co_return;
 }
 

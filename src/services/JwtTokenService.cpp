@@ -19,6 +19,9 @@ using JwtClaim = jwt::basic_claim<JwtTraits>;
 
 constexpr const char* CLAIM_PERMISSIONS = "permissions";
 constexpr const char* CLAIM_EMAIL = "email";
+/// Absent is read as false, which is what keeps deploying this from invalidating the tokens
+/// already in flight: one minted before the claim existed decodes as an ordinary session.
+constexpr const char* CLAIM_PASSWORD_CHANGE_REQUIRED = "pwd_change";
 
 /// One message for every rejection reason. An attacker probing with forged tokens learns
 /// nothing about which part of the check failed.
@@ -54,6 +57,8 @@ std::string JwtTokenService::issueAccessToken(const AccessTokenClaims& claims) c
         .set_expires_at(now + settings_.accessTokenTtl)
         .set_payload_claim(CLAIM_EMAIL, JwtClaim(claims.email))
         .set_payload_claim(CLAIM_PERMISSIONS, JwtClaim(permissions))
+        .set_payload_claim(CLAIM_PASSWORD_CHANGE_REQUIRED,
+                           JwtClaim(Json::Value(claims.passwordChangeRequired)))
         .sign(jwt::algorithm::hs256{settings_.secret});
 }
 
@@ -88,6 +93,14 @@ Result<AccessTokenClaims> JwtTokenService::verifyAccessToken(std::string_view to
                     }
                 }
             }
+        }
+
+        if (decoded.has_payload_claim(CLAIM_PASSWORD_CHANGE_REQUIRED)) {
+            const Json::Value raw =
+                decoded.get_payload_claim(CLAIM_PASSWORD_CHANGE_REQUIRED).to_json();
+            // Anything that is not a JSON true reads as false, deliberately: this flag only
+            // ever *adds* a restriction, so a malformed claim must not be able to impose one.
+            claims.passwordChangeRequired = raw.isBool() && raw.asBool();
         }
 
         if (claims.userId.empty()) {

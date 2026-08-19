@@ -8,6 +8,7 @@
 #include "domain/AuditEntry.h"
 #include "domain/Role.h"
 #include "services/AdminUserService.h"
+#include "services/PasswordHasher.h"
 #include "support/FakeAdminRepositories.h"
 
 namespace {
@@ -15,6 +16,7 @@ namespace {
 using launcher::common::ErrorCode;
 using launcher::domain::Actor;
 using launcher::services::AdminUserService;
+using launcher::services::Argon2idPasswordHasher;
 using launcher::testing::FakeAdminUserRepository;
 using launcher::testing::FakeAuditRepository;
 
@@ -38,7 +40,7 @@ Actor publisher() {
 
 struct AdminFixture {
     AdminFixture()
-        : service(users, audit) {
+        : service(users, audit, hasher) {
         users.permissionsByRole["player"] = {permissions::GAME_READ};
         users.permissionsByRole["dev"] = {permissions::GAME_PUBLISH};
         users.permissionsByRole["admin"] = {permissions::ADMIN_USERS_MANAGE,
@@ -59,6 +61,11 @@ struct AdminFixture {
 
     FakeAdminUserRepository users;
     FakeAuditRepository audit;
+    /// The weakest Argon2id libsodium accepts. These tests hash once per temporary password
+    /// and care about nothing but that the result verifies, so the interactive profile would
+    /// be a second of CPU spent proving something no assertion here looks at.
+    Argon2idPasswordHasher hasher{
+        launcher::services::PasswordHashingSettings{1, 8U * 1024U * 1024U}};
     AdminUserService service;
 };
 
@@ -291,6 +298,107 @@ TEST(AdminUserServiceTest, ClampsAnAbsurdPageSize) {
     query.offset = -5;
 
     EXPECT_TRUE(drogon::sync_wait(fixture.service.list(operatorActor(), query)).ok());
+}
+
+// ---------------------------------------------------------------------------
+// One-time passwords — the way back in where no mail transport exists
+// ---------------------------------------------------------------------------
+
+TEST(AdminUserServiceTest, HandsOutAPasswordThatWorksAndDemandsItBeReplaced) {
+    AdminFixture fixture;
+
+    const auto issued =
+        drogon::sync_wait(fixture.service.setTemporaryPassword(operatorActor(), PLAYER));
+
+    ASSERT_TRUE(issued.ok()) << issued.error().detail;
+    EXPECT_FALSE(issued.value().password.empty());
+    EXPECT_TRUE(issued.value().user.user.passwordChangeRequired);
+
+    // What was stored is a hash of what was handed over, and nothing else verifies against it.
+    const auto& stored = fixture.users.accounts[PLAYER].user;
+    EXPECT_TRUE(fixture.hasher.verify(issued.value().password, stored.passwordHash));
+    EXPECT_FALSE(fixture.hasher.verify("something else entirely", stored.passwordHash));
+}
+
+// It is read out loud or copied off a note, so it may not contain the characters people
+// disagree about — and it must not be the same one twice.
+TEST(AdminUserServiceTest, ThePasswordIsReadableAndNeverRepeats) {
+    AdminFixture fixture;
+
+    const auto first =
+        drogon::sync_wait(fixture.service.setTemporaryPassword(operatorActor(), PLAYER));
+    const auto second =
+        drogon::sync_wait(fixture.service.setTemporaryPassword(operatorActor(), PLAYER));
+
+    ASSERT_TRUE(first.ok());
+    ASSERT_TRUE(second.ok());
+    EXPECT_NE(first.value().password, second.value().password);
+
+    for (const char character : first.value().password) {
+        EXPECT_EQ(std::string("l1o0O").find(character), std::string::npos)
+            << "a character nobody can dictate ended up in a password somebody has to dictate";
+    }
+}
+
+TEST(AdminUserServiceTest, RecordsWhoDidItAndNotWhatTheyHandedOver) {
+    AdminFixture fixture;
+
+    const auto issued =
+        drogon::sync_wait(fixture.service.setTemporaryPassword(operatorActor(), PLAYER));
+    ASSERT_TRUE(issued.ok());
+
+    ASSERT_EQ(fixture.users.recorded.size(), 1U);
+    const auto& entry = fixture.users.recorded[0];
+    EXPECT_EQ(entry.action, actions::USER_TEMPORARY_PASSWORD_SET);
+    EXPECT_EQ(entry.actorUserId, OPERATOR);
+    EXPECT_EQ(entry.entityId, PLAYER);
+
+    // The credential exists for as long as it takes to read it out of one response. An audit
+    // trail carrying it would be the place it outlived that.
+    for (const auto& [key, value] : entry.metadata) {
+        EXPECT_NE(value, issued.value().password);
+    }
+}
+
+// The console has no password-change route, and the flag refuses everything else — so an
+// operator doing this to themselves locks themselves out of the surface they are standing on.
+TEST(AdminUserServiceTest, AnOperatorCannotDoThisToTheirOwnAccount) {
+    AdminFixture fixture;
+
+    const auto refused =
+        drogon::sync_wait(fixture.service.setTemporaryPassword(operatorActor(), OPERATOR));
+
+    EXPECT_FALSE(refused.ok());
+    EXPECT_EQ(refused.error().code, ErrorCode::InvalidInput);
+    EXPECT_FALSE(fixture.users.accounts[OPERATOR].user.passwordChangeRequired);
+    EXPECT_TRUE(fixture.users.recorded.empty());
+}
+
+TEST(AdminUserServiceTest, RefusesTheTemporaryPasswordToACallerWithoutThePermission) {
+    AdminFixture fixture;
+
+    const auto refused =
+        drogon::sync_wait(fixture.service.setTemporaryPassword(publisher(), PLAYER));
+
+    EXPECT_FALSE(refused.ok());
+    EXPECT_EQ(refused.error().code, ErrorCode::Forbidden);
+    EXPECT_FALSE(fixture.users.accounts[PLAYER].user.passwordChangeRequired);
+    EXPECT_TRUE(fixture.users.recorded.empty());
+}
+
+TEST(AdminUserServiceTest, AnAccountThatIsNotThereIsANotFoundAndNotAServerError) {
+    AdminFixture fixture;
+
+    const auto missing = drogon::sync_wait(
+        fixture.service.setTemporaryPassword(operatorActor(), launcher::common::randomUuid()));
+    EXPECT_EQ(missing.error().code, ErrorCode::NotFound);
+
+    // A malformed id never reaches a $n::uuid comparison, which would raise rather than miss.
+    const auto malformed =
+        drogon::sync_wait(fixture.service.setTemporaryPassword(operatorActor(), "not-a-uuid"));
+    EXPECT_EQ(malformed.error().code, ErrorCode::NotFound);
+
+    EXPECT_TRUE(fixture.users.recorded.empty());
 }
 
 TEST(AdminUserServiceTest, ReadsTheAuditTrail) {

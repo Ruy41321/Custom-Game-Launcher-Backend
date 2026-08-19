@@ -27,11 +27,12 @@ And two pages, outside `/api/v1/` because they are for a person rather than for 
 | GET | `/verify-email?token=…` | Where a verification link lands |
 | GET | `/password-reset?token=…` | Where a reset link lands: the form that chooses the password |
 
-Plus one route outside `/auth`, on the account itself:
+Plus two routes outside `/auth`, on the account itself:
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | POST | `/api/v1/me/deletion` | Bearer access token **and** the password | Erase this account |
+| POST | `/api/v1/me/password` | Bearer access token **and** the current password | Replace the password |
 
 A session response looks like:
 
@@ -93,9 +94,75 @@ this project targets. `auth.argon2OperationsLimit` and `auth.argon2MemoryLimitBy
 on a bigger host; raising them transparently upgrades each stored hash at its owner's next
 successful login.
 
-Policy is length-only: 12–256 characters. Mandatory character classes push users towards
-predictable substitutions without buying entropy (NIST 800-63B). The upper bound exists so a
-multi-megabyte "password" cannot be turned into an Argon2id denial of service.
+Policy is length-only: 8–256 characters. Mandatory character classes push users towards
+predictable substitutions without buying entropy, and eight is the floor NIST 800-63B puts
+under a secret the user chooses. The upper bound exists so a multi-megabyte "password" cannot
+be turned into an Argon2id denial of service.
+
+`src/auth/ui/password-reset.html` carries the lower bound a second time, as a JavaScript
+constant, because the page is embedded in the binary and `/capabilities` does not publish the
+limit. Changing `domain::MIN_PASSWORD_LENGTH` means changing that line too, or the page refuses
+what the API would accept.
+
+## A deployment that sends no mail
+
+`MAIL_TRANSPORT=none` is a supported configuration, not a broken one: it is for an operator who
+cannot set up a relay. Everything that needs a message is then switched off, and what replaces
+it is an operator handing out a password out of band.
+
+Three things follow, and they are one feature (D63).
+
+**`GET /api/v1/capabilities` declares it.** The document carries `mail.enabled`, so a launcher
+hides "forgotten your password?" instead of offering a button whose only outcome is the 404 the
+mail routes answer. A client left to infer it from that 404 shows the offer first and the
+failure second, on the one screen somebody is already stuck on.
+
+**An operator sets a one-time password**, on the loopback surface:
+
+```
+POST /admin/api/users/{id}/temporary-password    ->  200 {user, temporaryPassword}
+```
+
+The **server** generates it: 15 symbols over a 32-character alphabet with `l`, `1`, `o` and `0`
+removed, because it is read out loud or copied off a note. It appears in that response and
+**nowhere else** — only its Argon2id hash is stored, the audit entry records that it happened
+and to whom rather than what it was, and an operator who loses it issues another. One statement
+does all of it: the hash, the flag, the revocation of every session the account holds, and the
+invalidation of any outstanding reset link, with the audit arm inside it
+([administration.md](administration.md) gives the reason at length).
+
+An operator **cannot do this to their own account**. The flag below refuses every route but the
+password change, and the console has no such route — so an operator who set their own would be
+locked out of the surface they administer with only the public API left to escape through.
+
+**`users.password_change_required` is what makes it one-time.** `JwtAuthFilter` refuses every
+route except `POST /api/v1/me/password` with a category of its own:
+
+```
+403  {"code": "password_change_required", ...}
+```
+
+The claim rides in the access token, so the check costs no database round trip — the same trade
+the permissions make, and with the same consequence: the flag is as stale as the token. That is
+why the operator route revokes the **refresh** tokens, which it can, rather than pretending it
+can revoke an access token already in somebody's hands. An access token minted before the
+operator acted keeps working for its remaining minutes.
+
+### Changing the password
+
+```
+POST /api/v1/me/password    {"currentPassword": "...", "newPassword": "..."}   -> 200 session
+```
+
+Also the ordinary way for anybody to change their password; nothing about it is special-cased on
+the flag.
+
+| Rule | Why |
+|---|---|
+| The current password is asked for again | A token says who is asking, not that the owner is at the keyboard — the erasure's rule, on the other request that can take an account away |
+| The new password may not be the old one | Elsewhere a harmless no-op; here the whole feature defeated, because re-entering the operator's password would clear the flag and leave a credential somebody else knows. Refused with `rule: password_unchanged` |
+| Every other session dies | A password change is what somebody does after a credential leaked |
+| The answer is a **whole session** | Every session was just revoked, this caller's included. A 204 would leave the launcher holding a dead refresh token and an access token that still carries the flag — signed out by succeeding |
 
 ## Not leaking who has an account
 

@@ -52,12 +52,43 @@ Error envelope:
   "title": "Validation failed",
   "status": 422,
   "code": "invalid_input",
-  "detail": "email is not a valid address",
+  "rule": "password_too_short",
+  "ruleArgs": ["8"],
+  "detail": "password must be at least 8 characters",
   "requestId": "9f1c…"
 }
 ```
 
 `code` is the stable machine-readable discriminator; clients switch on it, never on `title`.
+
+### `rule` and `ruleArgs`
+
+`code` names the *category* of refusal, which is all a client needs to decide whether retrying
+could help. It is not enough to tell somebody what to do about it: every refusal of a form
+shares `invalid_input`, so a client that had only that could say no more than "something you
+entered was not accepted". The only thing that distinguished them was `detail` — English prose
+written for whoever reads the logs — and a client matching on prose turns rewording a message
+into a broken client.
+
+So a refusal may also carry **`rule`**, the stable name of the specific rule that refused, and
+**`ruleArgs`**, the values its sentence needs — almost always the limit that was exceeded, so
+that a translated message can say a password must be at least *eight* characters rather than
+only that this one is too short.
+
+`src/domain/ValidationRules.h` is the list, and it is the contract: those names are frozen and
+`detail` stays free to be reworded. Three rules govern it.
+
+- **One rule per corrective action, not one per branch.** Six ways of writing a malformed
+  address are one `email_invalid`, because the person typing has one thing to do about all six.
+  A limit that was exceeded is its own rule and carries the limit, because "at most 200
+  characters" is advice and "not accepted" is not.
+- **Only the fields a person types.** Manifest paths, blob hashes, upload offsets, crash
+  reports and release documents are values a *client* computed; a refusal there is that
+  client's bug, and dressing it up as a translated sentence would blame the user for it. Those
+  refusals carry no rule, which is the default.
+- **Both keys are omitted, never empty.** A client cannot tell a server too old to send a rule
+  from a refusal that names none, and it does not need to: both mean fall back to the category.
+  That is what makes adding a rule a non-breaking change.
 
 ## Configuration
 

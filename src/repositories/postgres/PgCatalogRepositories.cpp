@@ -36,7 +36,7 @@ constexpr const char* VERSION_COLUMNS = R"(
 )";
 
 constexpr const char* BUILD_COLUMNS = R"(
-    id, game_version_id, platform::text AS platform, architecture::text AS architecture,
+    id, game_version_id, name, platform::text AS platform, architecture::text AS architecture,
     status::text AS status, COALESCE(manifest_sha256, '') AS manifest_sha256,
     total_size_bytes, file_count,
     COALESCE(entrypoint_relative_path, '') AS entrypoint_relative_path, default_launch_args,
@@ -135,6 +135,7 @@ domain::Build mapBuild(const drogon::orm::Row& row) {
     domain::Build build;
     build.id = row["id"].as<std::string>();
     build.gameVersionId = row["game_version_id"].as<std::string>();
+    build.name = row["name"].as<std::string>();
     build.platform = domain::parseBuildPlatform(row["platform"].as<std::string>())
                          .value_or(domain::BuildPlatform::Windows);
     build.architecture = domain::parseBuildArchitecture(row["architecture"].as<std::string>())
@@ -408,14 +409,37 @@ PgGameVersionRepository::listForGame(std::string gameId, bool includeUnpublished
     co_return versions;
 }
 
-drogon::Task<bool> PgGameVersionRepository::publish(std::string id) const {
-    // COALESCE keeps the original publication timestamp when a version is published twice.
-    const auto rows = co_await database_->execSqlCoro(
-        "UPDATE game_versions SET published_at = COALESCE(published_at, now()) "
-        "WHERE id = $1::uuid RETURNING id",
-        id);
+drogon::Task<std::optional<domain::GameVersion>>
+PgGameVersionRepository::update(std::string id, domain::GameVersionUpdate changes) const {
+    std::optional<std::string> stage;
+    if (changes.stage.has_value()) {
+        stage = domain::toString(*changes.stage);
+    }
 
-    co_return !rows.empty();
+    // Three states for `published_at`, not two: absent leaves it alone, true publishes and
+    // COALESCE keeps the original timestamp so that republishing cannot move the date a
+    // release went out, and false withdraws.
+    const auto rows = co_await database_->execSqlCoro(std::string(R"(
+            WITH updated AS (
+                UPDATE game_versions SET
+                    stage = COALESCE($2::build_stage, stage),
+                    release_notes = COALESCE($3, release_notes),
+                    published_at = CASE WHEN $4::boolean IS NULL THEN published_at
+                                        WHEN $4::boolean THEN COALESCE(published_at, now())
+                                        ELSE NULL END
+                WHERE id = $1::uuid
+                RETURNING *
+            )
+            SELECT )") + VERSION_COLUMNS + " FROM updated",
+                                                      id,
+                                                      stage,
+                                                      changes.releaseNotes,
+                                                      changes.published);
+
+    if (rows.empty()) {
+        co_return std::nullopt;
+    }
+    co_return mapVersion(rows[0]);
 }
 
 drogon::Task<bool> PgGameVersionRepository::remove(std::string id) const {
@@ -435,11 +459,12 @@ PgBuildRepository::PgBuildRepository(drogon::orm::DbClientPtr database)
 drogon::Task<Result<domain::Build>> PgBuildRepository::create(domain::NewBuild build) const {
     const auto rows =
         co_await database_->execSqlCoro(std::string(R"(
-            INSERT INTO builds (game_version_id, platform, architecture)
-            VALUES ($1::uuid, $2::build_platform, $3::build_architecture)
+            INSERT INTO builds (game_version_id, name, platform, architecture)
+            VALUES ($1::uuid, $2, $3::build_platform, $4::build_architecture)
             ON CONFLICT (game_version_id, platform, architecture) DO NOTHING
             RETURNING )") + BUILD_COLUMNS,
                                         build.gameVersionId,
+                                        build.name,
                                         std::string(domain::toString(build.platform)),
                                         std::string(domain::toString(build.architecture)));
 
@@ -486,7 +511,8 @@ drogon::Task<std::optional<domain::BuildOwnership>>
 PgBuildRepository::findOwnership(std::string buildId) const {
     const auto rows = co_await database_->execSqlCoro(
         R"(SELECT b.id AS build_id, b.game_version_id, v.game_id, g.publisher_user_id,
-                  g.visibility::text AS visibility, b.status::text AS status
+                  g.visibility::text AS visibility, b.status::text AS status,
+                  (v.published_at IS NOT NULL) AS version_published
            FROM builds b
            JOIN game_versions v ON v.id = b.game_version_id
            JOIN games g ON g.id = v.game_id
@@ -506,6 +532,7 @@ PgBuildRepository::findOwnership(std::string buildId) const {
                                .value_or(domain::GameVisibility::Draft);
     ownership.status = domain::parseBuildStatus(rows[0]["status"].as<std::string>())
                            .value_or(domain::BuildStatus::Uploading);
+    ownership.versionPublished = rows[0]["version_published"].as<bool>();
     co_return ownership;
 }
 
@@ -614,14 +641,15 @@ PgMediaRepository::create(domain::NewGameMedia media) const {
         std::string(R"(
             WITH previous AS (
                 SELECT storage_key FROM game_media
-                WHERE game_id = $1::uuid AND kind = $2::game_media_kind AND kind <> 'screenshot'
+                WHERE game_id = $1::uuid AND kind = $2::game_media_kind
+                  AND kind IN ('cover', 'banner', 'logo')
             ),
             upserted AS (
                 INSERT INTO game_media
                     (game_id, kind, storage_key, sha256, content_type, size_bytes,
                      alt_text, sort_order)
                 VALUES ($1::uuid, $2::game_media_kind, $3, $4, $5, $6, $7, $8)
-                ON CONFLICT (game_id, kind) WHERE kind <> 'screenshot'
+                ON CONFLICT (game_id, kind) WHERE kind IN ('cover', 'banner', 'logo')
                 DO UPDATE SET storage_key  = excluded.storage_key,
                               sha256       = excluded.sha256,
                               content_type = excluded.content_type,

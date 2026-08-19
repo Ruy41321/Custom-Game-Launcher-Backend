@@ -460,4 +460,49 @@ TEST(UploadEndpointTest, HidesTheManifestOfABuildThatIsNotReady) {
     EXPECT_EQ(response->statusCode(), drogon::k404NotFound);
 }
 
+// ---------------------------------------------------------------------------
+// The other two write routes of a build somebody else owns
+//
+// Beginning an upload was covered; asking which blobs are missing and finalizing the manifest
+// were not, and those two are the rest of the way a build is written. All three answer 404
+// rather than 403 for the reason D26 gives: an unowned build must not be distinguishable from
+// a missing one.
+// ---------------------------------------------------------------------------
+
+TEST(UploadEndpointTest, RefusesToAskWhichBlobsAnotherPublishersBuildIsMissing) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto publication = newBuild("Guarded Missing Blobs Title");
+    const auto intruder = harness().createSessionWithRole(uniqueEmail("intruder"), "dev");
+
+    Json::Value blobs(Json::arrayValue);
+    blobs.append(declaration("probe"));
+    Json::Value body;
+    body["blobs"] = blobs;
+
+    const auto refused = harness().postJson(
+        "/api/v1/builds/" + publication.buildId + "/blobs/missing", body, tokenOf(intruder));
+
+    EXPECT_EQ(refused->statusCode(), drogon::k404NotFound) << refused->body();
+}
+
+TEST(UploadEndpointTest, RefusesToFinalizeAnotherPublishersBuild) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto publication = newBuild("Guarded Finalize Title");
+    const std::string content = "game bytes";
+    uploadBlob(publication, content);
+    const auto intruder = harness().createSessionWithRole(uniqueEmail("intruder"), "dev");
+
+    const auto refused = harness().postJson("/api/v1/builds/" + publication.buildId + "/manifest",
+                                            manifestPayload("Game.exe", content),
+                                            tokenOf(intruder));
+
+    EXPECT_EQ(refused->statusCode(), drogon::k404NotFound) << refused->body();
+
+    // And the owner can still finish it: the refusal must not have consumed the session.
+    const auto finalized = harness().postJson("/api/v1/builds/" + publication.buildId + "/manifest",
+                                              manifestPayload("Game.exe", content),
+                                              publication.token());
+    EXPECT_EQ(finalized->statusCode(), drogon::k200OK) << finalized->body();
+}
+
 } // namespace

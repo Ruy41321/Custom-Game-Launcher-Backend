@@ -3,10 +3,12 @@
 #include <algorithm>
 #include <cctype>
 
+#include "domain/ValidationRules.h"
+
 namespace launcher::domain {
 namespace {
 
-using common::ErrorCode;
+using common::invalidInput;
 using common::VoidResult;
 
 bool isWhitespace(unsigned char c) {
@@ -46,13 +48,19 @@ VoidResult validateEmail(std::string_view email) {
     const std::string candidate = trim(email);
 
     if (candidate.empty()) {
-        return VoidResult::failure(ErrorCode::InvalidInput, "email is required");
+        return VoidResult::failure(invalidInput("email is required", rules::EMAIL_REQUIRED));
     }
     if (candidate.size() > MAX_EMAIL_LENGTH) {
-        return VoidResult::failure(ErrorCode::InvalidInput, "email is too long");
+        return VoidResult::failure(invalidInput(
+            "email is too long", rules::EMAIL_TOO_LONG, {std::to_string(MAX_EMAIL_LENGTH)}));
     }
+
+    // Every remaining refusal is `email_invalid`: the six shapes below are six ways of writing
+    // an address wrong, and the person typing has the same one thing to do about all of them.
+    // The detail still says which, because that is what a log is for.
     if (containsControlCharacter(candidate)) {
-        return VoidResult::failure(ErrorCode::InvalidInput, "email contains invalid characters");
+        return VoidResult::failure(
+            invalidInput("email contains invalid characters", rules::EMAIL_INVALID));
     }
 
     // Deliberately permissive: the only reliable proof that an address exists is sending
@@ -60,23 +68,25 @@ VoidResult validateEmail(std::string_view email) {
     // valid addresses, which is the worse failure.
     const auto at = candidate.find('@');
     if (at == std::string::npos || at == 0 || at + 1 >= candidate.size()) {
-        return VoidResult::failure(ErrorCode::InvalidInput,
-                                   "email must contain a local part and a domain");
+        return VoidResult::failure(
+            invalidInput("email must contain a local part and a domain", rules::EMAIL_INVALID));
     }
     if (candidate.find('@', at + 1) != std::string::npos) {
-        return VoidResult::failure(ErrorCode::InvalidInput, "email must contain exactly one '@'");
+        return VoidResult::failure(
+            invalidInput("email must contain exactly one '@'", rules::EMAIL_INVALID));
     }
     if (candidate.find_first_of(" \t") != std::string::npos) {
-        return VoidResult::failure(ErrorCode::InvalidInput, "email must not contain spaces");
+        return VoidResult::failure(
+            invalidInput("email must not contain spaces", rules::EMAIL_INVALID));
     }
 
     const auto domain = candidate.substr(at + 1);
     const auto dot = domain.find('.');
     if (dot == std::string::npos || dot == 0 || dot + 1 >= domain.size()) {
-        return VoidResult::failure(ErrorCode::InvalidInput, "email domain is not valid");
+        return VoidResult::failure(invalidInput("email domain is not valid", rules::EMAIL_INVALID));
     }
     if (domain.front() == '-' || domain.back() == '-' || domain.back() == '.') {
-        return VoidResult::failure(ErrorCode::InvalidInput, "email domain is not valid");
+        return VoidResult::failure(invalidInput("email domain is not valid", rules::EMAIL_INVALID));
     }
 
     return VoidResult::success();
@@ -84,19 +94,21 @@ VoidResult validateEmail(std::string_view email) {
 
 VoidResult validatePassword(std::string_view password) {
     if (password.size() < MIN_PASSWORD_LENGTH) {
-        return VoidResult::failure(ErrorCode::InvalidInput,
-                                   "password must be at least " +
-                                       std::to_string(MIN_PASSWORD_LENGTH) + " characters");
+        return VoidResult::failure(invalidInput(
+            "password must be at least " + std::to_string(MIN_PASSWORD_LENGTH) + " characters",
+            rules::PASSWORD_TOO_SHORT,
+            {std::to_string(MIN_PASSWORD_LENGTH)}));
     }
     if (password.size() > MAX_PASSWORD_LENGTH) {
-        return VoidResult::failure(ErrorCode::InvalidInput,
-                                   "password must be at most " +
-                                       std::to_string(MAX_PASSWORD_LENGTH) + " characters");
+        return VoidResult::failure(invalidInput(
+            "password must be at most " + std::to_string(MAX_PASSWORD_LENGTH) + " characters",
+            rules::PASSWORD_TOO_LONG,
+            {std::to_string(MAX_PASSWORD_LENGTH)}));
     }
     // Whitespace inside a passphrase is fine; a password made only of it is not.
     if (trim(password).empty()) {
-        return VoidResult::failure(ErrorCode::InvalidInput,
-                                   "password must not consist only of whitespace");
+        return VoidResult::failure(
+            invalidInput("password must not consist only of whitespace", rules::PASSWORD_BLANK));
     }
     return VoidResult::success();
 }
@@ -105,18 +117,22 @@ VoidResult validateDisplayName(std::string_view displayName) {
     const std::string candidate = trim(displayName);
 
     if (candidate.size() < MIN_DISPLAY_NAME_LENGTH) {
-        return VoidResult::failure(ErrorCode::InvalidInput,
-                                   "display name must be at least " +
-                                       std::to_string(MIN_DISPLAY_NAME_LENGTH) + " characters");
+        return VoidResult::failure(invalidInput("display name must be at least " +
+                                                    std::to_string(MIN_DISPLAY_NAME_LENGTH) +
+                                                    " characters",
+                                                rules::DISPLAY_NAME_TOO_SHORT,
+                                                {std::to_string(MIN_DISPLAY_NAME_LENGTH)}));
     }
     if (candidate.size() > MAX_DISPLAY_NAME_LENGTH) {
-        return VoidResult::failure(ErrorCode::InvalidInput,
-                                   "display name must be at most " +
-                                       std::to_string(MAX_DISPLAY_NAME_LENGTH) + " characters");
+        return VoidResult::failure(invalidInput("display name must be at most " +
+                                                    std::to_string(MAX_DISPLAY_NAME_LENGTH) +
+                                                    " characters",
+                                                rules::DISPLAY_NAME_TOO_LONG,
+                                                {std::to_string(MAX_DISPLAY_NAME_LENGTH)}));
     }
     if (containsControlCharacter(candidate)) {
-        return VoidResult::failure(ErrorCode::InvalidInput,
-                                   "display name contains invalid characters");
+        return VoidResult::failure(
+            invalidInput("display name contains invalid characters", rules::DISPLAY_NAME_INVALID));
     }
     return VoidResult::success();
 }

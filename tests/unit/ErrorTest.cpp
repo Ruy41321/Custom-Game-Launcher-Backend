@@ -58,4 +58,31 @@ TEST(ErrorTest, HelperFactoriesSetTheExpectedCode) {
     EXPECT_EQ(launcher::common::internalError("boom").code, ErrorCode::Internal);
 }
 
+// A failure that names no rule is the default and stays valid: most of them are not about a
+// field somebody typed, and the envelope leaves both keys out rather than sending them empty.
+TEST(ErrorTest, AnErrorNamesNoRuleUnlessItIsGivenOne) {
+    const Error plain{ErrorCode::InvalidInput, "something is off"};
+
+    EXPECT_TRUE(plain.rule.empty());
+    EXPECT_TRUE(plain.ruleArgs.empty());
+    EXPECT_TRUE(launcher::common::invalidInput("bad").rule.empty());
+}
+
+TEST(ErrorTest, AnErrorCanCarryARuleAndItsArguments) {
+    const auto error = launcher::common::invalidInput(
+        "password must be at least 8 characters", "password_too_short", {"8"});
+
+    EXPECT_EQ(error.code, ErrorCode::InvalidInput);
+    EXPECT_EQ(error.rule, "password_too_short");
+    ASSERT_EQ(error.ruleArgs.size(), 1U);
+    EXPECT_EQ(error.ruleArgs.front(), "8");
+}
+
+TEST(ErrorTest, ARuleSurvivesBeingThrownAndCaught) {
+    const ApiException exception(
+        launcher::common::invalidInput("slug must not be empty", "slug_required"));
+
+    EXPECT_EQ(exception.error().rule, "slug_required");
+}
+
 } // namespace

@@ -8,6 +8,7 @@
 
 #include "common/Random.h"
 #include "domain/Role.h"
+#include "domain/ValidationRules.h"
 #include "services/CatalogService.h"
 #include "support/FakeCatalogRepositories.h"
 #include "support/TemporaryDirectory.h"
@@ -79,7 +80,8 @@ struct CatalogFixture {
 
     /// Writes a picture and hangs a row off the game, exactly as an upload would.
     std::string seedArtwork(const std::string& gameId, const std::string& bytes) {
-        auto stored = store().store(bytes, launcher::domain::ImageFormat::Png);
+        auto stored = store().store(
+            bytes, launcher::domain::storedFormatOf(launcher::domain::ImageFormat::Png));
         EXPECT_TRUE(stored.ok()) << stored.error().detail;
 
         launcher::domain::GameMedia row;
@@ -335,6 +337,180 @@ TEST(CatalogServiceTest, RejectsAVersionWithAMalformedSemver) {
 
     ASSERT_FALSE(created.ok());
     EXPECT_EQ(created.error().code, ErrorCode::InvalidInput);
+}
+
+// The dead end this route was built for: a version created with the box unticked had no way
+// to become published, by any route, ever.
+TEST(CatalogServiceTest, PublishesAVersionThatWasCreatedUnpublished) {
+    CatalogFixture fixture;
+    const auto game = fixture.seedGame(GameVisibility::Draft);
+
+    CreateVersionCommand command;
+    command.semver = "0.2.1";
+    const auto created =
+        drogon::sync_wait(fixture.service.createVersion(publisher(), game.id, command));
+    ASSERT_TRUE(created.ok()) << created.error().detail;
+    ASSERT_TRUE(created.value().publishedAt.empty());
+
+    launcher::domain::GameVersionUpdate changes;
+    changes.published = true;
+    const auto published = drogon::sync_wait(
+        fixture.service.updateVersion(publisher(), game.id, created.value().id, changes));
+
+    ASSERT_TRUE(published.ok()) << published.error().detail;
+    EXPECT_FALSE(published.value().publishedAt.empty());
+}
+
+// The date a release went out is not something a second press of a button may move.
+TEST(CatalogServiceTest, PublishingAVersionTwiceKeepsTheOriginalDate) {
+    CatalogFixture fixture;
+    const auto game = fixture.seedGame(GameVisibility::Draft);
+
+    CreateVersionCommand command;
+    command.semver = "1.0.0";
+    command.publish = true;
+    const auto created =
+        drogon::sync_wait(fixture.service.createVersion(publisher(), game.id, command));
+    ASSERT_TRUE(created.ok()) << created.error().detail;
+
+    launcher::domain::GameVersionUpdate changes;
+    changes.published = true;
+    const auto again = drogon::sync_wait(
+        fixture.service.updateVersion(publisher(), game.id, created.value().id, changes));
+
+    ASSERT_TRUE(again.ok()) << again.error().detail;
+    EXPECT_EQ(again.value().publishedAt, created.value().publishedAt);
+}
+
+// Withdrawing goes the other way on purpose: it is the reversible thing standing next to a
+// delete that is not.
+TEST(CatalogServiceTest, WithdrawsAPublishedVersion) {
+    CatalogFixture fixture;
+    const auto game = fixture.seedGame(GameVisibility::Draft);
+
+    CreateVersionCommand command;
+    command.semver = "1.0.0";
+    command.publish = true;
+    const auto created =
+        drogon::sync_wait(fixture.service.createVersion(publisher(), game.id, command));
+    ASSERT_TRUE(created.ok()) << created.error().detail;
+
+    launcher::domain::GameVersionUpdate changes;
+    changes.published = false;
+    const auto withdrawn = drogon::sync_wait(
+        fixture.service.updateVersion(publisher(), game.id, created.value().id, changes));
+
+    ASSERT_TRUE(withdrawn.ok()) << withdrawn.error().detail;
+    EXPECT_TRUE(withdrawn.value().publishedAt.empty());
+}
+
+// An absent field leaves its column alone. Sending only new release notes must not withdraw a
+// version, which is the mistake a PATCH built out of defaults makes.
+TEST(CatalogServiceTest, AnAbsentFieldLeavesTheVersionAlone) {
+    CatalogFixture fixture;
+    const auto game = fixture.seedGame(GameVisibility::Draft);
+
+    CreateVersionCommand command;
+    command.semver = "1.0.0";
+    command.stage = BuildStage::Beta;
+    command.publish = true;
+    const auto created =
+        drogon::sync_wait(fixture.service.createVersion(publisher(), game.id, command));
+    ASSERT_TRUE(created.ok()) << created.error().detail;
+
+    launcher::domain::GameVersionUpdate changes;
+    changes.releaseNotes = "now with fewer crashes";
+    const auto updated = drogon::sync_wait(
+        fixture.service.updateVersion(publisher(), game.id, created.value().id, changes));
+
+    ASSERT_TRUE(updated.ok()) << updated.error().detail;
+    EXPECT_EQ(updated.value().releaseNotes, "now with fewer crashes");
+    EXPECT_EQ(updated.value().stage, BuildStage::Beta);
+    EXPECT_FALSE(updated.value().publishedAt.empty()) << "it must still be published";
+}
+
+// The same pairing check `createBuild` makes: owning a game must not let you reach into
+// somebody else's version through it.
+TEST(CatalogServiceTest, RefusesToUpdateAVersionOfAnotherGame) {
+    CatalogFixture fixture;
+    const auto mine = fixture.seedGame(GameVisibility::Draft);
+    const auto theirs = fixture.seedGame(GameVisibility::Draft, launcher::common::randomUuid());
+
+    launcher::domain::GameVersion foreign;
+    foreign.gameId = theirs.id;
+    foreign.semver = "1.0";
+    const auto seeded = fixture.versions.seed(foreign);
+
+    launcher::domain::GameVersionUpdate changes;
+    changes.published = true;
+    const auto updated =
+        drogon::sync_wait(fixture.service.updateVersion(publisher(), mine.id, seeded.id, changes));
+
+    ASSERT_FALSE(updated.ok());
+    EXPECT_EQ(updated.error().code, ErrorCode::NotFound);
+    EXPECT_TRUE(fixture.versions.versions.back().publishedAt.empty())
+        << "the other publisher's version must be untouched";
+}
+
+TEST(CatalogServiceTest, RefusesToUpdateAVersionWithoutThePublishPermission) {
+    CatalogFixture fixture;
+    const auto game = fixture.seedGame(GameVisibility::Draft);
+
+    launcher::domain::GameVersion version;
+    version.gameId = game.id;
+    version.semver = "1.0";
+    const auto seeded = fixture.versions.seed(version);
+
+    launcher::domain::GameVersionUpdate changes;
+    changes.published = true;
+    const auto updated =
+        drogon::sync_wait(fixture.service.updateVersion(player(), game.id, seeded.id, changes));
+
+    ASSERT_FALSE(updated.ok());
+    EXPECT_EQ(updated.error().code, ErrorCode::Forbidden);
+}
+
+// A build carries a label because its identity — version, platform, architecture — is exactly
+// what a publisher looking at four identical rows cannot tell apart.
+TEST(CatalogServiceTest, KeepsTheNameAPublisherGaveABuild) {
+    CatalogFixture fixture;
+    const auto game = fixture.seedGame(GameVisibility::Draft);
+
+    launcher::domain::GameVersion version;
+    version.gameId = game.id;
+    version.semver = "1.0";
+    const auto seeded = fixture.versions.seed(version);
+
+    CreateBuildCommand command;
+    command.versionId = seeded.id;
+    command.name = "  Nightly, with the demo levels  ";
+    command.platform = BuildPlatform::Windows;
+    const auto created =
+        drogon::sync_wait(fixture.service.createBuild(publisher(), game.id, command));
+
+    ASSERT_TRUE(created.ok()) << created.error().detail;
+    EXPECT_EQ(created.value().name, "Nightly, with the demo levels");
+}
+
+TEST(CatalogServiceTest, RefusesABuildNameLongerThanTheColumnHolds) {
+    CatalogFixture fixture;
+    const auto game = fixture.seedGame(GameVisibility::Draft);
+
+    launcher::domain::GameVersion version;
+    version.gameId = game.id;
+    version.semver = "1.0";
+    const auto seeded = fixture.versions.seed(version);
+
+    CreateBuildCommand command;
+    command.versionId = seeded.id;
+    command.name = std::string(launcher::domain::MAX_BUILD_NAME_LENGTH + 1, 'a');
+    command.platform = BuildPlatform::Windows;
+    const auto created =
+        drogon::sync_wait(fixture.service.createBuild(publisher(), game.id, command));
+
+    ASSERT_FALSE(created.ok());
+    EXPECT_EQ(created.error().code, ErrorCode::InvalidInput);
+    EXPECT_EQ(created.error().rule, launcher::domain::rules::BUILD_NAME_TOO_LONG);
 }
 
 // Pairing a version belonging to one game with a game the caller does own would otherwise let

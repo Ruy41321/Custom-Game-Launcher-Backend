@@ -31,6 +31,8 @@ class PgUserRepository : public IUserRepository {
     drogon::Task<void> updatePasswordHash(std::string userId,
                                           std::string passwordHash) const override;
 
+    drogon::Task<void> rehashPassword(std::string userId, std::string passwordHash) const override;
+
     drogon::Task<void> recordSuccessfulLogin(std::string userId) const override;
 
     drogon::Task<bool> chargeUpload(std::string userId, int64_t bytes) const override;

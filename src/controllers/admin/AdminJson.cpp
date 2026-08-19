@@ -109,6 +109,9 @@ Json::Value userToJson(const repositories::AdminUserSummary& summary) {
     json["displayName"] = summary.user.displayName;
     json["emailVerified"] = summary.user.emailVerified;
     json["active"] = summary.user.isActive;
+    // Visible in the list so an operator can see who is still sitting on a one-time password
+    // they were given and never replaced.
+    json["passwordChangeRequired"] = summary.user.passwordChangeRequired;
     json["uploadQuotaBytes"] = static_cast<Json::Int64>(summary.user.uploadQuotaBytes);
     json["uploadUsedBytes"] = static_cast<Json::Int64>(summary.user.uploadUsedBytes);
     json["createdAt"] = summary.createdAt;

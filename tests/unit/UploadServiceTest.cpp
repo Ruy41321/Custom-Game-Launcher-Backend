@@ -72,6 +72,7 @@ struct UploadFixture {
         ownership.gameId = launcher::common::randomUuid();
         ownership.publisherUserId = PUBLISHER;
         ownership.visibility = GameVisibility::Public;
+        ownership.versionPublished = true;
 
         buildId = builds.seed(build, ownership).id;
     }
@@ -468,6 +469,33 @@ TEST(UploadServiceTest, HidesTheManifestOfABuildThatIsNotReady) {
 
     ASSERT_FALSE(manifest.ok());
     EXPECT_EQ(manifest.error().code, ErrorCode::NotFound);
+}
+
+// The manifest is the other route that asks whether a build may be *read*, so it answers the
+// same way about a version that was never published: 404 to a player, served to its publisher,
+// who needs it to test the build before releasing the version.
+TEST(UploadServiceTest, HidesTheManifestOfABuildWhoseVersionWasNeverPublished) {
+    UploadFixture fixture;
+    fixture.builds.ownerships.front().versionPublished = false;
+
+    const std::string content = "MZ binary";
+    ASSERT_TRUE(fixture.upload(content).ok());
+    ASSERT_TRUE(
+        drogon::sync_wait(
+            fixture.service.finalizeBuild(
+                publisher(),
+                fixture.buildId,
+                manifestOf({ManifestEntry{"Game.exe", sha256Hex(content), 0, true}}, "Game.exe")))
+            .ok());
+
+    const Actor somebodyElse{launcher::common::randomUuid(),
+                             {permissions::GAME_READ, permissions::GAME_DOWNLOAD}};
+
+    const auto refused = drogon::sync_wait(fixture.service.manifest(somebodyElse, fixture.buildId));
+    ASSERT_FALSE(refused.ok());
+    EXPECT_EQ(refused.error().code, ErrorCode::NotFound);
+
+    EXPECT_TRUE(drogon::sync_wait(fixture.service.manifest(publisher(), fixture.buildId)).ok());
 }
 
 // ---------------------------------------------------------------------------

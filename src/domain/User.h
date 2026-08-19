@@ -19,6 +19,10 @@ struct User {
     std::string passwordHash;
     bool emailVerified{false};
     bool isActive{true};
+    /// The account holds a password somebody else chose for it — an operator's one-time
+    /// password, handed out where no mail transport exists to deliver a reset link. Until the
+    /// owner replaces it, every route but the one that replaces it is refused.
+    bool passwordChangeRequired{false};
     int64_t uploadQuotaBytes{0};
     int64_t uploadUsedBytes{0};
 

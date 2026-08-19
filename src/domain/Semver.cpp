@@ -4,33 +4,36 @@
 #include <vector>
 
 #include "domain/Validation.h"
+#include "domain/ValidationRules.h"
 
 namespace launcher::domain {
 namespace {
 
-using common::ErrorCode;
+using common::invalidInput;
 using common::Result;
 
 common::VoidResult parseComponent(std::string_view text, int& out) {
     if (text.empty()) {
-        return common::VoidResult::failure(ErrorCode::InvalidInput,
-                                           "version components must not be empty");
+        return common::VoidResult::failure(
+            invalidInput("version components must not be empty", rules::VERSION_INVALID));
     }
     if (text.size() > 1 && text.front() == '0') {
-        return common::VoidResult::failure(ErrorCode::InvalidInput,
-                                           "version components must not have leading zeros");
+        return common::VoidResult::failure(
+            invalidInput("version components must not have leading zeros", rules::VERSION_INVALID));
     }
 
     int value = 0;
     for (const char character : text) {
         if (std::isdigit(static_cast<unsigned char>(character)) == 0) {
-            return common::VoidResult::failure(ErrorCode::InvalidInput,
-                                               "version components must be numeric");
+            return common::VoidResult::failure(
+                invalidInput("version components must be numeric", rules::VERSION_INVALID));
         }
         value = value * 10 + (character - '0');
         if (value > MAX_VERSION_COMPONENT) {
-            return common::VoidResult::failure(ErrorCode::InvalidInput,
-                                               "version components are too large");
+            return common::VoidResult::failure(
+                invalidInput("version components are too large",
+                             rules::VERSION_TOO_LARGE,
+                             {std::to_string(MAX_VERSION_COMPONENT)}));
         }
     }
 
@@ -43,7 +46,8 @@ common::VoidResult parseComponent(std::string_view text, int& out) {
 Result<Semver> parseSemver(std::string_view input) {
     const auto text = trim(input);
     if (text.empty()) {
-        return Result<Semver>::failure(ErrorCode::InvalidInput, "a version is required");
+        return Result<Semver>::failure(
+            invalidInput("a version is required", rules::VERSION_REQUIRED));
     }
 
     std::vector<std::string_view> parts;
@@ -59,8 +63,8 @@ Result<Semver> parseSemver(std::string_view input) {
     }
 
     if (parts.size() > 3) {
-        return Result<Semver>::failure(ErrorCode::InvalidInput,
-                                       "a version has at most three components, e.g. 1.2.3");
+        return Result<Semver>::failure(invalidInput(
+            "a version has at most three components, e.g. 1.2.3", rules::VERSION_INVALID));
     }
 
     Semver version;

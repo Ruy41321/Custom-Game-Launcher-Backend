@@ -12,10 +12,15 @@
 namespace {
 
 using launcher::common::ErrorCode;
+using launcher::domain::Actor;
+using launcher::domain::BuildOwnership;
 using launcher::domain::canonicalManifestDocument;
+using launcher::domain::GameVisibility;
 using launcher::domain::isSha256Hex;
 using launcher::domain::isUuid;
 using launcher::domain::ManifestEntry;
+using launcher::domain::mayPublishBuild;
+using launcher::domain::mayReadBuild;
 using launcher::domain::parseSemver;
 using launcher::domain::slugify;
 using launcher::domain::validateManifest;
@@ -258,6 +263,52 @@ TEST(ManifestTest, CanonicalFormDependsOnlyOnContent) {
 
     EXPECT_EQ(first, second);
     EXPECT_NE(first, other) << "launch arguments are part of what the hash covers";
+}
+
+// ---------------------------------------------------------------------------
+// Who may see that a build exists
+// ---------------------------------------------------------------------------
+
+BuildOwnership ownershipOf(GameVisibility visibility, bool versionPublished) {
+    BuildOwnership ownership;
+    ownership.buildId = "11111111-1111-1111-1111-111111111111";
+    ownership.gameVersionId = "22222222-2222-2222-2222-222222222222";
+    ownership.gameId = "33333333-3333-3333-3333-333333333333";
+    ownership.publisherUserId = "publisher";
+    ownership.visibility = visibility;
+    ownership.versionPublished = versionPublished;
+    return ownership;
+}
+
+const Actor PLAYER{"somebody-else", {}};
+const Actor PUBLISHER{"publisher", {}};
+const Actor OPERATOR{"operator", {std::string(launcher::domain::permissions::ADMIN_GAMES_MANAGE)}};
+
+TEST(BuildAuthorizationTest, APublishedVersionOfAPublicGameIsReadableByAnybody) {
+    EXPECT_TRUE(mayReadBuild(ownershipOf(GameVisibility::Public, true), PLAYER));
+    EXPECT_TRUE(mayReadBuild(ownershipOf(GameVisibility::Unlisted, true), PLAYER));
+}
+
+// The hole this rule closes: a game may be public while carrying a version nobody has released
+// yet, and until 2026-08-17 the download path only asked about the game. A version created and
+// never published was downloadable by anyone who could name one of its builds.
+TEST(BuildAuthorizationTest, AnUnpublishedVersionIsTheirPublishersAloneEvenOnAPublicGame) {
+    EXPECT_FALSE(mayReadBuild(ownershipOf(GameVisibility::Public, false), PLAYER));
+    EXPECT_FALSE(mayReadBuild(ownershipOf(GameVisibility::Unlisted, false), PLAYER));
+}
+
+TEST(BuildAuthorizationTest, ThePublisherAndAnOperatorSeeItEitherWay) {
+    for (const bool published : {true, false}) {
+        EXPECT_TRUE(mayReadBuild(ownershipOf(GameVisibility::Draft, published), PUBLISHER));
+        EXPECT_TRUE(mayReadBuild(ownershipOf(GameVisibility::Draft, published), OPERATOR));
+    }
+}
+
+// Uploading is a different question: a build is uploaded to a version precisely before that
+// version is published, so publishing rights must not depend on the version's state.
+TEST(BuildAuthorizationTest, PublishingRightsDoNotDependOnTheVersionBeingPublished) {
+    EXPECT_TRUE(mayPublishBuild(ownershipOf(GameVisibility::Draft, false), PUBLISHER));
+    EXPECT_FALSE(mayPublishBuild(ownershipOf(GameVisibility::Public, true), PLAYER));
 }
 
 } // namespace

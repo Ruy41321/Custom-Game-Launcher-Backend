@@ -5,7 +5,11 @@
 #include <memory>
 #include <string>
 
+#include <algorithm>
+
 #include "common/Hash.h"
+#include "common/Random.h"
+#include "domain/ValidationRules.h"
 #include "services/AuthService.h"
 #include "support/FakeMailSender.h"
 #include "support/FakeRepositories.h"
@@ -323,8 +327,37 @@ TEST(AuthServiceLoginTest, UpgradesAHashProducedWithWeakerParameters) {
         drogon::sync_wait(fixture.service.login(seeded.email, VALID_PASSWORD, ClientContext{}));
 
     ASSERT_TRUE(result.ok()) << result.error().detail;
-    ASSERT_EQ(fixture.users.passwordUpdates.count(seeded.id), 1U);
-    EXPECT_NE(fixture.users.passwordUpdates[seeded.id], user.passwordHash);
+    ASSERT_EQ(fixture.users.rehashes.count(seeded.id), 1U);
+    EXPECT_NE(fixture.users.rehashes[seeded.id], user.passwordHash);
+
+    // Through rehashPassword and not updatePasswordHash, which clears the forced change:
+    // nobody chose a password here, and signing in once with an operator's temporary one must
+    // not be enough to keep it.
+    EXPECT_EQ(fixture.users.passwordUpdates.count(seeded.id), 0U);
+}
+
+// The other half of the same rule, stated as its own failure: an account holding a one-time
+// password whose hash happens to want upgrading is still an account that has to change it.
+TEST(AuthServiceLoginTest, AnUpgradedHashDoesNotClearTheForcedPasswordChange) {
+    AuthFixture fixture;
+    const Argon2idPasswordHasher weak(PasswordHashingSettings{1, 8U * 1024U * 1024U});
+    User user;
+    user.email = "dev@example.com";
+    user.displayName = "Dev";
+    user.passwordHash = weak.hash(VALID_PASSWORD).value();
+    user.emailVerified = true;
+    user.passwordChangeRequired = true;
+    fixture.users.seed(user);
+
+    const auto result =
+        drogon::sync_wait(fixture.service.login(user.email, VALID_PASSWORD, ClientContext{}));
+
+    ASSERT_TRUE(result.ok()) << result.error().detail;
+    EXPECT_TRUE(fixture.users.users[0].passwordChangeRequired);
+
+    const auto claims = fixture.tokens.verifyAccessToken(result.value().accessToken);
+    ASSERT_TRUE(claims.ok());
+    EXPECT_TRUE(claims.value().passwordChangeRequired);
 }
 
 // ---------------------------------------------------------------------------
@@ -637,6 +670,119 @@ TEST(AuthServicePasswordResetTest, RejectsAWeakNewPasswordBeforeConsumingTheToke
     // The link must survive a rejected attempt, or a typo would strand the user.
     EXPECT_TRUE(
         drogon::sync_wait(fixture.service.resetPassword(token, "a brand new passphrase")).ok());
+}
+
+// ---------------------------------------------------------------------------
+// Changing the password from inside a session — the way out of a one-time password
+// ---------------------------------------------------------------------------
+
+TEST(AuthServiceChangePasswordTest, ReplacesThePasswordAndHandsBackAWorkingSession) {
+    AuthFixture fixture;
+    const auto user = fixture.seedActiveUser();
+
+    const auto changed = drogon::sync_wait(
+        fixture.service.changePassword(user.id, VALID_PASSWORD, "a brand new passphrase", {}));
+
+    ASSERT_TRUE(changed.ok()) << changed.error().detail;
+    EXPECT_FALSE(changed.value().accessToken.empty());
+    EXPECT_FALSE(changed.value().refreshToken.empty());
+
+    // The old one is gone and the new one works, which is the whole of what "changed" means.
+    EXPECT_FALSE(drogon::sync_wait(fixture.service.login(user.email, VALID_PASSWORD, {})).ok());
+    EXPECT_TRUE(
+        drogon::sync_wait(fixture.service.login(user.email, "a brand new passphrase", {})).ok());
+}
+
+// The flag is what refuses every route, and the session handed back here is the one the
+// caller carries on with — minting it from a stale copy would leave them still locked out
+// after doing exactly what they were told to do.
+TEST(AuthServiceChangePasswordTest, TheNewSessionNoLongerCarriesTheForcedChange) {
+    AuthFixture fixture;
+    auto user = fixture.seedActiveUser();
+    fixture.users.users[0].passwordChangeRequired = true;
+
+    const auto changed = drogon::sync_wait(
+        fixture.service.changePassword(user.id, VALID_PASSWORD, "a brand new passphrase", {}));
+
+    ASSERT_TRUE(changed.ok()) << changed.error().detail;
+    EXPECT_FALSE(fixture.users.users[0].passwordChangeRequired);
+
+    const auto claims = fixture.tokens.verifyAccessToken(changed.value().accessToken);
+    ASSERT_TRUE(claims.ok());
+    EXPECT_FALSE(claims.value().passwordChangeRequired);
+}
+
+// D44's rule on the other request that can take an account from its owner: a valid token says
+// who is asking, not that the owner is the one at the keyboard.
+TEST(AuthServiceChangePasswordTest, AsksForTheCurrentPasswordAgain) {
+    AuthFixture fixture;
+    const auto user = fixture.seedActiveUser();
+
+    const auto refused = drogon::sync_wait(
+        fixture.service.changePassword(user.id, "not it", "a brand new passphrase", {}));
+
+    ASSERT_FALSE(refused.ok());
+    EXPECT_EQ(refused.error().code, ErrorCode::Unauthenticated);
+    EXPECT_TRUE(fixture.hasher.verify(VALID_PASSWORD, fixture.users.users[0].passwordHash));
+}
+
+// Elsewhere this would be a harmless no-op. Here it is the feature defeated: re-entering the
+// operator's temporary password would clear the flag and leave the account on a credential
+// somebody else knows.
+TEST(AuthServiceChangePasswordTest, TheNewPasswordCannotBeTheOldOne) {
+    AuthFixture fixture;
+    auto user = fixture.seedActiveUser();
+    fixture.users.users[0].passwordChangeRequired = true;
+
+    const auto refused = drogon::sync_wait(
+        fixture.service.changePassword(user.id, VALID_PASSWORD, VALID_PASSWORD, {}));
+
+    ASSERT_FALSE(refused.ok());
+    EXPECT_EQ(refused.error().code, ErrorCode::InvalidInput);
+    EXPECT_EQ(refused.error().rule, launcher::domain::rules::PASSWORD_UNCHANGED);
+    EXPECT_TRUE(fixture.users.users[0].passwordChangeRequired);
+}
+
+TEST(AuthServiceChangePasswordTest, TheNewPasswordStillHasToPassThePolicy) {
+    AuthFixture fixture;
+    const auto user = fixture.seedActiveUser();
+
+    const auto refused =
+        drogon::sync_wait(fixture.service.changePassword(user.id, VALID_PASSWORD, "short", {}));
+
+    ASSERT_FALSE(refused.ok());
+    EXPECT_EQ(refused.error().code, ErrorCode::InvalidInput);
+    // Checked before the current password is even verified, so a weak new password costs no
+    // Argon2id verification — and the account is untouched either way.
+    EXPECT_TRUE(fixture.hasher.verify(VALID_PASSWORD, fixture.users.users[0].passwordHash));
+}
+
+// A password change is what somebody does after a credential leaked, so the sessions minted
+// under the old one cannot outlive it.
+TEST(AuthServiceChangePasswordTest, EveryOtherSessionAndEveryResetLinkDies) {
+    AuthFixture fixture;
+    const auto user = fixture.seedActiveUser();
+    ASSERT_TRUE(drogon::sync_wait(fixture.service.login(user.email, VALID_PASSWORD, {})).ok());
+
+    ASSERT_TRUE(drogon::sync_wait(fixture.service.changePassword(
+                                      user.id, VALID_PASSWORD, "a brand new passphrase", {}))
+                    .ok());
+
+    EXPECT_NE(std::find(fixture.refreshTokens.revokedUsers.begin(),
+                        fixture.refreshTokens.revokedUsers.end(),
+                        user.id),
+              fixture.refreshTokens.revokedUsers.end());
+    EXPECT_FALSE(fixture.userTokens.invalidations.empty());
+}
+
+TEST(AuthServiceChangePasswordTest, RejectsAnAccountThatIsNoLongerThere) {
+    AuthFixture fixture;
+
+    const auto refused = drogon::sync_wait(fixture.service.changePassword(
+        launcher::common::randomUuid(), VALID_PASSWORD, "a brand new passphrase", {}));
+
+    ASSERT_FALSE(refused.ok());
+    EXPECT_EQ(refused.error().code, ErrorCode::Unauthenticated);
 }
 
 TEST(AuthServicePasswordResetTest, RejectsAnUnknownToken) {

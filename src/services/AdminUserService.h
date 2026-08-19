@@ -11,6 +11,7 @@
 #include "domain/Role.h"
 #include "repositories/IAdminUserRepository.h"
 #include "repositories/IAuditRepository.h"
+#include "services/PasswordHasher.h"
 
 namespace launcher::services {
 
@@ -20,10 +21,24 @@ namespace launcher::services {
 /// added later that forgets one — the same discipline the catalog and upload services follow.
 /// The audit entry describing each change is assembled here too and handed to the repository,
 /// which writes it in the same statement as the change itself.
+/// What an operator gets back after handing out a one-time password: the account as it now
+/// stands, and the password itself, which exists nowhere else.
+///
+/// It is returned rather than delivered because this whole feature is for the deployment that
+/// cannot deliver anything — there is no mail transport, which is why an operator is doing
+/// this at all. It is therefore shown once, in the response to the request that created it,
+/// and is never stored, logged or recoverable: only its Argon2id hash reaches the database,
+/// and the audit entry records that it happened and not what it was.
+struct TemporaryPassword {
+    repositories::AdminUserSummary user;
+    std::string password;
+};
+
 class AdminUserService {
   public:
     AdminUserService(const repositories::IAdminUserRepository& users,
-                     const repositories::IAuditRepository& audit);
+                     const repositories::IAuditRepository& audit,
+                     const IPasswordHasher& passwordHasher);
 
     drogon::Task<common::Result<repositories::AdminUserPage>>
     list(domain::Actor actor, repositories::AdminUserQuery query) const;
@@ -36,6 +51,20 @@ class AdminUserService {
 
     drogon::Task<common::Result<repositories::AdminUserSummary>>
     setActive(domain::Actor actor, std::string userId, bool active) const;
+
+    /// Gives an account a password the operator can read out, and requires it to be changed.
+    ///
+    /// The way back in on a deployment that sends no mail: with `MAIL_TRANSPORT=none` there is
+    /// no reset link, so "forgotten your password?" is a sentence telling the person to ask an
+    /// operator, and this is what the operator does about it.
+    ///
+    /// **An operator cannot do this to themselves.** Same shape as the deactivation rule, and
+    /// a sharper reason: the flag refuses every route but the password change, and the console
+    /// this request arrives on has no such route — an operator who set their own would lock
+    /// themselves out of the surface they administer, with only the public API left to escape
+    /// through.
+    drogon::Task<common::Result<TemporaryPassword>> setTemporaryPassword(domain::Actor actor,
+                                                                         std::string userId) const;
 
     drogon::Task<common::Result<repositories::AdminUserSummary>>
     grantRole(domain::Actor actor, std::string userId, std::string roleKey) const;
@@ -61,6 +90,7 @@ class AdminUserService {
 
     const repositories::IAdminUserRepository& users_;
     const repositories::IAuditRepository& audit_;
+    const IPasswordHasher& passwordHasher_;
 };
 
 } // namespace launcher::services

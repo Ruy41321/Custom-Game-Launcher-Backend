@@ -16,7 +16,7 @@ namespace {
 constexpr const char* ADMIN_USER_COLUMNS = R"(
     u.id, u.email, u.display_name,
     (u.email_verified_at IS NOT NULL) AS email_verified, u.is_active,
-    u.upload_quota_bytes, u.upload_used_bytes,
+    u.password_change_required, u.upload_quota_bytes, u.upload_used_bytes,
     to_char(u.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at,
     COALESCE(to_char(u.last_login_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '')
         AS last_login_at,
@@ -49,6 +49,7 @@ AdminUserSummary mapSummary(const drogon::orm::Row& row) {
     summary.user.displayName = row["display_name"].as<std::string>();
     summary.user.emailVerified = row["email_verified"].as<bool>();
     summary.user.isActive = row["is_active"].as<bool>();
+    summary.user.passwordChangeRequired = row["password_change_required"].as<bool>();
     summary.user.uploadQuotaBytes = row["upload_quota_bytes"].as<int64_t>();
     summary.user.uploadUsedBytes = row["upload_used_bytes"].as<int64_t>();
     summary.createdAt = row["created_at"].as<std::string>();
@@ -179,6 +180,49 @@ drogon::Task<std::optional<AdminUserSummary>> PgAdminUserRepository::setActive(
             SELECT )" + ADMIN_USER_COLUMNS + " FROM updated u",
                                                       userId,
                                                       active ? "true" : "false",
+                                                      audit.actorUserId,
+                                                      audit.action,
+                                                      audit.entityType,
+                                                      audit.entityId,
+                                                      auditMetadataJson(audit.metadata));
+
+    if (rows.empty()) {
+        co_return std::nullopt;
+    }
+    co_return mapSummary(rows[0]);
+}
+
+drogon::Task<std::optional<AdminUserSummary>> PgAdminUserRepository::setTemporaryPassword(
+    std::string userId, std::string passwordHash, domain::NewAuditEntry audit) const {
+    // Four effects, one statement, for D36's reason and one more of its own: a hash written
+    // without the flag is a password nobody told the owner about that behaves like theirs, and
+    // a flag written without the hash locks an account out with a password that still works.
+    // The sessions and the outstanding reset links go with them — everything reachable with
+    // the credential being replaced stops being reachable at the moment it is replaced.
+    const auto rows = co_await database_->execSqlCoro(std::string(R"(
+            WITH updated AS (
+                UPDATE users
+                SET password_hash = $2, password_change_required = true
+                WHERE id = $1::uuid
+                RETURNING *
+            ),
+            revoked AS (
+                UPDATE refresh_tokens SET revoked_at = now()
+                WHERE user_id = $1::uuid AND revoked_at IS NULL
+                  AND EXISTS (SELECT 1 FROM updated)
+            ),
+            invalidated AS (
+                UPDATE user_tokens SET consumed_at = now()
+                WHERE user_id = $1::uuid AND purpose = 'password_reset' AND consumed_at IS NULL
+                  AND EXISTS (SELECT 1 FROM updated)
+            ),
+            logged AS ()") + AUDIT_INSERT +
+                                                          R"(
+                SELECT NULLIF($3, '')::uuid, $4, $5, $6, $7::jsonb FROM updated
+            )
+            SELECT )" + ADMIN_USER_COLUMNS + " FROM updated u",
+                                                      userId,
+                                                      passwordHash,
                                                       audit.actorUserId,
                                                       audit.action,
                                                       audit.entityType,

@@ -3,10 +3,12 @@
 #include <array>
 #include <cctype>
 
+#include "domain/ValidationRules.h"
+
 namespace launcher::domain {
 namespace {
 
-using common::ErrorCode;
+using common::invalidInput;
 using common::VoidResult;
 
 bool isDigits(std::string_view text) {
@@ -156,12 +158,13 @@ std::optional<BuildStatus> parseBuildStatus(std::string_view value) {
 
 VoidResult validateSlug(std::string_view slug) {
     if (slug.empty()) {
-        return VoidResult::failure(ErrorCode::InvalidInput, "slug must not be empty");
+        return VoidResult::failure(invalidInput("slug must not be empty", rules::SLUG_REQUIRED));
     }
     if (slug.size() > MAX_SLUG_LENGTH) {
-        return VoidResult::failure(ErrorCode::InvalidInput,
-                                   "slug must be at most " + std::to_string(MAX_SLUG_LENGTH) +
-                                       " characters");
+        return VoidResult::failure(
+            invalidInput("slug must be at most " + std::to_string(MAX_SLUG_LENGTH) + " characters",
+                         rules::SLUG_TOO_LONG,
+                         {std::to_string(MAX_SLUG_LENGTH)}));
     }
 
     bool previousWasHyphen = true; // a leading hyphen is as invalid as a doubled one
@@ -176,13 +179,14 @@ VoidResult validateSlug(std::string_view slug) {
             previousWasHyphen = true;
             continue;
         }
-        return VoidResult::failure(
-            ErrorCode::InvalidInput,
-            "slug must be lowercase letters, digits and single hyphens, e.g. my-great-game");
+        return VoidResult::failure(invalidInput(
+            "slug must be lowercase letters, digits and single hyphens, e.g. my-great-game",
+            rules::SLUG_INVALID));
     }
 
     if (previousWasHyphen) {
-        return VoidResult::failure(ErrorCode::InvalidInput, "slug must not end with a hyphen");
+        return VoidResult::failure(
+            invalidInput("slug must not end with a hyphen", rules::SLUG_INVALID));
     }
     return VoidResult::success();
 }
@@ -214,8 +218,8 @@ std::string slugify(std::string_view title) {
 
 VoidResult validateReleaseDate(std::string_view date) {
     constexpr std::size_t ISO_DATE_LENGTH = 10;
-    const auto malformed = VoidResult::failure(ErrorCode::InvalidInput,
-                                               "releaseDate must be an ISO date, e.g. 2026-04-30");
+    const auto malformed = VoidResult::failure(invalidInput(
+        "releaseDate must be an ISO date, e.g. 2026-04-30", rules::RELEASE_DATE_INVALID));
 
     if (date.size() != ISO_DATE_LENGTH || date[4] != '-' || date[7] != '-') {
         return malformed;
@@ -249,7 +253,9 @@ bool mayPublishBuild(const BuildOwnership& ownership, const Actor& actor) {
 }
 
 bool mayReadBuild(const BuildOwnership& ownership, const Actor& actor) {
-    return ownership.visibility != GameVisibility::Draft || mayPublishBuild(ownership, actor);
+    const bool public_ =
+        ownership.visibility != GameVisibility::Draft && ownership.versionPublished;
+    return public_ || mayPublishBuild(ownership, actor);
 }
 
 } // namespace launcher::domain

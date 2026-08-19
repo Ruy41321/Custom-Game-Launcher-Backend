@@ -8,10 +8,13 @@
 #include <cstddef>
 #include <string>
 
+#include "domain/Role.h"
+#include "domain/Validation.h"
 #include "integration/AppHarness.h"
 
 namespace {
 
+using launcher::domain::MIN_PASSWORD_LENGTH;
 using launcher::testing::AppHarness;
 using launcher::testing::ScopedAuthRateLimit;
 using launcher::testing::ScopedMailRateLimit;
@@ -118,6 +121,74 @@ TEST(AuthEndpointTest, RejectsInvalidRegistrationInput) {
 
     EXPECT_EQ(response->statusCode(), drogon::k422UnprocessableEntity);
     EXPECT_EQ(bodyOf(response)["code"].asString(), "invalid_input");
+}
+
+// The refusal a launcher has to turn into a sentence somebody can act on. `code` says only
+// that something was not accepted; `rule` says which rule, and `ruleArgs` carries the limit —
+// without them a client can either show English prose or match on it, and matching on prose
+// makes rewording the message a breaking change.
+TEST(AuthEndpointTest, AWeakPasswordIsRefusedWithAStableRuleAndItsLimit) {
+    LAUNCHER_REQUIRE_DATABASE();
+
+    Json::Value weakPassword = registerPayload(uniqueEmail());
+    weakPassword["password"] = "short";
+    const auto response = harness().postJson("/api/v1/auth/register", weakPassword);
+    ASSERT_EQ(response->statusCode(), drogon::k422UnprocessableEntity);
+
+    const Json::Value body = bodyOf(response);
+    EXPECT_EQ(body["code"].asString(), "invalid_input");
+    EXPECT_EQ(body["rule"].asString(), "password_too_short");
+    ASSERT_TRUE(body["ruleArgs"].isArray());
+    ASSERT_EQ(body["ruleArgs"].size(), 1U);
+    EXPECT_EQ(body["ruleArgs"][0].asString(), std::to_string(MIN_PASSWORD_LENGTH));
+}
+
+// The refusal a blank box produces comes from the body reader, not from the domain validator,
+// and it used to be the one 422 with no rule on the registration form. Absent, of the wrong
+// type and blank are one rule here, because to whoever is looking at the form they are one
+// thing: the box is empty.
+TEST(AuthEndpointTest, AnEmptyRequiredFieldNamesTheFieldsOwnRule) {
+    LAUNCHER_REQUIRE_DATABASE();
+
+    Json::Value blank = registerPayload(uniqueEmail());
+    blank["password"] = "                    ";
+    EXPECT_EQ(bodyOf(harness().postJson("/api/v1/auth/register", blank))["rule"].asString(),
+              "password_required");
+
+    Json::Value missing;
+    missing["email"] = uniqueEmail();
+    EXPECT_EQ(bodyOf(harness().postJson("/api/v1/auth/register", missing))["rule"].asString(),
+              "password_required");
+}
+
+TEST(AuthEndpointTest, ADisplayNameThatIsTooLongNamesItsOwnRule) {
+    LAUNCHER_REQUIRE_DATABASE();
+
+    Json::Value payload = registerPayload(uniqueEmail());
+    payload["displayName"] = std::string(65, 'a');
+    const auto response = harness().postJson("/api/v1/auth/register", payload);
+    ASSERT_EQ(response->statusCode(), drogon::k422UnprocessableEntity);
+
+    const Json::Value body = bodyOf(response);
+    EXPECT_EQ(body["rule"].asString(), "display_name_too_long");
+    ASSERT_EQ(body["ruleArgs"].size(), 1U);
+    EXPECT_EQ(body["ruleArgs"][0].asString(), "64");
+}
+
+// A refusal that is not about a field somebody typed carries no rule at all, and the keys are
+// absent rather than empty. A filter's 401 is the case worth asserting on: those responses are
+// the ones that never reach post-handling advice, so they are the ones an envelope change is
+// most likely to miss.
+TEST(AuthEndpointTest, ARefusalWithNoRuleCarriesNeitherKey) {
+    LAUNCHER_REQUIRE_DATABASE();
+
+    const auto response = harness().get("/api/v1/games/does-not-exist-at-all");
+    ASSERT_EQ(response->statusCode(), drogon::k401Unauthorized);
+
+    const Json::Value body = bodyOf(response);
+    EXPECT_EQ(body["code"].asString(), "unauthenticated");
+    EXPECT_FALSE(body.isMember("rule"));
+    EXPECT_FALSE(body.isMember("ruleArgs"));
 }
 
 TEST(AuthEndpointTest, RejectsAMissingField) {
@@ -491,6 +562,157 @@ TEST(AuthEndpointTest, ThrottlesRepeatedLoginAttempts) {
     ASSERT_EQ(limited->statusCode(), drogon::k429TooManyRequests);
     EXPECT_EQ(bodyOf(limited)["code"].asString(), "rate_limited");
     EXPECT_FALSE(limited->getHeader("Retry-After").empty());
+}
+
+// ---------------------------------------------------------------------------
+// The forced password change — the way back in where the deployment sends no mail
+//
+// Driven end to end rather than asserted per unit, because the interesting part is the shape
+// of the whole loop: an operator hands out a password, the account can do nothing but replace
+// it, and replacing it puts everything back.
+// ---------------------------------------------------------------------------
+
+/// Puts the account on a one-time password through the operator route, and returns it.
+std::string temporaryPasswordFor(const Json::Value& subject) {
+    const auto operatorSession =
+        harness().createSessionWithRole(uniqueEmail(), launcher::domain::roles::ADMIN);
+    const auto issued = harness().adminPostJson(
+        "/admin/api/users/" + subject["user"]["id"].asString() + "/temporary-password",
+        Json::Value{},
+        operatorSession["accessToken"].asString());
+    EXPECT_EQ(issued->statusCode(), drogon::k200OK) << issued->body();
+    return bodyOf(issued)["temporaryPassword"].asString();
+}
+
+TEST(PasswordChangeEndpointTest, ASessionOnATemporaryPasswordReachesNothingButTheChange) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto email = uniqueEmail();
+    const auto subject = createVerifiedSession(email);
+    const auto temporary = temporaryPasswordFor(subject);
+
+    const auto signedIn = harness().postJson("/api/v1/auth/login", credentials(email, temporary));
+    ASSERT_EQ(signedIn->statusCode(), drogon::k200OK) << signedIn->body();
+    const auto token = bodyOf(signedIn)["accessToken"].asString();
+
+    // Two ordinary reads and one write, all refused with the category that says what to do
+    // about it — rather than a forbidden a client would have to tell apart by its prose.
+    for (const auto* path : {"/api/v1/library", "/api/v1/auth/me", "/api/v1/games"}) {
+        const auto refused = harness().get(path, token);
+        EXPECT_EQ(refused->statusCode(), drogon::k403Forbidden) << path << ": " << refused->body();
+        EXPECT_EQ(bodyOf(refused)["code"].asString(), "password_change_required") << path;
+    }
+}
+
+TEST(PasswordChangeEndpointTest, ChangingThePasswordOpensEverythingBackUp) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto email = uniqueEmail();
+    const auto subject = createVerifiedSession(email);
+    const auto temporary = temporaryPasswordFor(subject);
+
+    const auto signedIn = harness().postJson("/api/v1/auth/login", credentials(email, temporary));
+    ASSERT_EQ(signedIn->statusCode(), drogon::k200OK) << signedIn->body();
+
+    Json::Value change;
+    change["currentPassword"] = temporary;
+    change["newPassword"] = "a password of my own choosing";
+
+    const auto changed = harness().postJson(
+        "/api/v1/me/password", change, bodyOf(signedIn)["accessToken"].asString());
+    ASSERT_EQ(changed->statusCode(), drogon::k200OK) << changed->body();
+
+    // A whole session, and one that no longer carries the flag: answering with 204 would leave
+    // the caller signed out by succeeding.
+    const auto session = bodyOf(changed);
+    ASSERT_FALSE(session["accessToken"].asString().empty()) << session.toStyledString();
+    EXPECT_FALSE(session["user"]["passwordChangeRequired"].asBool());
+
+    EXPECT_EQ(harness().get("/api/v1/library", session["accessToken"].asString())->statusCode(),
+              drogon::k200OK);
+
+    // And the password really changed: the operator's is dead, the chosen one works.
+    EXPECT_EQ(harness().postJson("/api/v1/auth/login", credentials(email, temporary))->statusCode(),
+              drogon::k401Unauthorized);
+    EXPECT_EQ(
+        harness()
+            .postJson("/api/v1/auth/login", credentials(email, "a password of my own choosing"))
+            ->statusCode(),
+        drogon::k200OK);
+}
+
+// Re-entering the operator's password would clear the flag and leave the account on a
+// credential somebody else knows. The one refusal here that names its rule, because it is the
+// one somebody typing can act on.
+TEST(PasswordChangeEndpointTest, TheTemporaryPasswordCannotBeKept) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto email = uniqueEmail();
+    const auto subject = createVerifiedSession(email);
+    const auto temporary = temporaryPasswordFor(subject);
+
+    const auto signedIn = harness().postJson("/api/v1/auth/login", credentials(email, temporary));
+    ASSERT_EQ(signedIn->statusCode(), drogon::k200OK) << signedIn->body();
+    const auto token = bodyOf(signedIn)["accessToken"].asString();
+
+    Json::Value keep;
+    keep["currentPassword"] = temporary;
+    keep["newPassword"] = temporary;
+
+    const auto refused = harness().postJson("/api/v1/me/password", keep, token);
+    ASSERT_EQ(refused->statusCode(), drogon::k422UnprocessableEntity) << refused->body();
+    EXPECT_EQ(bodyOf(refused)["rule"].asString(), "password_unchanged");
+
+    // Still locked to the one route, so a refused attempt leaves nothing half-done.
+    EXPECT_EQ(harness().get("/api/v1/library", token)->statusCode(), drogon::k403Forbidden);
+}
+
+TEST(PasswordChangeEndpointTest, TheCurrentPasswordIsAskedForAgain) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto email = uniqueEmail();
+    const auto session = createVerifiedSession(email);
+
+    Json::Value change;
+    change["currentPassword"] = "not what it is";
+    change["newPassword"] = "a password of my own choosing";
+
+    const auto refused =
+        harness().postJson("/api/v1/me/password", change, session["accessToken"].asString());
+
+    EXPECT_EQ(refused->statusCode(), drogon::k401Unauthorized) << refused->body();
+    // The account is untouched: the old password still signs in.
+    EXPECT_EQ(harness().postJson("/api/v1/auth/login", credentials(email))->statusCode(),
+              drogon::k200OK);
+}
+
+// It is an ordinary password change too, for an account that was never flagged.
+TEST(PasswordChangeEndpointTest, WorksForAnAccountNobodyForced) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto email = uniqueEmail();
+    const auto session = createVerifiedSession(email);
+
+    Json::Value change;
+    change["currentPassword"] = PASSWORD;
+    change["newPassword"] = "something else entirely";
+
+    const auto changed =
+        harness().postJson("/api/v1/me/password", change, session["accessToken"].asString());
+    ASSERT_EQ(changed->statusCode(), drogon::k200OK) << changed->body();
+
+    // Every session minted under the old password dies with it, this caller's included — the
+    // one in the response is what replaces it.
+    Json::Value refresh;
+    refresh["refreshToken"] = session["refreshToken"].asString();
+    EXPECT_EQ(harness().postJson("/api/v1/auth/refresh", refresh)->statusCode(),
+              drogon::k401Unauthorized);
+}
+
+TEST(PasswordChangeEndpointTest, NeedsATokenLikeEveryOtherRouteOnTheAccount) {
+    LAUNCHER_REQUIRE_DATABASE();
+
+    Json::Value change;
+    change["currentPassword"] = PASSWORD;
+    change["newPassword"] = "something else entirely";
+
+    EXPECT_EQ(harness().postJson("/api/v1/me/password", change)->statusCode(),
+              drogon::k401Unauthorized);
 }
 
 } // namespace

@@ -132,14 +132,15 @@ void AppContext::initialize(AppConfig config,
 
     patchNoteService_ =
         std::make_unique<services::PatchNoteService>(*games_, *gameVersions_, *patchNotes_);
-    adminUserService_ = std::make_unique<services::AdminUserService>(*adminUsers_, *audit_);
+    adminUserService_ =
+        std::make_unique<services::AdminUserService>(*adminUsers_, *audit_, *passwordHasher_);
     analyticsService_ = std::make_unique<services::AnalyticsService>(*analytics_);
 
     mediaService_ = std::make_unique<services::MediaService>(
         *games_,
         *media_,
         storage::MediaStore{std::filesystem::path{config_.media.root}},
-        services::MediaLimits{config_.media.maxBytes});
+        services::MediaLimits{config_.media.maxBytes, config_.media.maxVideoBytes});
 
     services::UploadSettings uploadSettings;
     uploadSettings.maxBlobBytes = config_.uploads.maxBlobBytes;

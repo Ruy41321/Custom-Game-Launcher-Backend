@@ -77,6 +77,16 @@ class IAdminUserRepository {
     virtual drogon::Task<std::optional<AdminUserSummary>>
     setActive(std::string userId, bool active, domain::NewAuditEntry audit) const = 0;
 
+    /// Stores a password an operator chose for somebody else, raises
+    /// `password_change_required`, and takes away everything the old credential reached — the
+    /// account's live sessions and any outstanding reset link — in the one statement that
+    /// writes the audit entry.
+    ///
+    /// The hash arrives already computed: Argon2id belongs to the service layer, and a
+    /// repository that hashed would be one more place that has to agree about the parameters.
+    virtual drogon::Task<std::optional<AdminUserSummary>> setTemporaryPassword(
+        std::string userId, std::string passwordHash, domain::NewAuditEntry audit) const = 0;
+
     virtual drogon::Task<RoleChange>
     grantRole(std::string userId, std::string roleKey, domain::NewAuditEntry audit) const = 0;
 

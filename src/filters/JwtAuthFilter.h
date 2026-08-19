@@ -11,6 +11,15 @@ namespace launcher::filters {
 
 inline constexpr const char* AUTH_CLAIMS_ATTRIBUTE = "authClaims";
 
+/// The one route a session flagged `passwordChangeRequired` may reach.
+///
+/// A single allowed path rather than a list of blocked ones, and named here rather than
+/// spelled into the filter body so the route and the exemption cannot drift apart. The
+/// direction is the point: a route added later is refused to a flagged session by default,
+/// which is the same argument the per-account rate limit makes for living in this filter
+/// instead of on every route's filter list.
+inline constexpr const char* PASSWORD_CHANGE_PATH = "/api/v1/me/password";
+
 /// Requires a valid `Authorization: Bearer <token>` header and publishes the verified claims
 /// on the request. Attach it to a route with
 /// `ADD_METHOD_TO(..., "launcher::filters::JwtAuthFilter")`.

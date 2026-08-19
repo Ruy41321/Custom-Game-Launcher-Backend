@@ -326,6 +326,123 @@ TEST(AdminAuditEndpointTest, ReportsWhoChangedWhatAndToWhichValue) {
     EXPECT_EQ(entry["metadata"]["quotaBytes"].asString(), "777");
 }
 
+// ---------------------------------------------------------------------------
+// One-time passwords — the way back in where the deployment sends no mail
+// ---------------------------------------------------------------------------
+
+TEST(AdminUserEndpointTest, HandsOutAPasswordThatSignsInAndDemandsToBeReplaced) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto session = anOperator("tempuser");
+    const auto subject = aPlayer("tempsubject");
+
+    const auto issued =
+        harness().adminPostJson("/admin/api/users/" + idOf(subject) + "/temporary-password",
+                                Json::Value{},
+                                tokenOf(session));
+    ASSERT_EQ(issued->statusCode(), drogon::k200OK) << issued->body();
+
+    const auto body = bodyOf(issued);
+    const auto temporary = body["temporaryPassword"].asString();
+    ASSERT_FALSE(temporary.empty()) << body.toStyledString();
+    EXPECT_TRUE(body["user"]["passwordChangeRequired"].asBool());
+
+    // It really is the account's password now, and the session it produces says so out loud —
+    // the client is told rather than left to discover it from the first refusal.
+    Json::Value credentials;
+    credentials["email"] = subject["user"]["email"].asString();
+    credentials["password"] = temporary;
+
+    const auto signedIn = harness().postJson("/api/v1/auth/login", credentials);
+    ASSERT_EQ(signedIn->statusCode(), drogon::k200OK) << signedIn->body();
+    EXPECT_TRUE(bodyOf(signedIn)["user"]["passwordChangeRequired"].asBool());
+
+    EXPECT_EQ(auditRowsFor(idOf(subject), "user.password.temporary_set"), 1);
+}
+
+// Every session the old password reached dies with it, or handing out a temporary password
+// would leave whoever was already signed in exactly where they were.
+TEST(AdminUserEndpointTest, TheAccountsExistingSessionsStopWorking) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto session = anOperator("tempkill");
+    const auto subject = aPlayer("tempkillsubject");
+
+    ASSERT_EQ(harness().get("/api/v1/library", tokenOf(subject))->statusCode(), drogon::k200OK);
+
+    ASSERT_EQ(harness()
+                  .adminPostJson("/admin/api/users/" + idOf(subject) + "/temporary-password",
+                                 Json::Value{},
+                                 tokenOf(session))
+                  ->statusCode(),
+              drogon::k200OK);
+
+    Json::Value refresh;
+    refresh["refreshToken"] = subject["refreshToken"].asString();
+    EXPECT_EQ(harness().postJson("/api/v1/auth/refresh", refresh)->statusCode(),
+              drogon::k401Unauthorized);
+}
+
+TEST(AdminUserEndpointTest, RefusesATemporaryPasswordToANonOperator) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto publisher = harness().createSessionWithRole(uniqueEmail("tempdev"), "dev");
+    const auto subject = aPlayer("tempvictim");
+
+    EXPECT_EQ(harness()
+                  .adminPostJson("/admin/api/users/" + idOf(subject) + "/temporary-password",
+                                 Json::Value{},
+                                 tokenOf(publisher))
+                  ->statusCode(),
+              drogon::k403Forbidden);
+
+    EXPECT_EQ(auditRowsFor(idOf(subject), "user.password.temporary_set"), 0);
+}
+
+// The route that hands out a credential must not answer on the listener the internet reaches.
+TEST(AdminUserEndpointTest, TheTemporaryPasswordRouteDoesNotExistOnThePublicListener) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto session = anOperator("temppublic");
+    const auto subject = aPlayer("temppublicsubject");
+
+    EXPECT_EQ(harness()
+                  .postJson("/admin/api/users/" + idOf(subject) + "/temporary-password",
+                            Json::Value{},
+                            tokenOf(session))
+                  ->statusCode(),
+              drogon::k404NotFound);
+}
+
+TEST(AdminUserEndpointTest, AnOperatorCannotSetATemporaryPasswordOnThemselves) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto session = anOperator("tempself");
+
+    const auto refused =
+        harness().adminPostJson("/admin/api/users/" + idOf(session) + "/temporary-password",
+                                Json::Value{},
+                                tokenOf(session));
+
+    EXPECT_EQ(refused->statusCode(), drogon::k422UnprocessableEntity) << refused->body();
+    EXPECT_EQ(auditRowsFor(idOf(session), "user.password.temporary_set"), 0);
+}
+
+TEST(AdminUserEndpointTest, AnAccountThatIsNotThereGetsNoPassword) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto session = anOperator("tempmissing");
+
+    EXPECT_EQ(harness()
+                  .adminPostJson("/admin/api/users/00000000-0000-0000-0000-000000000000/"
+                                 "temporary-password",
+                                 Json::Value{},
+                                 tokenOf(session))
+                  ->statusCode(),
+              drogon::k404NotFound);
+
+    EXPECT_EQ(harness()
+                  .adminPostJson("/admin/api/users/not-a-uuid/temporary-password",
+                                 Json::Value{},
+                                 tokenOf(session))
+                  ->statusCode(),
+              drogon::k404NotFound);
+}
+
 TEST(AdminAuditEndpointTest, FiltersByActor) {
     LAUNCHER_REQUIRE_DATABASE();
     const auto first = anOperator("audit-first");

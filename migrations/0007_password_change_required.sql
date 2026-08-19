@@ -1,0 +1,28 @@
+-- 0007_password_change_required
+--
+-- The way back in for somebody locked out of a deployment that sends no mail.
+--
+-- With `MAIL_TRANSPORT=none` there is no reset link, because there is nothing to deliver it
+-- with: the routes that would send answer 404 and the launcher hides "forgotten your
+-- password?" rather than offering a button that fails. What replaces it is an operator who
+-- sets a one-time password out of band and a flag saying that password is not a password yet
+-- — it is a single-use ticket to choose one.
+--
+-- **A flag on the account rather than a table of pending changes.** The state being recorded
+-- is not an event with a lifetime, an expiry and a way to cancel it; it is a property the
+-- account has until the person fixes it. A row in a side table would need every one of those
+-- decisions and would let the account and the table disagree, which is the failure mode that
+-- matters: an account whose flag says "cleared" and whose ticket says "open" is one somebody
+-- has to reason about. `users_tokens` exists and was deliberately not reused for the same
+-- reason — its rows are *links*, one-shot secrets that travel through a mail transport, and
+-- this whole feature exists because there is no transport.
+--
+-- **False is the default, so every account that exists keeps working.** The flag is set only
+-- by the operator route that sets a temporary password, and cleared only by the account
+-- changing it — both in the same statement as the change they describe.
+--
+-- What enforces it is `JwtAuthFilter`: the claim rides in the access token, so a flagged
+-- session is refused on every route except the one that changes the password, at no database
+-- round trip. That is why the column is read at sign-in and at refresh rather than per request.
+
+ALTER TABLE users ADD COLUMN password_change_required boolean NOT NULL DEFAULT false;

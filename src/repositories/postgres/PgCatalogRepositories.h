@@ -47,7 +47,8 @@ class PgGameVersionRepository : public IGameVersionRepository {
     drogon::Task<std::vector<domain::GameVersion>>
     listForGame(std::string gameId, bool includeUnpublished) const override;
 
-    drogon::Task<bool> publish(std::string id) const override;
+    drogon::Task<std::optional<domain::GameVersion>>
+    update(std::string id, domain::GameVersionUpdate changes) const override;
 
     drogon::Task<bool> remove(std::string id) const override;
 

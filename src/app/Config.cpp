@@ -164,6 +164,8 @@ Result<AppConfig> AppConfig::parse(std::string_view json, const common::EnvLooku
     config.media.root = readString(media, "root", config.media.root);
     config.media.publicBaseUrl = readString(media, "publicBaseUrl", config.media.publicBaseUrl);
     config.media.maxBytes = readInt<int64_t>(media, "maxBytes", config.media.maxBytes);
+    config.media.maxVideoBytes =
+        readInt<int64_t>(media, "maxVideoBytes", config.media.maxVideoBytes);
 
     const auto& launcherReleases = root["launcherReleases"];
     config.launcherReleases.root =

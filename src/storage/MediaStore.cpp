@@ -31,12 +31,12 @@ VoidResult ensureDirectory(const std::filesystem::path& directory) {
 MediaStore::MediaStore(std::filesystem::path root)
     : root_(std::move(root)) {}
 
-std::string MediaStore::storageKeyFor(std::string_view sha256, domain::ImageFormat format) {
+std::string MediaStore::storageKeyFor(std::string_view sha256, domain::StoredFormat format) {
     if (!domain::isSha256Hex(sha256)) {
         return {};
     }
     return std::string(sha256.substr(0, 2)) + "/" + std::string(sha256.substr(2, 2)) + "/" +
-           std::string(sha256) + "." + domain::extensionOf(format);
+           std::string(sha256) + "." + format.extension;
 }
 
 std::filesystem::path MediaStore::pathFor(std::string_view storageKey) const {
@@ -59,7 +59,7 @@ bool MediaStore::contains(std::string_view storageKey) const {
     return std::filesystem::is_regular_file(path, ec);
 }
 
-Result<std::string> MediaStore::store(std::string_view bytes, domain::ImageFormat format) const {
+Result<std::string> MediaStore::store(std::string_view bytes, domain::StoredFormat format) const {
     const auto digest = common::sha256Hex(bytes);
     const auto key = storageKeyFor(digest, format);
     if (key.empty()) {
@@ -84,7 +84,7 @@ Result<std::string> MediaStore::store(std::string_view bytes, domain::ImageForma
     // Staging inside the root keeps the publish step a rename within one filesystem, which is
     // atomic. Writing straight to the target would make a crash mid-write leave a truncated
     // image reachable at its own content address.
-    const auto staging = root_ / STAGING_DIRECTORY / (digest + "." + domain::extensionOf(format));
+    const auto staging = root_ / STAGING_DIRECTORY / (digest + "." + format.extension);
     {
         std::ofstream file(staging, std::ios::binary | std::ios::trunc);
         if (!file) {
@@ -98,7 +98,7 @@ Result<std::string> MediaStore::store(std::string_view bytes, domain::ImageForma
         if (!file) {
             std::filesystem::remove(staging, ec);
             return Result<std::string>::failure(ErrorCode::DependencyFailure,
-                                                "cannot write the uploaded image");
+                                                "cannot write the uploaded file");
         }
     }
 
@@ -113,7 +113,7 @@ Result<std::string> MediaStore::store(std::string_view bytes, domain::ImageForma
         std::error_code cleanup;
         std::filesystem::remove(staging, cleanup);
         return Result<std::string>::failure(ErrorCode::DependencyFailure,
-                                            "cannot move the image into storage: " + ec.message());
+                                            "cannot move the file into storage: " + ec.message());
     }
 
     return Result<std::string>::success(key);

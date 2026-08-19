@@ -32,6 +32,7 @@ class FakeUserRepository : public repositories::IUserRepository {
     mutable std::vector<std::string> verifiedUserIds;
     mutable std::vector<std::string> loginRecordedFor;
     mutable std::map<std::string, std::string> passwordUpdates;
+    mutable std::map<std::string, std::string> rehashes;
 
     domain::User seed(domain::User user) const {
         if (user.id.empty()) {
@@ -90,6 +91,17 @@ class FakeUserRepository : public repositories::IUserRepository {
     drogon::Task<void> updatePasswordHash(std::string userId,
                                           std::string passwordHash) const override {
         passwordUpdates[userId] = passwordHash;
+        for (auto& user : users) {
+            if (user.id == userId) {
+                user.passwordHash = passwordHash;
+                user.passwordChangeRequired = false;
+            }
+        }
+        co_return;
+    }
+
+    drogon::Task<void> rehashPassword(std::string userId, std::string passwordHash) const override {
+        rehashes[userId] = passwordHash;
         for (auto& user : users) {
             if (user.id == userId) {
                 user.passwordHash = passwordHash;

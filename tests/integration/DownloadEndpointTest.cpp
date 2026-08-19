@@ -65,9 +65,13 @@ Publisher newPublisher(const std::string& title) {
 
 /// Publishes a complete, ready build: version, build, every blob uploaded, manifest submitted.
 /// Returns the build id.
+/// The version a build was hung off, remembered by `publish` so a test can act on it.
+std::string lastVersionId;
+
 std::string publish(Publisher& publisher,
                     const std::vector<Content>& files,
-                    const std::string& visibility = "public") {
+                    const std::string& visibility = "public",
+                    bool publishVersion = true) {
     if (visibility != "public") {
         Json::Value change;
         change["visibility"] = visibility;
@@ -79,11 +83,12 @@ std::string publish(Publisher& publisher,
 
     Json::Value version;
     version["semver"] = "1." + std::to_string(publisher.nextVersion++) + ".0";
-    version["publish"] = true;
+    version["publish"] = publishVersion;
     const auto versioned = harness().postJson(
         "/api/v1/games/" + publisher.gameId + "/versions", version, publisher.token());
     EXPECT_EQ(versioned->statusCode(), drogon::k201Created) << versioned->body();
     const auto versionId = bodyOf(versioned)["id"].asString();
+    lastVersionId = versionId;
 
     Json::Value build;
     build["platform"] = "windows";
@@ -278,6 +283,82 @@ TEST(DownloadEndpointTest, HidesTheBuildOfADraftGame) {
         harness().post("/api/v1/builds/" + buildId + "/download", publisher.token())->statusCode(),
         drogon::k200OK)
         << "its own publisher still tests it";
+}
+
+// A public game may carry a version nobody has released yet, and its builds are the
+// publisher's alone until it is out. Until 2026-08-17 the check only asked about the game, so
+// anybody who could name one of those builds could download it (D62).
+TEST(DownloadEndpointTest, HidesEveryBuildOfAVersionThatWasNeverPublished) {
+    LAUNCHER_REQUIRE_DATABASE();
+    auto publisher = newPublisher("Unreleased Version Title");
+    const auto buildId =
+        publish(publisher, {{"Game.exe", "not out yet"}}, "public", /*publishVersion=*/false);
+    const auto versionId = lastVersionId;
+    const auto player = harness().createVerifiedSession(uniqueEmail("outsider"));
+
+    EXPECT_EQ(
+        harness().post("/api/v1/builds/" + buildId + "/download", tokenOf(player))->statusCode(),
+        drogon::k404NotFound)
+        << "404, never 403: a refusal must not confirm there is an unreleased version";
+    EXPECT_EQ(
+        harness().get("/api/v1/builds/" + buildId + "/manifest", tokenOf(player))->statusCode(),
+        drogon::k404NotFound);
+
+    Json::Value report;
+    report["files"] = Json::Value(Json::arrayValue);
+    EXPECT_EQ(harness()
+                  .postJson("/api/v1/builds/" + buildId + "/verify", report, tokenOf(player))
+                  ->statusCode(),
+              drogon::k404NotFound);
+
+    EXPECT_EQ(
+        harness().post("/api/v1/builds/" + buildId + "/download", publisher.token())->statusCode(),
+        drogon::k200OK)
+        << "its own publisher tests it before releasing the version";
+
+    // And the flag really is what was gating it: publishing the version opens the same build.
+    Json::Value release;
+    release["published"] = true;
+    ASSERT_EQ(harness()
+                  .patchJson("/api/v1/games/" + publisher.gameId + "/versions/" + versionId,
+                             release,
+                             publisher.token())
+                  ->statusCode(),
+              drogon::k200OK);
+
+    EXPECT_EQ(
+        harness().post("/api/v1/builds/" + buildId + "/download", tokenOf(player))->statusCode(),
+        drogon::k200OK);
+}
+
+// A player who installed a version that was withdrawn afterwards keeps the files on their disk.
+// The source of a delta is a claim about that disk, so it costs a full download rather than an
+// update the player cannot perform at all.
+TEST(DownloadEndpointTest, PlansAFullDownloadWhenTheSourceVersionWasWithdrawn) {
+    LAUNCHER_REQUIRE_DATABASE();
+    auto publisher = newPublisher("Withdrawn Source Title");
+    const std::string assets = "shared assets that would otherwise be skipped";
+    const auto installed = publish(publisher, {{"Game.exe", "version one"}, {"data/pak", assets}});
+    const auto installedVersion = lastVersionId;
+    const auto current = publish(publisher, {{"Game.exe", "version two!"}, {"data/pak", assets}});
+    const auto player = harness().createVerifiedSession(uniqueEmail("player"));
+
+    Json::Value withdraw;
+    withdraw["published"] = false;
+    ASSERT_EQ(harness()
+                  .patchJson("/api/v1/games/" + publisher.gameId + "/versions/" + installedVersion,
+                             withdraw,
+                             publisher.token())
+                  ->statusCode(),
+              drogon::k200OK);
+
+    const auto response = planFrom(current, installed, tokenOf(player));
+
+    ASSERT_EQ(response->statusCode(), drogon::k200OK) << response->body();
+    const auto plan = bodyOf(response);
+    EXPECT_EQ(plan["kind"].asString(), "full");
+    EXPECT_EQ(plan["unchanged"].size(), 0U)
+        << "nothing is skipped on the strength of a build this caller may no longer read";
 }
 
 TEST(DownloadEndpointTest, RefusesToPlanAgainstABuildOfAnotherGame) {

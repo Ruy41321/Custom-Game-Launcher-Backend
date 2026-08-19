@@ -8,6 +8,7 @@
 #include "common/Logging.h"
 #include "common/Random.h"
 #include "domain/Validation.h"
+#include "domain/ValidationRules.h"
 
 namespace launcher::services {
 namespace {
@@ -158,7 +159,7 @@ AuthService::login(std::string email, std::string password, ClientContext client
     // is available and already proven correct.
     if (passwordHasher_.needsRehash(user->passwordHash)) {
         if (auto upgraded = passwordHasher_.hash(password); upgraded.ok()) {
-            co_await users_.updatePasswordHash(user->id, std::move(upgraded).value());
+            co_await users_.rehashPassword(user->id, std::move(upgraded).value());
         }
     }
 
@@ -287,6 +288,71 @@ drogon::Task<VoidResult> AuthService::resetPassword(std::string token,
     co_return VoidResult::success();
 }
 
+drogon::Task<Result<AuthTokens>> AuthService::changePassword(std::string userId,
+                                                             std::string currentPassword,
+                                                             std::string newPassword,
+                                                             ClientContext client) const {
+    if (auto check = domain::validatePassword(newPassword); !check.ok()) {
+        co_return Result<AuthTokens>::failure(check.error());
+    }
+
+    const auto user = co_await users_.findById(userId);
+    if (!user.has_value()) {
+        // The token verified, so the account existed when it was minted and does not now:
+        // an erasure, in practice. Nothing here can be done with the session either way.
+        co_return Result<AuthTokens>::failure(ErrorCode::Unauthenticated, INVALID_CREDENTIALS);
+    }
+
+    // Re-authentication, not the token: D44's rule, on the other request that can take an
+    // account away from its owner. The message names the *current* password on purpose — this
+    // caller is signed in, so there is no account to enumerate and nothing to be vague about.
+    if (!passwordHasher_.verify(currentPassword, user->passwordHash)) {
+        co_return Result<AuthTokens>::failure(ErrorCode::Unauthenticated,
+                                              "that is not your current password");
+    }
+
+    if (!user->isActive) {
+        co_return Result<AuthTokens>::failure(ErrorCode::Forbidden,
+                                              "this account has been disabled");
+    }
+
+    // The rule that makes the one-time password one-time. Compared by verifying the new
+    // password against the stored hash rather than the two strings, because that is the
+    // question being asked and it is the only form that survives a rehash.
+    if (passwordHasher_.verify(newPassword, user->passwordHash)) {
+        co_return Result<AuthTokens>::failure(
+            common::invalidInput("the new password has to be different from the current one",
+                                 domain::rules::PASSWORD_UNCHANGED));
+    }
+
+    auto passwordHash = passwordHasher_.hash(newPassword);
+    if (!passwordHash.ok()) {
+        co_return Result<AuthTokens>::failure(passwordHash.error());
+    }
+
+    // Clears password_change_required in the same statement, which is the half that turns a
+    // temporary password into an ordinary account again.
+    co_await users_.updatePasswordHash(user->id, std::move(passwordHash).value());
+
+    // Every session minted under the old password goes, including this caller's — the fresh
+    // one below replaces it. Any reset link outstanding goes too: it was issued for the
+    // password that no longer exists.
+    co_await refreshTokens_.revokeAllForUser(user->id);
+    co_await userTokens_.invalidateAll(user->id, UserTokenPurpose::PasswordReset);
+
+    spdlog::info("password changed for user id={}", common::escapeJson(user->id));
+
+    // Re-read rather than mutating the copy in hand: the session is issued from a user whose
+    // flag the database cleared, so nothing here can mint a token that still carries it.
+    const auto updated = co_await users_.findById(user->id);
+    if (!updated.has_value()) {
+        co_return Result<AuthTokens>::failure(ErrorCode::Unauthenticated, INVALID_CREDENTIALS);
+    }
+
+    co_return Result<AuthTokens>::success(
+        co_await issueSession(*updated, common::randomUuid(), std::nullopt, std::move(client)));
+}
+
 drogon::Task<AuthTokens> AuthService::issueSession(domain::User user,
                                                    std::string familyId,
                                                    std::optional<std::string> rotatesTokenId,
@@ -308,8 +374,8 @@ drogon::Task<AuthTokens> AuthService::issueSession(domain::User user,
     }
 
     AuthTokens tokens;
-    tokens.accessToken =
-        tokenService_.issueAccessToken(AccessTokenClaims{user.id, user.email, permissions});
+    tokens.accessToken = tokenService_.issueAccessToken(
+        AccessTokenClaims{user.id, user.email, permissions, user.passwordChangeRequired});
     tokens.refreshToken = refreshToken;
     tokens.accessTokenExpiresIn = tokenService_.accessTokenTtl();
     tokens.permissions = permissions;

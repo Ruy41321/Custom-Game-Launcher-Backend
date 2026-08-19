@@ -3,7 +3,9 @@
 #include <drogon/HttpResponse.h>
 #include <json/json.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cstddef>
 #include <filesystem>
 #include <map>
 #include <string>
@@ -50,6 +52,19 @@ const std::string PNG_HEADER("\x89PNG\r\n\x1a\n", 8);
 /// test tell one picture from another.
 std::string pngBody(const std::string& suffix = "one") {
     return PNG_HEADER + suffix;
+}
+
+/// An ISO base media header with an ordinary MP4 brand, padded so the size checks have
+/// something to measure. Nothing here is a playable video: the server identifies a container
+/// and never claims to have decoded one.
+std::string mp4Body(const std::string& suffix = "one", std::size_t size = 64) {
+    auto body = std::string("QQQQ", 4) + "ftypisom" + suffix;
+    body[0] = 0;
+    body[1] = 0;
+    body[2] = 0;
+    body[3] = ' ';
+    body.resize(std::max(size, body.size()), 'v');
+    return body;
 }
 
 Json::Value createGame(const Json::Value& session,
@@ -128,6 +143,82 @@ TEST(MediaEndpointTest, RefusesAnImagePastTheConfiguredLimit) {
         uploadMedia(session, game["id"].asString(), "cover", PNG_HEADER + std::string(8192, 'x'));
 
     EXPECT_EQ(response->statusCode(), drogon::k422UnprocessableEntity) << response->body();
+}
+
+TEST(MediaEndpointTest, StoresAVideoAndReturnsAPublicUrlItsExtensionMakesPlayable) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto session = developer();
+    const auto game = createGame(session, "Trailer");
+
+    const auto response = uploadMedia(session, game["id"].asString(), "video", mp4Body());
+
+    ASSERT_EQ(response->statusCode(), drogon::k201Created) << response->body();
+    const auto media = bodyOf(response);
+    EXPECT_EQ(media["kind"].asString(), "video");
+    EXPECT_EQ(media["contentType"].asString(), "video/mp4");
+    // The extension is in the URL because it is in the storage key, and the file server's
+    // regex location only routes the five it knows. Serving a trailer as
+    // application/octet-stream is serving a download nobody can play.
+    const auto url = media["url"].asString();
+    EXPECT_EQ(url.substr(url.size() - 4), ".mp4");
+    EXPECT_EQ(url.find('?'), std::string::npos);
+    EXPECT_TRUE(std::filesystem::is_regular_file(storedFileFor(media)));
+}
+
+/// The two limits are one number apart in the harness on purpose: the same body is too large
+/// for a picture and small enough for a video, so this is the kind choosing the budget rather
+/// than a body that happens to fit.
+TEST(MediaEndpointTest, MeasuresAVideoAgainstItsOwnLimit) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto session = developer();
+    const auto game = createGame(session, "Big Trailer");
+
+    const auto asAPicture = uploadMedia(
+        session, game["id"].asString(), "screenshot", PNG_HEADER + std::string(8192, 'x'));
+    EXPECT_EQ(asAPicture->statusCode(), drogon::k422UnprocessableEntity) << asAPicture->body();
+
+    const auto accepted = uploadMedia(session, game["id"].asString(), "video", mp4Body("a", 8192));
+    EXPECT_EQ(accepted->statusCode(), drogon::k201Created) << accepted->body();
+
+    const auto refused = uploadMedia(session, game["id"].asString(), "video", mp4Body("b", 20000));
+    EXPECT_EQ(refused->statusCode(), drogon::k422UnprocessableEntity) << refused->body();
+}
+
+TEST(MediaEndpointTest, RefusesAPictureSentAsAVideoAndAVideoSentAsAPicture) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto session = developer();
+    const auto game = createGame(session, "Mismatched Kinds");
+
+    const auto picture = uploadMedia(session, game["id"].asString(), "video", pngBody());
+    EXPECT_EQ(picture->statusCode(), drogon::k422UnprocessableEntity) << picture->body();
+
+    const auto video = uploadMedia(session, game["id"].asString(), "screenshot", mp4Body());
+    EXPECT_EQ(video->statusCode(), drogon::k422UnprocessableEntity) << video->body();
+}
+
+/// The partial unique index changed shape in migration 0008 — from "everything but a
+/// screenshot is singular" to a list of the three kinds that are — and this is what would break
+/// if it had not: the second video would replace the first instead of joining it.
+TEST(MediaEndpointTest, VideosAreAGalleryAndNotASingleton) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto session = developer();
+    const auto game = createGame(session, "Two Clips");
+
+    ASSERT_EQ(uploadMedia(session, game["id"].asString(), "video", mp4Body("first"))->statusCode(),
+              drogon::k201Created);
+    ASSERT_EQ(uploadMedia(session, game["id"].asString(), "video", mp4Body("second"))->statusCode(),
+              drogon::k201Created);
+
+    const auto listing = bodyOf(
+        harness().get("/api/v1/games/" + game["id"].asString() + "/media", tokenOf(session)));
+
+    int videos = 0;
+    for (const auto& item : listing["items"]) {
+        if (item["kind"].asString() == "video") {
+            ++videos;
+        }
+    }
+    EXPECT_EQ(videos, 2);
 }
 
 TEST(MediaEndpointTest, RefusesAKindItDoesNotKnow) {
@@ -330,6 +421,58 @@ TEST(MediaEndpointTest, StoresTheAltTextGivenAtUploadTime) {
 
     EXPECT_EQ(media["altText"].asString(), "The title screen");
     EXPECT_EQ(media["sortOrder"].asInt(), 5);
+}
+
+// ---------------------------------------------------------------------------
+// Artwork on a game somebody else publishes
+//
+// The one case already covered is a *draft*, where the refusal comes from not being able to
+// see the game at all. On a public game the refusal has to come from `mayEditGame` (D30), and
+// nothing asserted that for uploading, editing or removing a picture — §9.5.
+// ---------------------------------------------------------------------------
+
+TEST(MediaEndpointTest, RefusesToUploadArtworkToAnotherPublishersGame) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto owner = developer();
+    const auto game = createGame(owner, "Guarded Artwork Title");
+    const auto intruder = developer();
+
+    const auto refused =
+        uploadMedia(intruder, game["id"].asString(), "screenshot", pngBody("smuggled"));
+
+    EXPECT_EQ(refused->statusCode(), drogon::k403Forbidden) << refused->body();
+}
+
+TEST(MediaEndpointTest, RefusesToEditAnotherPublishersArtwork) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto owner = developer();
+    const auto game = createGame(owner, "Guarded Alt Text Title");
+    const auto uploaded = uploadMedia(owner, game["id"].asString(), "cover", pngBody("theirs"));
+    ASSERT_EQ(uploaded->statusCode(), drogon::k201Created) << uploaded->body();
+    const auto intruder = developer();
+
+    Json::Value patch;
+    patch["altText"] = "hijacked";
+    const auto refused = harness().patchJson(
+        "/api/v1/media/" + bodyOf(uploaded)["id"].asString(), patch, tokenOf(intruder));
+
+    EXPECT_EQ(refused->statusCode(), drogon::k403Forbidden) << refused->body();
+}
+
+TEST(MediaEndpointTest, RefusesToRemoveAnotherPublishersArtwork) {
+    LAUNCHER_REQUIRE_DATABASE();
+    const auto owner = developer();
+    const auto game = createGame(owner, "Guarded Removal Title");
+    const auto uploaded = uploadMedia(owner, game["id"].asString(), "cover", pngBody("keep"));
+    ASSERT_EQ(uploaded->statusCode(), drogon::k201Created) << uploaded->body();
+    const auto intruder = developer();
+
+    const auto refused =
+        harness().remove("/api/v1/media/" + bodyOf(uploaded)["id"].asString(), tokenOf(intruder));
+
+    EXPECT_EQ(refused->statusCode(), drogon::k403Forbidden) << refused->body();
+    EXPECT_TRUE(std::filesystem::exists(storedFileFor(bodyOf(uploaded))))
+        << "the picture must still be on disk";
 }
 
 } // namespace

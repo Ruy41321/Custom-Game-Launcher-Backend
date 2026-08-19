@@ -10,6 +10,7 @@
 #include "app/HttpError.h"
 #include "app/JsonBody.h"
 #include "controllers/v1/CatalogJson.h"
+#include "domain/ValidationRules.h"
 #include "filters/JwtAuthFilter.h"
 #include "services/PatchNoteService.h"
 
@@ -72,7 +73,7 @@ PatchNoteController::create(drogon::HttpRequestPtr request,
     const auto body = app::requireJsonObject(request);
 
     services::CreatePatchNoteCommand command;
-    command.title = app::requireString(body, "title");
+    command.title = app::requireString(body, "title", domain::rules::PATCH_NOTE_TITLE_REQUIRED);
     command.bodyMarkdown = app::optionalString(body, "bodyMarkdown");
     command.versionId = app::optionalString(body, "versionId");
     command.publish = app::optionalBool(body, "publish");
@@ -97,7 +98,7 @@ PatchNoteController::update(drogon::HttpRequestPtr request,
     // default: a PATCH that omits the body must not blank it.
     domain::PatchNoteUpdate changes;
     if (body.isMember("title")) {
-        changes.title = app::requireString(body, "title");
+        changes.title = app::requireString(body, "title", domain::rules::PATCH_NOTE_TITLE_REQUIRED);
     }
     if (body.isMember("bodyMarkdown")) {
         changes.bodyMarkdown = app::optionalString(body, "bodyMarkdown");
