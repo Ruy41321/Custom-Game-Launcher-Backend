@@ -59,9 +59,19 @@
   .tile span { color: var(--muted); font-size: 12px; }
   .bars { display: flex; align-items: flex-end; gap: 2px; height: 90px; margin-top: 8px; }
   .bars div { flex: 1; background: var(--accent); min-height: 1px; border-radius: 2px 2px 0 0; }
+  /* The one place this console ever puts a live credential on screen. It is deliberately
+     loud: an operator has to notice it, read it out, and understand that closing the row is
+     the end of it — nothing can fetch it again. */
+  .secret { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--accent);
+            border-radius: 6px; background: var(--bg); }
+  .secret .value { display: block; margin: 6px 0; font-family: ui-monospace, monospace;
+                   font-size: 20px; letter-spacing: 1px; color: var(--text);
+                   user-select: all; }
+  .secret .warn { font-size: 12px; color: var(--muted); }
   .pill { display: inline-block; border: 1px solid var(--line); border-radius: 10px;
           padding: 1px 8px; margin-right: 4px; font-size: 12px; }
   .error { color: var(--bad); }
+  .pending { color: var(--accent); }
   .ok { color: var(--good); }
   #signin { max-width: 340px; margin: 60px auto; }
   #signin input { width: 100%; margin-bottom: 10px; }
@@ -403,7 +413,17 @@ function userRow(user) {
   cell(row, bytes(user.uploadQuotaBytes));
   cell(row, bytes(user.uploadUsedBytes));
   cell(row, user.lastLoginAt ? user.lastLoginAt.slice(0, 10) : "never");
-  cell(row, user.active ? "active" : "deactivated").className = user.active ? "" : "error";
+  // Two facts in one column, because "deactivated" and "has not chosen a password yet" are
+  // both answers to "why can this person not do anything?", and an operator looking for the
+  // second one should not have to open every row to find it.
+  const status = user.active
+    ? (user.passwordChangeRequired ? "must change password" : "active")
+    : "deactivated";
+  const statusCell = cell(row, status);
+  statusCell.className = user.active
+    ? (user.passwordChangeRequired ? "pending" : "")
+    : "error";
+  statusCell.dataset.field = "status";
 
   const actions = document.createElement("td");
   actions.appendChild(button("Edit", () => toggleEditor(row, user)));
@@ -456,11 +476,102 @@ function toggleEditor(row, user) {
 
   holder.appendChild(line);
 
+  // The way back in for somebody locked out of a deployment that sends no mail. It is on
+  // every account rather than only where MAIL_TRANSPORT is none, because an operator resetting
+  // a password is a reasonable thing to do on any deployment — mail only decides whether the
+  // person had a *self-service* way to avoid asking.
+  const recovery = document.createElement("div");
+  recovery.className = "row";
+  recovery.append(button("Set a temporary password…",
+                         () => armTemporaryPassword(row, recovery, user)));
+  holder.appendChild(recovery);
+
   const identifier = document.createElement("code");
   identifier.textContent = user.id;
   holder.appendChild(identifier);
 
   row.after(editor);
+}
+
+/// Two presses, and the sentence between them is the point.
+///
+/// This is not an edit: it replaces the account's password with one the operator will read
+/// out, ends every session it has open, and invalidates any reset link outstanding. None of
+/// that is guessable from a button labelled "reset", so the confirmation says it — the same
+/// reasoning the launcher's own destructive prompts follow.
+function armTemporaryPassword(row, recovery, user) {
+  recovery.textContent = "";
+
+  const warning = document.createElement("p");
+  warning.className = "warn";
+  warning.style.margin = "0 0 8px";
+  warning.textContent =
+    "This replaces " + user.email + "'s password, signs them out everywhere, and cancels any "
+    + "reset link they were sent. They will be able to do nothing but choose a new password "
+    + "until they do. The new one is shown here once and cannot be looked up again.";
+
+  const buttons = document.createElement("div");
+  buttons.className = "row";
+  const confirm = button("Yes, set one", async () => {
+    confirm.disabled = true;
+    await issueTemporaryPassword(row, recovery, user);
+  });
+  buttons.append(confirm);
+  buttons.append(button("Cancel", () => offerAgain(row, recovery, user)));
+
+  recovery.append(warning, buttons);
+}
+
+function offerAgain(row, recovery, user) {
+  recovery.textContent = "";
+  recovery.append(button("Set a temporary password…",
+                         () => armTemporaryPassword(row, recovery, user)));
+}
+
+async function issueTemporaryPassword(row, recovery, user) {
+  let issued;
+  try {
+    issued = await api("/admin/api/users/" + user.id + "/temporary-password",
+                       { method: "POST" });
+  } catch (error) {
+    offerAgain(row, recovery, user);
+    return notice(error.message);
+  }
+
+  recovery.textContent = "";
+
+  const box = document.createElement("div");
+  box.className = "secret";
+
+  const label = document.createElement("strong");
+  label.textContent = "Temporary password for " + user.email;
+
+  const value = document.createElement("code");
+  value.className = "value";
+  value.textContent = issued.temporaryPassword;
+
+  const warn = document.createElement("p");
+  warn.className = "warn";
+  warn.style.margin = "0";
+  warn.textContent =
+    "Give it to them through a channel you trust. It is not stored anywhere and this console "
+    + "cannot show it again — closing this row loses it, and the only way back is to set "
+    + "another one. They must change it the first time they sign in.";
+
+  box.append(label, value, warn);
+  recovery.append(box);
+
+  // Deliberately not reloading the table. `loadUsers()` would rebuild every row, take this one
+  // with it, and destroy the one copy of the password that exists — so the row is corrected in
+  // place instead, and the list refreshes the next time anything else touches it.
+  user.passwordChangeRequired = true;
+  const statusCell = row.querySelector('[data-field="status"]');
+  if (statusCell) {
+    statusCell.textContent = "must change password";
+    statusCell.className = "pending";
+  }
+
+  notice("Temporary password set. It is shown once, in the row.", true);
 }
 
 function labelled(text, control) {

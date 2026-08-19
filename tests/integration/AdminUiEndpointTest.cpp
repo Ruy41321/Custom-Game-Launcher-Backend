@@ -43,6 +43,20 @@ TEST(AdminUiEndpointTest, NeedsNoTokenToLoad) {
     EXPECT_NE(response->body().find("Sign in"), std::string::npos);
 }
 
+// The console is embedded at build time, so "the page a deployment serves" and "the file in
+// the repository" are the same bytes — which makes this the cheapest way to catch a control
+// that was written and never wired to its route.
+TEST(AdminUiEndpointTest, OffersTheOneTimePasswordAgainstTheRouteThatServesIt) {
+    const auto body = harness().adminGet("/admin")->body();
+
+    EXPECT_NE(body.find("/temporary-password"), std::string::npos);
+    EXPECT_NE(body.find("Set a temporary password"), std::string::npos);
+
+    // It is shown once and never fetched again, so the page must say so where somebody
+    // reading it will see it before they close the row.
+    EXPECT_NE(body.find("cannot show it again"), std::string::npos);
+}
+
 TEST(AdminUiEndpointTest, RefusesToLoadAnythingFromAnywhereElse) {
     const auto policy = harness().adminGet("/admin")->getHeader("Content-Security-Policy");
 
