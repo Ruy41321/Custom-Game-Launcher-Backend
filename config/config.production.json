@@ -1,0 +1,118 @@
+{
+  "environment": "production",
+  "migrationsDirectory": "${MIGRATIONS_DIR:-/app/migrations}",
+
+  "server": {
+    "listenAddress": "${SERVER_HOST:-0.0.0.0}",
+    "port": ${SERVER_PORT:-8080},
+    "adminListenAddress": "${ADMIN_HOST:-127.0.0.1}",
+    "adminPort": ${ADMIN_PORT:-9090},
+    "adminEnabled": ${ADMIN_ENABLED:-true},
+    "threadCount": ${SERVER_THREADS:-0},
+    "maxDocumentBytes": ${MAX_DOCUMENT_BYTES:-16777216},
+    "maxAnonymousBodyBytes": ${MAX_ANONYMOUS_BODY_BYTES:-65536},
+    "trustedProxies": ${TRUSTED_PROXIES:-[]}
+  },
+
+  "security": {
+    "hsts": ${HSTS_ENABLED:-true},
+    "hstsMaxAgeSeconds": ${HSTS_MAX_AGE:-15552000}
+  },
+
+  "database": {
+    "host": "${DB_HOST}",
+    "port": ${DB_PORT:-5432},
+    "name": "${DB_NAME}",
+    "user": "${DB_USER}",
+    "password": "${DB_PASSWORD}",
+    "connectionCount": ${DB_CONNECTIONS:-16}
+  },
+
+  "logging": {
+    "level": "${LOG_LEVEL:-info}",
+    "directory": "${LOG_DIR:-/var/log/launcher}",
+    "json": true
+  },
+
+  "storage": {
+    "blobRoot": "${BLOB_ROOT:-/data/blobs}",
+    "publicBaseUrl": "${FILE_PUBLIC_BASE_URL}",
+    "secureLinkSecret": "${FILE_SECURE_LINK_SECRET}",
+    "signedUrlTtlSeconds": ${SIGNED_URL_TTL:-3600}
+  },
+
+  "media": {
+    "root": "${MEDIA_ROOT:-/data/media}",
+    "publicBaseUrl": "${MEDIA_PUBLIC_BASE_URL:-http://localhost:8081/media}",
+    "maxBytes": ${MEDIA_MAX_BYTES:-5242880},
+    "maxVideoBytes": ${MEDIA_MAX_VIDEO_BYTES:-67108864}
+  },
+
+  "launcherReleases": {
+    "root": "${LAUNCHER_RELEASE_ROOT:-/data/launcher}",
+    "publicBaseUrl": "${LAUNCHER_PUBLIC_BASE_URL:-http://localhost:8081/launcher}",
+    "publicKey": "${LAUNCHER_RELEASE_PUBLIC_KEY:-}"
+  },
+
+  "crashReports": {
+    "enabled": ${CRASH_REPORTS_ENABLED:-true},
+    "submitAttempts": ${CRASH_REPORT_RATE_LIMIT:-20},
+    "submitWindowSeconds": ${CRASH_REPORT_RATE_WINDOW:-600},
+    "retentionSeconds": ${CRASH_REPORT_RETENTION:-2592000},
+    "sweepIntervalSeconds": ${CRASH_REPORT_SWEEP_INTERVAL:-3600}
+  },
+
+  "retention": {
+    "blobGraceSeconds": ${BLOB_GRACE_SECONDS:-86400},
+    "sweepIntervalSeconds": ${BLOB_SWEEP_INTERVAL:-3600},
+    "sweepBatchSize": ${BLOB_SWEEP_BATCH:-500}
+  },
+
+  "auth": {
+    "jwtSecret": "${JWT_SECRET}",
+    "issuer": "${JWT_ISSUER:-custom-game-launcher}",
+    "accessTokenTtlSeconds": ${ACCESS_TOKEN_TTL:-900},
+    "refreshTokenTtlSeconds": ${REFRESH_TOKEN_TTL:-2592000},
+    "emailVerificationTtlSeconds": ${EMAIL_VERIFICATION_TTL:-86400},
+    "passwordResetTtlSeconds": ${PASSWORD_RESET_TTL:-3600},
+    "requireVerifiedEmail": ${REQUIRE_VERIFIED_EMAIL:-true},
+    "argon2OperationsLimit": ${ARGON2_OPSLIMIT:-0},
+    "argon2MemoryLimitBytes": ${ARGON2_MEMLIMIT:-0}
+  },
+
+  "mail": {
+    "transport": "${MAIL_TRANSPORT:-smtp}",
+    "host": "${SMTP_HOST:-}",
+    "port": ${SMTP_PORT:-587},
+    "username": "${SMTP_USERNAME:-}",
+    "password": "${SMTP_PASSWORD:-}",
+    "security": "${SMTP_SECURITY:-starttls}",
+    "fromAddress": "${MAIL_FROM_ADDRESS:-}",
+    "fromName": "${MAIL_FROM_NAME:-Custom Game Launcher}",
+    "linkBaseUrl": "${MAIL_LINK_BASE_URL:-}",
+    "productName": "${MAIL_PRODUCT_NAME:-Custom Game Launcher}",
+    "timeoutSeconds": ${MAIL_TIMEOUT:-10},
+    "sendAttempts": ${MAIL_RATE_LIMIT:-3},
+    "sendWindowSeconds": ${MAIL_RATE_WINDOW:-900}
+  },
+
+  "rateLimit": {
+    "authAttempts": ${AUTH_RATE_LIMIT_ATTEMPTS:-10},
+    "authWindowSeconds": ${AUTH_RATE_LIMIT_WINDOW:-60},
+    "accountRequests": ${ACCOUNT_RATE_LIMIT_REQUESTS:-600},
+    "accountWindowSeconds": ${ACCOUNT_RATE_LIMIT_WINDOW:-60}
+  },
+
+  "updates": {
+    "fullDownloadThresholdRatio": ${FULL_DOWNLOAD_THRESHOLD:-0.7}
+  },
+
+  "uploads": {
+    "defaultQuotaBytes": ${DEFAULT_UPLOAD_QUOTA_BYTES:-5368709120},
+    "maxBlobBytes": ${MAX_BLOB_BYTES:-2147483648},
+    "maxChunkBytes": ${MAX_UPLOAD_CHUNK_BYTES:-8388608},
+    "sessionTtlSeconds": ${UPLOAD_SESSION_TTL:-86400},
+    "maxOpenSessionsPerUser": ${MAX_OPEN_UPLOADS:-16},
+    "sweepIntervalSeconds": ${UPLOAD_SWEEP_INTERVAL:-600}
+  }
+}

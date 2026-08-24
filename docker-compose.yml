@@ -1,0 +1,154 @@
+name: custom-game-launcher
+
+# Deployment stack: API + PostgreSQL + file server. Copy .env.example to .env first.
+#
+# In production a TLS-terminating reverse proxy sits in front of `api` and `fileserver`;
+# the launcher client never speaks plain HTTP.
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${DB_NAME:-launcher}
+      POSTGRES_USER: ${DB_USER:-launcher}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-launcher}
+      # Deterministic collation so index ordering does not depend on the host locale.
+      POSTGRES_INITDB_ARGS: "--locale-provider=icu --icu-locale=und-x-icu --encoding=UTF8"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-launcher} -d ${DB_NAME:-launcher}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+      target: runtime
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      LAUNCHER_ENV: ${LAUNCHER_ENV:-development}
+      LAUNCHER_CONFIG: /app/config/config.${LAUNCHER_ENV:-development}.json
+      MIGRATIONS_DIR: /app/migrations
+      RUN_MIGRATIONS: ${RUN_MIGRATIONS:-true}
+
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-launcher}
+      DB_USER: ${DB_USER:-launcher}
+      DB_PASSWORD: ${DB_PASSWORD:-launcher}
+
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: 8080
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_JSON: ${LOG_JSON:-true}
+      LOG_DIR: /var/log/launcher
+
+      # Inside the container the admin listener binds 0.0.0.0; it is the *published port*
+      # below that restricts it to the host's loopback. Binding 127.0.0.1 in here would
+      # make it unreachable even through an SSH tunnel.
+      ADMIN_ENABLED: ${ADMIN_ENABLED:-false}
+      ADMIN_HOST: 0.0.0.0
+      ADMIN_PORT: 9090
+
+      BLOB_ROOT: /data/blobs
+      # A separate root from the blobs, because the file server publishes this one without a
+      # signature. See docker/fileserver/templates/default.conf.template.
+      MEDIA_ROOT: /data/media
+      MEDIA_PUBLIC_BASE_URL: ${MEDIA_PUBLIC_BASE_URL:-http://localhost:8081/media}
+      MEDIA_MAX_BYTES: ${MEDIA_MAX_BYTES:-5242880}
+      MEDIA_MAX_VIDEO_BYTES: ${MEDIA_MAX_VIDEO_BYTES:-67108864}
+
+      # Releases of the launcher itself. A third root again, for the same reason: the file
+      # server publishes this one unsigned, because the launcher that most needs an update is
+      # the one that cannot sign in yet and so has no token to be handed a signed URL with.
+      #
+      # LAUNCHER_RELEASE_PUBLIC_KEY is the *public* half of the key releases are signed with,
+      # and empty — the default — turns the whole surface off. The private half is never here,
+      # never in this repository and never in its CI: a release is signed on the machine of
+      # whoever cuts it, and this server can only ever check. See
+      # Documentation/hardening-and-deployment.md section 6.5.
+      LAUNCHER_RELEASE_ROOT: /data/launcher
+      LAUNCHER_PUBLIC_BASE_URL: ${LAUNCHER_PUBLIC_BASE_URL:-http://localhost:8081/launcher}
+      LAUNCHER_RELEASE_PUBLIC_KEY: ${LAUNCHER_RELEASE_PUBLIC_KEY:-}
+      FILE_PUBLIC_BASE_URL: ${FILE_PUBLIC_BASE_URL:-http://localhost:8081/files}
+      FILE_SECURE_LINK_SECRET: ${FILE_SECURE_LINK_SECRET:-dev-insecure-secure-link-secret}
+      SIGNED_URL_TTL: ${SIGNED_URL_TTL:-3600}
+
+      # The two fallbacks here are the development placeholders, and outside development the
+      # server refuses to start on them by name: a deployment that forgets its .env fails
+      # loudly instead of signing every token with a secret this repository publishes.
+      JWT_SECRET: ${JWT_SECRET:-dev-insecure-jwt-secret-do-not-deploy}
+      DEFAULT_UPLOAD_QUOTA_BYTES: ${DEFAULT_UPLOAD_QUOTA_BYTES:-5368709120}
+      FULL_DOWNLOAD_THRESHOLD: ${FULL_DOWNLOAD_THRESHOLD:-0.7}
+
+      ACCOUNT_RATE_LIMIT_REQUESTS: ${ACCOUNT_RATE_LIMIT_REQUESTS:-600}
+      ACCOUNT_RATE_LIMIT_WINDOW: ${ACCOUNT_RATE_LIMIT_WINDOW:-60}
+      MAX_DOCUMENT_BYTES: ${MAX_DOCUMENT_BYTES:-16777216}
+      MAX_ANONYMOUS_BODY_BYTES: ${MAX_ANONYMOUS_BODY_BYTES:-65536}
+
+      # Off, and TRUSTED_PROXIES empty, because nothing terminates TLS in this stack: the API
+      # port is published in the clear and clients reach it directly. Both change together
+      # when a reverse proxy goes in front — see Documentation/deployment.md.
+      HSTS_ENABLED: ${HSTS_ENABLED:-false}
+      HSTS_MAX_AGE: ${HSTS_MAX_AGE:-15552000}
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-[]}
+
+      # Mail. Outside development the server refuses to start on the "log" transport and on an
+      # "smtp" one with no relay, because a deployment that cannot deliver a verification link
+      # is one where nobody can finish registering. MAIL_LINK_BASE_URL is the origin the links
+      # are built from and comes from here rather than from a request's Host header, which is
+      # chosen by whoever is calling.
+      # Deployed default. The development override turns it off, because a developer who has
+      # to open a mail catcher before every login is a developer who turns the stack off.
+      REQUIRE_VERIFIED_EMAIL: ${REQUIRE_VERIFIED_EMAIL:-true}
+
+      MAIL_TRANSPORT: ${MAIL_TRANSPORT:-log}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_SECURITY: ${SMTP_SECURITY:-starttls}
+      MAIL_FROM_ADDRESS: ${MAIL_FROM_ADDRESS:-}
+      MAIL_FROM_NAME: ${MAIL_FROM_NAME:-Custom Game Launcher}
+      MAIL_LINK_BASE_URL: ${MAIL_LINK_BASE_URL:-http://localhost:8080}
+      MAIL_PRODUCT_NAME: ${MAIL_PRODUCT_NAME:-Custom Game Launcher}
+      MAIL_TIMEOUT: ${MAIL_TIMEOUT:-10}
+      MAIL_RATE_LIMIT: ${MAIL_RATE_LIMIT:-3}
+      MAIL_RATE_WINDOW: ${MAIL_RATE_WINDOW:-900}
+    ports:
+      - "${API_HOST_PORT:-8080}:8080"
+      # Admin surface: loopback only. Reach it with
+      #   ssh -L 9090:127.0.0.1:9090 user@your-vps
+      - "127.0.0.1:${ADMIN_HOST_PORT:-9090}:9090"
+    volumes:
+      - blob-data:/data/blobs
+      - media-data:/data/media
+      - launcher-data:/data/launcher
+      - api-logs:/var/log/launcher
+    restart: unless-stopped
+
+  fileserver:
+    build:
+      context: docker/fileserver
+    environment:
+      FILE_SECURE_LINK_SECRET: ${FILE_SECURE_LINK_SECRET:-dev-insecure-secure-link-secret}
+    ports:
+      - "${FILESERVER_HOST_PORT:-8081}:80"
+    volumes:
+      - blob-data:/data/blobs:ro
+      - media-data:/data/media:ro
+      - launcher-data:/data/launcher:ro
+    restart: unless-stopped
+
+volumes:
+  db-data:
+  blob-data:
+  media-data:
+  launcher-data:
+  api-logs:

@@ -1,0 +1,7 @@
+# The reference build is a Linux container. Shell scripts in particular must never end up
+# with CRLF, or the container entrypoint fails with a confusing "not found".
+* text=auto eol=lf
+
+*.sh   text eol=lf
+*.png  binary
+*.jpg  binary

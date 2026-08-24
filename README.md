@@ -1,0 +1,218 @@
+# Custom Game Launcher — Backend
+
+REST API, PostgreSQL schema and build file server for the
+[Custom Game Launcher](https://github.com/Ruy41321/Custom-Game-Launcher-Frontend), an open-source,
+self-hostable game launcher for indie and hobbyist developers who need to get demos and
+in-development builds to a handful of testers without zip files on Discord.
+
+Written in C++20 with [Drogon](https://github.com/drogonframework/drogon). The whole stack —
+API, database and file server — comes up with one `docker compose` command and is meant to
+run comfortably on a cheap VPS.
+
+> **Status:** feature-complete for what a small deployment needs, and everything this
+> repository declares is implemented. Authentication with real email delivery, the catalog,
+> resumable uploads with quotas, delta downloads over signed URLs, artwork and the devlog, a
+> loopback operator console, GDPR erasure, crash reports, and the signed **launcher release**
+> surface the client updates itself from.
+>
+> Nothing has been through a production deployment yet, and there is **no TLS in the compose
+> stack** — that is deployment rather than code, and
+> [hardening-and-deployment.md](Documentation/hardening-and-deployment.md) §6 is the checklist a
+> real machine still has to work through. [CLAUDE.md](CLAUDE.md#11-progress) has the current
+> state; [CONTRIBUTING.md](CONTRIBUTING.md) is where to start if you intend to change something.
+>
+> **Runs on Linux.** The stack is a `docker compose` deployment and is not built for anything
+> else.
+
+## Features
+
+- JWT authentication with rotating refresh tokens and Argon2id password hashing
+- Email verification and password recovery that actually send: SMTP over libcurl, with the
+  pages the links land on served by the API itself
+- Table-driven roles and permissions, extensible without destructive migrations
+- Content-addressed build storage: files are stored once by SHA-256, so the delta between
+  any two versions is a manifest diff and unchanged files are never re-uploaded
+- Resumable downloads via signed URLs and HTTP `Range`
+- Per-user cumulative upload quotas, charged race-free and refunded when storage is reclaimed
+- Covers, screenshots and a per-game devlog
+- A localhost-only operator console: users, roles, quotas, an obligatory audit trail,
+  download analytics and the crashes launchers reported
+- GDPR erasure that anonymises rather than deletes, so other people's installs keep updating
+- Per-address and per-account rate limiting, security headers on every response
+- Structured JSON logging and a single error envelope across every endpoint
+
+## Requirements
+
+- **Docker** with Compose v2 — the only requirement for running the stack
+- For a local (non-container) build: a C++20 compiler, CMake ≥ 3.22, Ninja and a
+  bootstrapped [vcpkg](https://github.com/microsoft/vcpkg)
+
+> **Deploying this rather than developing it?**
+> [DISTRIBUTING.md](https://github.com/Ruy41321/Custom-Game-Launcher-Frontend/blob/main/DISTRIBUTING.md)
+> in the client repository walks the whole cycle — server, TLS, mail, signing key, launcher
+> build and releases — in the order it has to be done in.
+
+## Quick start
+
+```bash
+cp .env.example .env
+```
+
+Generate the two secrets and put them in `.env` (they are optional in development, required
+everywhere else):
+
+```bash
+openssl rand -hex 32
+```
+
+Bring the stack up. The first build compiles Drogon from source and takes a while; later
+builds are incremental.
+
+```bash
+docker compose up --build -d
+```
+
+Check that it is alive:
+
+```bash
+curl -s http://localhost:8080/api/v1/health
+```
+
+The development stack also starts a **mail catcher**, so registration and password recovery
+work end to end with no relay of your own. Every message the server sends lands in its inbox
+instead of in somebody's:
+
+```
+http://localhost:8025
+```
+
+Development does not require a confirmed address, so a registration signs straight in. To see
+the deployed shape — where a link has to be followed first — restart the API with
+`REQUIRE_VERIFIED_EMAIL=true docker compose up -d api`. What a real deployment has to supply
+instead of the catcher is in
+[hardening-and-deployment.md](Documentation/hardening-and-deployment.md) §6.3.
+
+Migrations run automatically at container start. To apply them by hand:
+
+```bash
+docker compose exec api /app/launcher-api --migrate
+```
+
+Open a psql shell:
+
+```bash
+docker compose exec db psql -U launcher -d launcher
+```
+
+Tear down (add `-v` to also delete the database and blob volumes):
+
+```bash
+docker compose down
+```
+
+## Tests
+
+The suite is split by CTest label: `unit` needs nothing, `integration` needs a PostgreSQL
+instance and skips itself when one is not configured.
+
+Everything, inside the toolchain container:
+
+```bash
+docker compose --profile tools run --rm api-build ctest --test-dir build --output-on-failure
+```
+
+Unit tests only:
+
+```bash
+docker compose --profile tools run --rm api-build ctest --test-dir build -L unit --output-on-failure
+```
+
+Every feature must ship with its tests, and the **whole** suite must pass before a change is
+considered done.
+
+## Local build without Docker
+
+```bash
+cmake --preset linux-debug && cmake --build --preset linux-debug && ctest --preset linux-debug
+```
+
+`VCPKG_ROOT` must point at a bootstrapped vcpkg. On Windows, CMake and Ninja ship inside
+Visual Studio 2022 but are not on `PATH`; use the `windows-msvc` preset.
+
+## Configuration
+
+Per-environment JSON lives in `config/`, is selected by `LAUNCHER_ENV`, and contains no
+secrets — only defaults and `${VAR}` / `${VAR:-default}` placeholders resolved from the
+environment at start-up. A `${VAR}` with no value and no default is a hard error, so a blank
+JWT secret can never reach production silently.
+
+| Variable | Purpose |
+|---|---|
+| `LAUNCHER_ENV` | `development`, `staging` or `production` |
+| `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` | Database connection |
+| `JWT_SECRET` | Access-token signing key (≥ 32 chars outside development) |
+| `FILE_SECURE_LINK_SECRET` | Shared with the file server to sign download URLs |
+| `ADMIN_ENABLED` | Enables the loopback-only admin listener |
+| `LOG_LEVEL`, `LOG_JSON`, `LOG_DIR` | Logging |
+
+See [.env.example](.env.example) for the full list.
+
+## Administration
+
+The admin surface is a second listener bound to loopback and published only on the host's
+`127.0.0.1`. It is never exposed publicly; reach it through an SSH tunnel:
+
+```bash
+ssh -L 9090:127.0.0.1:9090 user@your-vps
+```
+
+## Documentation
+
+One document per module, in `Documentation/`. Together they describe every endpoint this
+server has and, more usefully, why each one works the way it does.
+
+| Document | What it covers |
+|---|---|
+| [architecture.md](Documentation/architecture.md) | Layers, the composition root, config and logging |
+| [authentication.md](Documentation/authentication.md) | Argon2id, JWT, refresh rotation, rate limiting |
+| [catalog.md](Documentation/catalog.md) | Games, versions, Explore, visibility and the library |
+| [builds-and-uploads.md](Documentation/builds-and-uploads.md) | Content-addressed blobs, resumable uploads, manifests, quota |
+| [downloads-and-deltas.md](Documentation/downloads-and-deltas.md) | Download plans, signed URLs, integrity verification |
+| [artwork-and-devlog.md](Documentation/artwork-and-devlog.md) | Covers and screenshots, and a game's devlog |
+| [storage-lifecycle.md](Documentation/storage-lifecycle.md) | Deleting builds, collecting unreferenced blobs, quota refunds |
+| [administration.md](Documentation/administration.md) | The loopback operator console, roles, quotas, audit |
+| [crash-reports.md](Documentation/crash-reports.md) | Receiving launcher crashes, fingerprinting and grouping them |
+| [launcher-releases.md](Documentation/launcher-releases.md) | Releases of the launcher itself: the signed document, the publish command, why nothing here can sign |
+| [hardening-and-deployment.md](Documentation/hardening-and-deployment.md) | Headers, per-account limits, body caps — and what TLS leaves to a deployment |
+
+## Project layout
+
+| Path | Contents |
+|---|---|
+| `src/controllers/` | HTTP surface, versioned under `/api/v1` |
+| `src/services/` | Business logic and authorization rules |
+| `src/repositories/` | Data access — the only place SQL appears |
+| `src/domain/` | Entities and value objects, dependency-free |
+| `src/common/` | Errors, `Result<T>`, hashing, logging |
+| `migrations/` | Numbered SQL migrations, immutable once merged |
+| `tests/` | `unit/` and `integration/` |
+| `filters/` | Authentication and rate-limiting middleware |
+| `Documentation/` | One document per module — see the table above |
+
+Architecture, conventions and the running list of technical decisions live in
+[CLAUDE.md](CLAUDE.md).
+
+## Contributing
+
+Start with [CONTRIBUTING.md](CONTRIBUTING.md): the layers, the fast build loop, where an
+authorization rule goes, and the rules that would otherwise cost you a cycle each.
+
+Development happens on `dev`; `main` is merged by the maintainer once work is validated.
+Commits are atomic and use conventional prefixes (`feat:`, `fix:`, `test:`, `docs:`, …).
+Code, comments and commit messages are in English. **CI runs on `main`**, which only the
+maintainer merges, so the gate before a push is the local one — `./scripts/test.ps1` and
+`./scripts/test.ps1 -Format`.
+
+## Licence
+
+[MIT](LICENSE) © 2026 Luigi Pennisi

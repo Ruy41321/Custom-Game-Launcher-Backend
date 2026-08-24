@@ -1,0 +1,10 @@
+// Generated from src/admin/ui/index.html. Do not edit; edit the HTML.
+#include "admin/AdminUi.h"
+
+namespace launcher::admin {
+
+// A raw string with an unlikely delimiter, so the page can contain quotes and parentheses
+// freely. The only sequence it must never contain is the closing delimiter itself.
+const char* const INDEX_HTML = R"ADMINUI(@LAUNCHER_ADMIN_UI_HTML@)ADMINUI";
+
+} // namespace launcher::admin

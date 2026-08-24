@@ -1,0 +1,9 @@
+// Generated from cmake/Version.h.in — do not edit.
+#pragma once
+
+namespace launcher {
+
+inline constexpr const char* APP_NAME = "@PROJECT_NAME@";
+inline constexpr const char* APP_VERSION = "@PROJECT_VERSION@";
+
+}  // namespace launcher

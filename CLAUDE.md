@@ -1,0 +1,1177 @@
+# CLAUDE.md — Custom Game Launcher / Backend
+
+Context file for AI-assisted development sessions. **Read this before writing any code, and
+update it at the end of every session** (see [Session protocol](#session-protocol)).
+
+Companion repository: `Custom-Game-Launcher-Frontend` (Avalonia desktop client). Cross-cutting
+contracts — API shapes, manifest format, error envelope — must stay in sync with it.
+
+---
+
+## 1. What this project is
+
+An open-source, self-hostable game launcher in the style of the Epic Games Store, aimed at
+indie/hobbyist developers who need to distribute in-development builds and demos to friends
+and small tester groups without resorting to zip files on Discord or manual Drive links.
+
+This repository is the **server side**: a C++ REST API, a PostgreSQL database, and a file
+server for build storage, all deployed together with a single `docker-compose.yml` on a
+cheap VPS. No paid content, no vendor lock-in.
+
+---
+
+## 2. Architecture
+
+### Runtime topology
+
+```
+                    ┌──────────────────────────────────────────┐
+   Launcher client  │  nginx  :443   TLS termination           │
+   Admin (SSH tun.) │    ├── /api/v1/*   → api:8080            │
+                    │    └── /files/*    → blob volume         │
+                    │          (secure_link: HMAC + expiry,    │
+                    │           HTTP Range for resume)         │
+                    └───────────────┬──────────────────────────┘
+                                    │
+                      ┌─────────────▼─────────────┐
+                      │  api (Drogon, C++20)      │
+                      │  :8080 public             │
+                      │  :9090 bound 127.0.0.1    │──► admin web GUI
+                      └─────────────┬─────────────┘
+                                    │
+                    ┌───────────────▼──────────┐   ┌────────────────────┐
+                    │  postgres:17             │   │  blob volume (CAS) │
+                    │  metadata + manifests    │   │  files by SHA-256  │
+                    └──────────────────────────┘   └────────────────────┘
+```
+
+### Code layers (strict, one direction only)
+
+```
+controllers/  HTTP surface. Parse + validate input, call a service, serialize the result.
+              No business logic, no SQL, no error formatting.
+      │
+      ▼
+services/     Business logic and authorization rules. Depends only on repository
+              *interfaces*, never on Drogon or on SQL. This is what unit tests target.
+      │
+      ▼
+repositories/ Data access. An abstract interface per aggregate plus a PostgreSQL
+              implementation. The only place SQL is allowed to appear.
+      │
+      ▼
+domain/       Entities and value objects. Pure C++, no dependencies at all.
+```
+
+`filters/` (Drogon middleware) and `common/` (errors, JSON helpers, logging, `Result<T>`)
+sit alongside and may be used by any layer above `domain/`.
+
+### Dependency injection
+
+Drogon instantiates controllers itself as singletons, so it offers no DI container. We use a
+**composition root**: `app/AppContext` is built once at startup, constructs the concrete
+PostgreSQL repositories, injects them into services behind their interfaces, and exposes the
+services. Controllers pull what they need from `AppContext::instance()`.
+
+The point is that **services never name a concrete repository**, so unit tests construct
+them with gmock fakes and touch no database.
+
+---
+
+## 3. Build storage and delta updates (the core mechanism)
+
+### Content-addressed storage
+
+Every file of every build is stored once as a blob named after its SHA-256:
+
+```
+/data/blobs/ab/cd/abcdef0123...   (2-level fan-out to keep directories small)
+```
+
+A build's **manifest** is a list of `(relative path → blob SHA-256, size, executable bit)`,
+persisted in `build_files` and served as JSON.
+
+### Why this instead of a chain of per-step delta files
+
+| Requirement | How CAS satisfies it |
+|---|---|
+| Old client updates to current | Delta is the set difference of two manifests, computed on demand for **any** version pair. One hop, no cascade of N steps. |
+| Retention | A blob is live while any retained manifest references it. Unchanged files are stored once across all versions. Garbage collection is a refcount sweep. |
+| Resume without corruption | Per-blob HTTP `Range`. A partial blob is written to `.part`, hash-checked on completion, and discarded on mismatch — a half-written file never lands in the install. |
+| Full-download fallback threshold | `delta_bytes / full_bytes > threshold` (config, default `0.7`) ⇒ server advises a full download. A truer signal than counting version steps. |
+| Upload cost | The client-side publisher sends only blobs the server does not already have. |
+
+**Known limitation:** deltas are *file-level*, not binary. A one-byte change inside a 2 GB
+`.pak` re-downloads that file. Sub-file binary diffing (bsdiff/zstd) is deferred; the CAS
+layout accepts it later as an additional blob kind, with no schema change.
+
+---
+
+## 4. Technical decisions
+
+| # | Decision | Rationale | Alternatives rejected |
+|---|---|---|---|
+| D1 | **Drogon** as HTTP framework | Async, controller routing, filters (middleware), native async PostgreSQL client, built-in HTTP test client. Most of the plumbing we would otherwise hand-roll. | Crow + libpqxx (no middleware/async DB, all hand-built); oat++ (heavy macro boilerplate, weaker PG support) |
+| D2 | **vcpkg manifest mode** | `vcpkg.json` committed with a pinned `builtin-baseline` ⇒ reproducible on Windows and in Docker, no global machine state. | Conan (extra Python toolchain); system packages (not reproducible) |
+| D3 | **Content-addressed blob storage** | See §3. | Chained per-step delta files (storage growth, cascading downloads for old clients) |
+| D4 | **Plain SQL migrations + in-repo runner** | Numbered files, `schema_migrations` table with checksums, run via `launcher-api --migrate`. Zero external tooling, no JVM, no lock-in. | Flyway/Liquibase (JVM); golang-migrate (extra binary) |
+| D4a | **The migration runner talks to libpq directly, not through Drogon** | When libpq supports pipeline mode (18.x does), Drogon compiles its *batched* PostgreSQL backend, which sends everything through the extended query protocol. That protocol rejects multi-statement scripts — a migration file — with "cannot insert multiple commands into a prepared statement". libpq's simple protocol accepts them. `autoBatch=false` on `newPgClient` does **not** help: the backend is chosen at Drogon's compile time, not per client. | Splitting migration files into statements client-side (needs a parser handling dollar-quoting, string literals and comments — fragile for no gain) |
+| D5 | **Argon2id via libsodium** | `crypto_pwhash` with `ALG_ARGON2ID13`, and the same audited library supplies the CSPRNG for tokens — one dependency instead of two. | bcrypt (weaker vs. GPU); raw libargon2 (no CSPRNG) |
+| D6 | **JWT: short access + rotating refresh** | Access ~15 min; refresh 30 days, rotated on every use, grouped by `family_id`. Replaying a used refresh token revokes the whole family — stolen-token detection. | Long-lived access tokens (no revocation); server sessions (statefulness we do not need) |
+| D7 | **nginx `secure_link` for downloads** | API signs a URL (HMAC + expiry); nginx validates it with no callback per chunk and serves `Range` natively. Downloads never occupy an API worker. | API-proxied downloads (blocks workers); `auth_request` per chunk (one API hit per range) |
+| D8 | **Table-driven roles/permissions** | `roles`, `permissions`, `role_permissions`, `user_roles`. Adding a role is an INSERT, never a destructive migration. The *devlist* is simply membership in the `dev` role. | Enum column on `users` (every new role is a migration) |
+| D9 | **spdlog, JSON lines** | Structured levels debug/info/warn/error with a request-id on every line, greppable in production. | Raw trantor `LOG_*` (unstructured) |
+| D10 | **Docker-first builds** | The Linux container is the reference build. A first vcpkg/Drogon build on Windows takes tens of minutes and is failure-prone. | Windows-first (slow, diverges from production) |
+| D11 | **Admin GUI = localhost-only web UI** | Second Drogon listener bound to `127.0.0.1:9090`, reached over an SSH tunnel. Works on a headless VPS, exposes nothing publicly. | Avalonia desktop app on the server (needs X11/VNC on a headless box) |
+| D12 | **Coroutines through controllers, services and repositories** | Controllers run *on* Drogon's event loops. `execSqlSync` there would block a loop thread for the whole query, so a handful of slow queries stalls every request the server is handling. `co_await execSqlCoro` suspends instead. Tests drive coroutines with `drogon::sync_wait`. | Sync repositories (blocks event loops); dispatching to a worker pool (reintroduces the thread-per-request cost Drogon exists to avoid) |
+| D13 | **Repository/service coroutine parameters are taken by value** | A reference parameter to a coroutine dangles as soon as the coroutine first suspends, because the caller's frame may be gone. Passing by value moves the argument into the coroutine frame. This is a correctness rule, not a style preference. | `const&` parameters (use-after-free that only shows under load) |
+| D14 | **Argon2id parameters default to libsodium's INTERACTIVE limits** | MODERATE costs 256 MiB *per concurrent hash*; a few simultaneous logins would OOM the cheap VPS this is designed for. INTERACTIVE (64 MiB) is the documented interactive-login profile and the limits are configurable for bigger hosts. | MODERATE/SENSITIVE (memory exhaustion under concurrent login) |
+| D15 | **The database, not the staging file, owns an upload's offset** | The offset is handed out by one conditional `UPDATE … WHERE received_bytes = $expected`, and the write happens after. Two chunks racing at the same offset cannot both match, so only one is ever told to write. Reading the file size instead would let a duplicated request overwrite a range that a concurrent one was already writing. | `stat()` on the `.part` file (racy); a per-session mutex (does not survive more than one process) |
+| D16 | **`Upload-Offset` is mandatory on every chunk** | Defaulting it to the server's current offset is the one mistake a resumed upload cannot recover from: a client that lost track silently duplicates or skips a range, and the hash check only catches it after the whole file has been sent. A wrong offset is a 409 carrying the real one, so the client recovers from the error itself. | Implicit append (silent corruption); `Content-Range` (semantics designed for responses, not partial writes) |
+| D17 | **Quota is charged when an upload completes, by one conditional statement** | `UPDATE users SET upload_used_bytes = … WHERE upload_used_bytes + $2 <= upload_quota_bytes` — an empty result *is* the refusal. A read-then-write lets two uploads finishing at once each see the same free space. Dedup, hash failure and a lost insert race all refund, so an account only pays for bytes that became new storage. Staging disk is bounded separately by `maxOpenSessionsPerUser × maxBlobBytes`. | Reserving quota at session start (release paths on every abort, expiry and crash, for a counter that would then include bytes that never arrived) |
+| D18 | **The manifest is a byte-exact canonical document, and the endpoint serves those exact bytes** | `builds.manifest_sha256` covers the served response, so a client verifies a download by hashing what it received instead of reproducing a canonical form of its own. Sorted by path, fixed key order, no whitespace, hand-written serialiser — jsoncpp changing how it escapes would silently break every stored hash. The build id is excluded so identical content yields identical hashes. | Re-serialising through jsoncpp on read (hash drifts with the library); hashing the database rows (no stable byte order) |
+| D19 | **Lists of values reach SQL as one `jsonb` parameter, expanded with `jsonb_array_elements`** | A PostgreSQL array literal would mean hand-rolling the array-literal escaping rules for paths and hashes; jsoncpp already escapes correctly, and `jsonb_array_elements_text(… ) WITH ORDINALITY` even preserves the caller's order. | Array literals (custom escaping); one statement per element (N round trips) |
+| D20 | **Numeric bind parameters are sent as text, not as C++ integers** | Drogon sends an integral parameter in PostgreSQL's *binary* format sized by the C++ type, so an `int` reaching a `bigint` column is rejected as malformed binary input. A text parameter is parsed by the server into whatever type it inferred for that position, which is correct whatever the column happens to be. | Matching each C++ width to its column by hand (one wrong pairing is a runtime error nothing catches at compile time) |
+| D21 | **The download plan is a POST, not a GET** | It mints signed URLs and records that a download was handed out. Neither is cacheable and neither is free of consequence, which is exactly what GET promises. The body also leaves room for a client to describe its install more richly later without inventing a query-string encoding. | `GET …/download?from=…` (a cacheable, "safe" method with credentials in the response and a row written per call) |
+| D22 | **Only the URL *path* is signed, never the scheme or host** | `$uri` is all nginx sees, so it is all the signature can cover. The consequence is the useful part: the same deployment keeps working when it is fronted by another hostname or moved behind TLS, and `storage.publicBaseUrl` can change without invalidating anything already minted. | Signing the absolute URL (any hostname change breaks every live link, and nginx cannot verify it anyway) |
+| D23 | **A local copy is only ever offered from a path the update keeps unchanged** | A file that merely moved does not have to travel, but the source of the copy must survive the update: otherwise whether the copy works depends on the order the client applied the plan in, which is a bug that appears on some machines some of the time. Restricting `copyFrom` to survivors makes the plan order-independent by construction. | Offering any local path holding the content (ordering hazard); no copy hint at all (a rename re-downloads the whole file) |
+| D24 | **Planned bytes count distinct blobs, not manifest entries** | Paths are the unit of the plan, blobs are the unit of the transfer. Two changed files with identical content are two entries and one download, so summing entries would overstate both what the client is told to expect and what the analytics record. | Summing entry sizes (double counts shared content) |
+| D25 | **Files the manifest never mentioned do not make an install broken** | An install directory legitimately accumulates saves, configuration and logs. `verify` reports them under `unexpected` so the client can decide, but `intact` ignores them — a server that called an install corrupt because of a save file would train users to ignore the check. | Treating unexpected files as corruption (false positives); not reporting them at all (no way to clean up a botched update) |
+| D26 | **Build authorization rules live in `domain/`, not in a service** | Both halves of a build's life ask the same two questions — who may publish to it, who may see it exists. `domain::mayPublishBuild` / `mayReadBuild` are pure functions over `BuildOwnership` and `Actor`, so `UploadService` and `DownloadService` cannot drift apart on the 404-not-403 rule. | A copy in each service (two places for one security rule to be wrong in) |
+| D27 | **Game artwork lives on its own root and is served unsigned** | A cover is public by definition, and signing it would mean minting one expiring signature per card in an Explore grid — none of which a cache could reuse, and some of which would expire while somebody was looking at the page. Serving it unsigned is only safe because the root is *separate*: a public nginx location over `/data/blobs` would hand out every build to anyone who learned a hash. | Media in the blob CAS behind signed URLs (a signature per thumbnail, uncacheable); publisher-supplied external URLs (the launcher fetching from arbitrary hosts the server names) |
+| D28 | **What an uploaded image is gets decided by its leading bytes, never by its `Content-Type`** | The answer becomes the `Content-Type` of a public URL, so it cannot be something the uploader chose. PNG, JPEG and WebP are accepted by signature; SVG is refused on purpose, because it is a document format that can carry script and would be a stored cross-site scripting vector rather than a picture. The extension is part of the storage key so nginx answers from its own mime table instead of `application/octet-stream`. | Trusting the declared type (stored XSS); accepting SVG (same); a hashed name with no extension (every cover served as a download) |
+| D29 | **Artwork is content-addressed, so a row going away is not a file going away** | Two games with the same picture are one file, which is the point. Deleting a row therefore says nothing about whether the bytes are still in use, and removing the file unconditionally would blank the other game's cover. Every delete asks whether any row still points at the key. A game has one cover, one banner and one logo, enforced by a partial unique index rather than by a service, so no route present or future can create a second. | A file per row (duplicate storage, and no dedup on re-upload); enforcing the singleton kinds in the service (one more place for the rule to be missing) |
+| D30 | **`mayViewGame` / `mayEditGame` are pure functions in `domain/`** | Three services now ask the same two questions about a game — the catalog, artwork and the devlog — and the answer to "may this caller see it" decides between 404 and 403 for all of them. Same reasoning as D26 for builds: a copy per service is a security rule with three places to be wrong in. | A copy in each service; a shared service base class (inheritance for what is two free functions) |
+| D31 | **Unreferenced blobs are collected on a timer, with a grace period, row before file, and a quota refund** | `build_files` is `ON DELETE RESTRICT`, so a referenced blob was never at risk; the gap was the other half, where an upload that was never finalised and the content of a deleted build were stored and paid for forever. Three parts are load-bearing. The **grace period** is correctness, not tuning: every blob of a build is uploaded *before* the manifest that names them, so during a publish live content is referenced by nothing, and a sweep with no grace eats builds in flight. The **row goes first and the file second**, because the other order cannot be recovered from — a file removed while the delete loses a race leaves a live manifest pointing at nothing, whereas a crash between the two steps leaves only a file nothing references. The delete **repeats the unreferenced condition** inside the statement, so that race is a no-op rather than a RESTRICT violation. And it **refunds**: quota is charged at upload completion, so without this it is a lifetime cap rather than an allowance. | Deleting the file first (a live build with missing bytes); no grace period (collects builds mid-publish); trusting the listing (turns a race into a database error); no refund (deleting a build frees disk but not quota) |
+| D32 | **A patch note is not a version's release notes** | `game_versions.release_notes` describes exactly one version. A devlog entry may name a version or none at all — "what we are working on this month" is a legitimate post — and it needs its own publication state so a draft can be written before the build it talks about exists. Publishing and unpublishing are one field because a note that went out by mistake has to come back, and re-publishing keeps the original date, since the date is when readers saw it and not when it was last edited. It is its own paged surface rather than a field of the game detail, which is a fixed-size description of one game. | Reusing `releaseNotes` (cannot express a post about no version, or a draft); embedding the devlog in the detail response (an unbounded list inside a fixed one) |
+| D33 | **The administrative surface is separated by the listener a request arrived on, and the peer address is deliberately not checked** | Drogon registers routes on the application rather than on a listener, so without a filter every admin controller answers on the public :8080 as readily as on :9090 and the second listener is decoration. `AdminSurfaceFilter` compares `localAddr().toPort()` against `server.adminPort`. It does *not* check the peer, because the compose file binds this listener to `0.0.0.0` inside the container and publishes it as `127.0.0.1:9090:9090` — every legitimate request arrives from the bridge gateway, so a loopback check would reject the documented deployment. The network restriction stays on the network side, and `validate()` refuses `adminPort == port` so the two can never collapse. | Binding 127.0.0.1 inside the container (unreachable even through the published port); a peer-address check (rejects the deployed stack); a path prefix alone (one nginx location away from public) |
+| D34 | **A hidden admin route answers 404, word for word the framework's own page** | From the public listener the surface does not exist, and that is the honest answer as well as the safe one: a 403 confirms the route is there to anyone who guessed the path, and any difference in wording between "hidden here" and "never existed" is a way to enumerate the surface from outside. The same 404-not-403 rule the catalog applies to drafts, applied to the surface itself. | 403 (confirms the path); a distinct message (enumerable) |
+| D35 | **The admin surface mints its own tokens, and re-checks the operator on every rotation** | An operator reaches the server through `ssh -L 9090:127.0.0.1:9090`, which forwards one port: a page loaded from :9090 has no route to :8080 to log in through. It is the same AuthService and the same signing key — a token from the public listener works here — plus the requirement that the account hold some `admin.*` permission. Checked at refresh too, because permissions live in the access token and revoking a role cannot reach one already issued; without it a demoted operator renews an administrative session forever. A refused sign-in retires the session the correct password just opened. | Logging in on :8080 (unreachable through the tunnel); checking only at sign-in (a revoked role never takes effect) |
+| D36 | **An audit entry is written by the same statement as the change it describes** | An entry appended afterwards can fail on its own, and what it leaves behind is a change nobody can attribute — the one outcome an obligatory trail exists to rule out. A CTE whose audit arm selects from the modifying arm makes that impossible and gives three properties for free: a change that matched no row, a change already in effect, and a refused change all record nothing, with no code deciding it. This is why `IAdminUserRepository` is separate from `IUserRepository`: its mutations take the audit entry, which registration and a password reset have no business carrying. Note the final SELECT reads the UPDATE's own RETURNING — a data-modifying CTE's effects are invisible to the rest of the statement, so re-selecting the table returns the row as it was before. | A second INSERT after the change (a change with no record); a transaction (Drogon commits asynchronously on destruction — see §8); best-effort logging (an audit trail that is allowed to miss things is not one) |
+| D37 | **While an account is the only active holder of `admin.users.manage`, none of its roles or its active flag may change** | Deliberately blunt: it refuses to change *any* role on that account, not only the one carrying the permission. A finer rule would have to reason about which permissions the particular role grants, and being wrong once costs the operator every route back, because nothing but the command line repairs an empty administrator list. Deactivated accounts do not count as a way back in. Paired with a flat refusal to deactivate one's own account. | Checking only the role being revoked (one wrong answer locks everybody out); no guard at all (an operator can empty the list in two clicks) |
+| D38 | **The first administrator is granted from the command line** | Granting a role through the surface needs `admin.roles.manage`, which on a fresh deployment nobody holds, so something outside the permission system has to hand out the first one. The authority that makes sense is shell access to the machine — already the authority that reaches the loopback listener at all. `--grant-role` also retires the manual `INSERT INTO user_roles` the setup notes carried since M4, and unlike that statement it leaves an audit row, with a null actor and `metadata.via = "command-line"`. Talks to libpq directly, like the migration runner: no event loop for a coroutine, and destroying a DbClient can abort the process. | An endpoint (cannot bootstrap itself); a seeded admin account with a default password (a credential every deployment shares); leaving it to hand-written SQL (no audit row, and easy to get wrong) |
+| D39 | **The console is one self-contained page, embedded in the binary** | The deployed image then has no path to mount, the page cannot get out of step with the API it talks to, and the integration tests exercise the same bytes a deployment serves. The source stays a real `.html`; CMake configures it into a string literal, with `CMAKE_CONFIGURE_DEPENDS` so an edit is not left stale. Vanilla JavaScript and no build step, because adding npm to a C++ repository to render three tables costs more than the console is worth. The access token lives in a variable — no browser storage, no cookie — since the page is reached over a tunnel from somebody's desktop and a token that survives the tab outlives its reason. The CSP is `default-src 'none'`, which the page needs none of relaxed, so a later edit reaching for a CDN fails loudly. | A document root (a mount to keep in step, and untested bytes); an SPA with a build step (npm in a C++ repo); a token in browser storage (outlives the tunnel) |
+| D40 | **A deployment's limits are published by `GET /api/v1/capabilities`, unauthenticated** | Several configuration values are limits a client cannot work without — a chunk over `uploads.maxChunkBytes` is refused and the refusal does not say what the limit is — so every one of them was a constant compiled into the launcher, guessed from the defaults in this repository. Lowering one broke every upload for a reason nobody could see; raising one changed nothing. The route needs no token because nothing in the document depends on the caller: `defaultQuotaBytes` is what a *new* account is given, not what anybody has left, and no secret appears at all. That is what makes it readable at startup, before a session exists. Not folded into `/health`, which an orchestrator polls on a short timer to ask about the process rather than about the contract; `app::capabilitiesDocument` is a pure function of `AppConfig`, so it is asserted on with no HTTP server and the controller is serialisation only. | Extending `/health` (mixes a contract with a liveness probe polled every few seconds); an authenticated route (unreadable exactly when a client is deciding how to sign in and what to send); leaving the limits undocumented (the status quo: a client that guesses, and a deployment that cannot be reconfigured safely) |
+| D41 | **A publisher may delete a game even while other accounts hold it in their library, and what stops working answers 404** | A library entry is a bookmark, not a licence: nothing was paid for, and refusing while any entry exists would let one stranger permanently freeze a publisher's ability to withdraw their own work — which is also a data-protection problem, since a game's title and description are the publisher's own content. `user_games` cascades away. What is already *installed* keeps working, because an install is a directory on somebody's machine this server never knew about; what stops is updating and verifying it, and both are **404, not 403**, since after the delete there genuinely is no such game. A publisher who wants a title merely hidden already has `visibility: "draft"`, which is why no softer form of delete is needed. `download_events` goes with the game, because `game_id` is `ON DELETE CASCADE` — the schema's answer, and a real consequence: operator analytics fall. | Refusing while referenced (unremovable content, and a griefing vector); a tombstone or soft delete (a fourth visibility every query has to learn, for something `draft` already does); keeping the download history (a migration, plus a report that names a game it cannot join to) |
+| D42 | **Deleting a game returns the storage keys of the artwork it cascaded away, out of the same statement, and one `MediaReclaimer` decides what actually leaves the disk** | Images are content-addressed, so a row going away says nothing about whether the bytes are still in use, and two services now delete artwork. The rule is three lines long, which is exactly why it has one implementation: a rule with two copies stops being a rule the first time one is edited. The keys have to come out of the *deleting* statement — a sub-query on the pre-command snapshot — because reading them afterwards finds nothing, and reading them in a separate statement first opens a window in which a new cover can be uploaded and then have its file deleted from under it. | Deleting the files unconditionally (blanks another game's cover); a second SELECT before the delete (a real window); duplicating the check in CatalogService (the same rule in two places) |
+| D43 | **GDPR erasure is immediate and irreversible, and it anonymises the account rather than deleting it** | `account_deletion_requests` has carried a `pending` status and a one-open-request index since migration 0001, and that shape was deliberately not taken up: a window needs something to close it, something to cancel it, and a ruling on whether signing in during it is a change of mind — and for its whole length the account is *not yet erased* while its owner has been told it will be. Immediate is simpler and impossible to regret; the row is still written, `completed`, so the record exists and a later session that wants the deferred form inherits the table. Anonymising rather than deleting is not a preference either: `games.publisher_user_id` is `ON DELETE RESTRICT`, so a `DELETE` on anybody who ever published would be refused by the database, and other people's installs update from those builds. The placeholder address is derived from the account's own id, because `users.email` is `citext UNIQUE` and a fixed one would make the *second* erasure on a deployment fail on the index. Sessions, reset links and the library are emptied by hand, since the cascades that would have done it hang off a `DELETE` that never happens; `download_events.user_id` goes null, which the first migration's own comment anticipated. | A grace period (needs a closer, a canceller, and a login rule, and leaves the account un-erased meanwhile); deleting the row (refused by RESTRICT, and it would take other people's updates with it); a fixed placeholder address (unique-index failure on the second erasure); deleting the user's games too (a separate, deliberate act — which now exists, see D41) |
+| D44 | **The erasure re-asks for the password, refuses the last operator, and writes its audit entry in the same statement** | A valid access token says who is asking, not that the owner is the one at the keyboard, and this is the request with no undo — so re-authentication, not the token, is the gate. The last active holder of `admin.users.manage` is refused for the reason D37 gives about deactivation, only more so: nothing but the command line repairs an empty administrator list, and unlike a revoked role this cannot be handed back. And the audit arm rides inside the erasing statement (D36) because this is the change where an entry written afterwards, and failing, leaves something irreversible that nobody can attribute. The statement's own `WHERE email <> $2` makes a second erasure a no-op rather than a second row. `POST /api/v1/me/deletion` rather than `DELETE /api/v1/me`, because the password needs a body and a body on DELETE is the one thing HTTP declines to promise. | Token alone (an unlocked machine erases an account); letting the last operator leave (an unreachable surface, permanently); an audit row written after (an unattributable erasure); `DELETE` with a body (intermediaries may drop it) |
+| D45 | **A crash report names no account, and there is no column for one** | The obvious design attaches the sender, and it is the wrong one. A crash report is a diagnostic about a *program*; the moment it names an account it becomes personal data, and then the erasure of D43 has one more table to reason about and a later session has one more thing to remember. Here there is nothing to remember: `crash_reports` has no `user_id`, no installation id and no foreign key at all, so a future addition has to be a deliberate migration rather than an accident. The client does the other half — it strips its own profile, data and install directories out of the text *before writing the file*, so the copy on disk is the copy that travels — and the two measures fail differently on purpose rather than one being trusted. The cost is real and accepted: an operator cannot ask which of their testers hit a bug. | Recording the account when a token happens to be present (personal data, and inconsistent — the same crash is attributed or not depending on whether somebody was signed in); an installation id (a pseudonym is still a person once two reports are joined); trusting the client's redaction alone (a message can carry anything a caller put in it) |
+| D46 | **Submitting a crash report needs no account; reading them needs `admin.crashes.read`** | A launcher crashes on the sign-in screen as readily as anywhere else — more readily, since that is where a broken configuration shows — so a route only a signed-in client could reach would be missing exactly the failures worth having, and requiring a token would make the report be *about* an account (D45). What stands in for one is a per-address bucket with its own numbers, a field-by-field size cap, and `enabled` answering **404** rather than a refusal so a deployment that does not collect them looks like one too old to have the route. The bucket is separate from the authentication one because they want different numbers — auth is tight because each attempt costs an Argon2id hash, this is loose because a launcher that crashed five times overnight legitimately sends five — and because sharing would let a burst of crash reports lock somebody out of signing in. Reading is an operator permission because a stack trace is a map of the program and a list of them is a list of ways to break it. | An authenticated route (loses the crashes worth having, and attributes the rest); reusing the auth rate limiter (one of the two numbers is then wrong, and reports can lock out sign-in); answering a refusal when disabled (tells a client the route exists and is being withheld) |
+| D47 | **The fingerprint is computed server-side from the exception type and the *shape* of the stack, and never from the message** | It decides what counts as one bug, so it cannot be the client's to choose: two client versions would disagree about what one crash is, and a caller could hide a report among a thousand distinct ones. Normalising the stack — keeping names, dropping digits, offsets and addresses — is what makes a rebuild the same bug rather than a brand-new one, which a fingerprint over the raw text would get wrong on every release. Leaving the message out is the same argument from the other side: "could not open D:.pak" and "could not open C:\....pak" are one failure, and folding the message in would split it into as many bugs as there are machines. The group's summary comes from the *most recent* report via `DISTINCT ON`, because that is the one an operator is about to open. | A client-supplied fingerprint (disagreement, and a grouping a caller controls); hashing the raw stack (every rebuild is a new bug); including the message (one bug per machine); no grouping at all (a thousand rows of one crash, which answers neither question an operator has) |
+| D48 | **The per-account ceiling lives inside `JwtAuthFilter`, not on each route's filter list** | Every authenticated route on this server already runs through that filter, so putting the limit there means no route — present or future — can be added with a token-holding caller and no ceiling at all, which is precisely the failure a list of forty-seven filter names invites. It runs after verification because the key is the account, and an unverified token names nobody. The default is loose on purpose and for a measurable reason: the busiest legitimate caller is a build upload, one request per chunk, so ten a second means pushing `maxChunkBytes` ten times a second — faster than any link this project targets. Tightness belongs to the address bucket, where an attempt costs an Argon2id hash. | A filter listed per route (forty-seven chances to forget one, and nothing to catch it); one bucket shared with the address limiter (the two want opposite numbers, and a busy upload would lock out sign-in); no per-account limit (the status quo: a valid token had no ceiling at all) |
+| D49 | **Security headers are written where the response is *built*, not only by post-handling advice** | A response a filter rejects with never reaches post-handling advice, so an advice-only implementation left exactly the security-relevant responses — every 401, every 403, every throttle — as the only ones carrying nothing. `makeErrorResponse` is the single place all of them pass through. Two more rules fall out of the same reasoning: a header already present is never replaced, because the admin console states a stricter policy of its own and this is the one surface a browser really renders; and Drogon's cached not-found page is stamped once at construction, because it is one shared object handed to every request that misses and a later write to it is a write two event loops can make at once. | Advice alone (bare 401s and 403s — found by a test, not by review); overwriting unconditionally (loosens the console's own policy); mutating the cached 404 from the advice (a data race for a header that is always the same) |
+| D50 | **HSTS is configurable and off by default, and `includeSubDomains`/`preload` are not offered at all** | It is the one header here that promises something about the *transport* rather than describing the payload, and this stack terminates no TLS. Browsers ignore it over plain HTTP, so enabling it in production before a terminator exists is harmless; receiving it from `http://localhost` is not, because it pins that browser to `https://localhost` with no way back short of clearing browser state. The two extensions are refused because both are promises about names this server does not know it has, and preload is close to irreversible. | On by default (breaks a developer's browser for their other localhost work); always on in production (same header, no way to stage the rollout); offering preload (an irreversible promise from a configuration file) |
+| D51 | **`X-Forwarded-For` is believed only from a configured proxy, and read from the right** | The header on `AuthRateLimitFilter` claimed Drogon's trusted-proxy resolution was in use; the code returned the raw peer address, and nothing was wrong with that until TLS goes in front — at which point every request arrives from the proxy and **every per-address bucket collapses onto one shared by every client**, so one crash-looping launcher locks everybody out of signing in. Reading it only from configured proxies keeps the direct-deployment case honest, since there the header is not a fact about the network but a string somebody typed. Reading from the right is the other half: the left of the header is whatever the original caller sent, so taking the first entry would let anybody hand themselves a fresh bucket per request. IPv4 CIDR is supported because the entry that matters is a container bridge, whose gateway is assigned rather than chosen. | Trusting the header always (a throttle whose key the throttled party picks); ignoring it always (correct today, and silently wrong the moment §6.1 of the deployment page is done); taking the leftmost entry (the same forgeable key, one step removed) |
+| D52 | **A deployment that still holds this repository's placeholder secrets is refused by name, not only by length** | The placeholder in `docker-compose.yml` is thirty-eight characters long and published on GitHub: it passed the `size() < 32` check while being secret from nobody, so a deployment that forgot its `.env` signed every token with a value anybody could read and started up reporting nothing wrong. Matching on `dev-insecure` rather than on the two exact strings covers the variants a future placeholder would take. Development keeps booting on them, which is what they are for. | A length check alone (the status quo, which the compose defaults walk straight through); removing the compose fallbacks (the stack no longer starts with no setup, which is the reason they exist); a warning at start-up (a line in a log nobody reads while the deployment works) |
+| D53 | **A registration survives a verification message that could not be sent, and says so** | The account is created, the answer carries `verificationEmailSent: false`, and `POST /auth/verify-email/resend` is the way back. Undoing the registration was the obvious alternative and is worse: creating an account is not one statement, so unwinding it is a compensating delete that can fail on its own — and when it does, the address is held by an account that cannot sign in and cannot be created again, which turns an outage at the relay into a lost account. The send is *awaited*, bounded by `mail.timeoutSeconds`, precisely so the answer can distinguish the two cases: telling somebody to check an inbox nothing was sent to is a wait with no end. A password reset cannot say the same thing — its answer is identical whether or not the address exists — so there a failed send is a log line and nothing more. The raw token never leaves `AuthService`: it is generated, hashed, composed into a message and dropped inside one function, so the `dev*` fields are gone rather than moved. | Failing the registration and unwinding the row (a compensating delete that strands an address when it fails); fire-and-forget with an optimistic answer (the client tells people to wait for something that never left); a retry queue (an outbox table and a sweeper, for a message that arrives at most once per registration) |
+| D54 | **The links land on two pages this server serves, and neither page changes anything by being opened** | Every authentication route here is a JSON `POST` and an inbox opens URLs with a browser, so without a page a verification link is a URL nobody can follow — and the launcher has no screen for either flow, so "the client will handle it" was not available either. `/verify-email` and `/password-reset` are self-contained pages embedded from `src/auth/ui/` the way the console is, outside `/api/v1/` because the version in a path is a promise about a wire contract and these are for a person. The load-bearing part is that a `GET` decides nothing: a mail provider's link scanner fetches every URL in a message, so a page that confirmed on load would spend the token before its owner clicked and show them "this link is invalid" for having done nothing wrong. Each states its own CSP and `Cache-Control: no-store`, because the URL carries a single-use token. | Confirming on `GET` (link scanners consume it); a plain HTML form posting form-encoded (a second body format on a JSON route, and `form-action` would have to be opened); two screens in the launcher (a client release before anybody can register, and the reset flow needs a screen that does not exist); no page at all (the status quo: a link nobody can follow) |
+| D55 | **The routes that send a message have their own bucket, and a deployment that cannot send refuses to start** | Same shape as D46 and the same reason it is not the authentication bucket: that one is tight because every attempt behind it costs an Argon2id hash, while these cost no CPU and spend something scarcer — a stranger's inbox and the deployment's standing with its relay. Sharing would make one of the two sets of numbers wrong and would let a burst of resend requests lock somebody out of signing in; the reset request carries both filters, because it is both things at once. The start-up refusals are the other half: `smtp` with no relay, `log` outside development (it writes the body, and the body of a reset message is a live credential), and `none` together with `requireVerifiedEmail` (nothing delivers the link, nothing lets anybody in without it, so every account is one that can never sign in) — which is exactly the state this repository shipped in until now, discovered at the first registration rather than at boot. With `none` the routes that send answer **404**, as a disabled crash-report route does. | Reusing the auth bucket (one of two numbers is wrong, and reports lock out sign-in); a warning at start-up (D52's argument: a line in a log nobody reads while the deployment appears to work); allowing `log` in production (credentials in a log with a retention policy); leaving the combination unchecked (the debt this closes, rediscovered by the first user) |
+| D56 | **A launcher release lives in its own table behind its own unauthenticated route, not in the catalog** | The catalog was the obvious home and is the wrong one: every catalog route carries an `Actor` and asks `mayViewGame`, and **the launcher that most needs an update is the one that cannot sign in** — pointed at a server it has never reached, holding an address nobody confirmed, or carrying the very bug the update fixes. Reaching a release through the catalog would mean an unauthenticated path inside `CatalogService`, which is the one place four milestones have spent concentrating authorization. What *is* reused is the layer underneath, which knows nothing about games: content addressing, and the artwork rule that what a root is served as decides which root it is (D27) — so this is a third root, public and unsigned. Serving it unsigned weakens nothing, because the integrity guarantee comes from the signature and the content address inside it, neither of which a URL takes part in; what a signed URL protects is confidentiality, and a launcher binary has none. No deltas either: a self-contained build changes almost every file between .NET releases, so blob negotiation would cost a round trip to learn that everything is needed. | The launcher as a catalog row (an unauthenticated hole inside CatalogService, plus a publisher, a visibility, a library and a detail page that mean nothing); signed download URLs (an expiry on a public binary, and a token the asking client does not have); per-file deltas (a round trip to learn that everything changed) |
+| D57 | **The signature covers a canonical release *document*, never the artifact, and a document that is not byte-for-byte canonical is refused at publish time** | A signature over the bytes of a zip says only that somebody with the key once produced that zip — nothing about which version, channel or platform it is. An attacker holding the database could then serve a genuine, genuinely signed artifact as something it is not: last year's build as the newest, or the Linux build to a Windows launcher. One document binding all of it together makes that impossible; it is D18's reasoning about what a hash covers, applied to what a key covers. The round-trip check in `parseReleaseDocument` — parse, re-serialise, compare with the input — is the load-bearing half: without it the row would store bytes whose meaning had only partly been captured (an extra key, a reordering, a trailing newline from a text editor) while the columns derived from that parse described something subtly different. The escaper moved to `domain/CanonicalJson.h` because two documents whose hashes depend on identical output must not be able to drift apart. | Signing the artifact (a real signed file served as a different release); storing a re-serialised document (the bytes a client verifies stop being the bytes that were signed); accepting any equivalent JSON (the stored document and the columns beside it come to mean two different things) |
+| D58 | **ECDSA over P-256 with SHA-256, pinned rather than read out of the configured key** | Ed25519 is the better modern choice and was rejected for a reason that lives entirely on the *client* side: libsodium is already linked here so it would cost this repository nothing, but .NET 9 has no Ed25519 in its base class library, so the launcher would carry either a native binding across four self-contained runtime identifiers or a managed crypto library — in a client whose maintainers refused a dependency over thirty lines of test code (its D11). P-256 costs zero new dependencies on either side: OpenSSL is already here for the `secure_link` digests, and `System.Security.Cryptography.ECDsa` is in the client's runtime. ECDSA's two known weaknesses do not reach this use — nonce quality is a property of *signing*, which happens on somebody's own machine a few times a year, and malleability matters when a signature is an identifier, which this one never is. Pinning matters as much: an algorithm taken from the key would let a deployment configure an RSA key this server verifies happily and the client cannot read at all, so anything but a P-256 key is a start-up refusal naming the variable. | Ed25519 (a native crypto dependency in four client RIDs, or a managed one, for a repository that counts them); RSA (larger signatures for no gain); reading the algorithm from the key (a launcher that stops updating for a reason nothing reports) |
+| D59 | **A release is published from the command line against a document signed on another machine, and this server holds no private key at all** | The authority that fits is shell access, as it is for `--grant-role` (D38) — but here the consequence is the feature rather than a convenience: **somebody who takes this server, its database and its disks can stop launchers from updating and cannot make them update to anything.** No other surface in this repository survives a full compromise, and this is the one where it matters, because an automatic update is code a machine runs without anybody looking at it. Two more things fall out: the artifact never has to fit an HTTP body limit, and `ILauncherReleaseRepository` has no write method, so the serving path cannot create a release. The signature is re-checked on the way *out* as well, which turns a row edited in the database into one log line naming the release instead of a fleet quietly failing to verify. Withdrawing is `retired_at`, not a rollback: the previous release becomes newest and every client declines it for not being strictly newer, so **standing still is the intended outcome** — rolling a fleet backwards is a bigger action than the one asked for. | An endpoint (the private key would have to reach this machine, or a stolen token could publish); the server generating the key (a compromise becomes a signing oracle); a CI secret (a workflow file can print it); rolling clients back on a retire (a larger action than withdrawing, taken on somebody's behalf) |
+| D60 | **A refusal may name the *rule* that refused, beside the category that already named its kind — and only for a field a person types** | `code` says what kind of refusal happened, which is enough to decide whether retrying could help and nothing like enough to tell somebody what to do. Every rejected form shares `invalid_input`, so the only thing separating "your password is too short" from "that is not an email address" was `detail` — English prose, written for whoever reads the logs. A client had two options and both were bad: show the English, or match on it, which makes rewording a message a breaking change and puts the wording of every refusal under a compatibility freeze. `Error` therefore carries an optional `rule` from `domain/ValidationRules.h`, plus `ruleArgs` for the values its sentence needs — the limit, almost always, because a translated message that cannot say *twelve* characters is only half an answer. Three things make it a contract rather than a field: the names are **frozen** while `detail` stays free; there is **one rule per corrective action**, so six malformed-address branches are one `email_invalid` and a limit is its own rule; and both keys are **omitted rather than empty**, so a server too old to send one and a refusal that names none read identically and adding a rule needs no coordinated release. The scope is the load-bearing part: manifest paths, blob hashes, upload offsets, crash reports and release documents are values a *client* computed, so a refusal there is that client's bug and stays unnamed — translating it would dress up a bug as somebody's mistake. | Matching on `detail` (rewording becomes a breaking change); a field name plus a generic rule (`{0} is too long` composes badly in languages with agreement, and the field name is English); a rule per branch (six sentences for one thing to do); a `422` body listing per-field errors (a second envelope shape, for forms that submit one field's worth of mistake at a time); putting the limits in `/capabilities` instead of the refusal (a second round trip, and the client would have to know which limit each rule meant) |
+| D61 | **A version is a PATCH like a game, publishing is idempotent, withdrawing is allowed — and a build carries a name it is not identified by** | Two halves of one gap the maintainer walked into. A version created without `publish: true` **could not be published by any route**: `GameController` had POST and DELETE on a version and nothing between them, so the only way past a box left unticked was to delete the version, its builds and its uploads and do the whole thing again. What makes that worth a decision row rather than a bug fix is where the ability already was — `IGameVersionRepository::publish` had existed since migration 0001 and **nothing had ever called it**, so the fix was to notice, not to build. It is now `update`, a partial update in the shape `GameUpdate` already had, because a version whose stage or notes are wrong is the same dead end wearing different clothes; three states for `published` rather than two is the load-bearing part, since a PATCH carrying only new notes must not withdraw a release. Publishing twice keeps the original `published_at`: *when* a release went out is not something a second press of a button may move. Withdrawing is offered because it is the reversible thing standing next to a DELETE that is not, and its cost is written down rather than discovered. The **name** answers the other half: `builds` is unique on (version, platform, architecture), which is precisely the identity a publisher looking at four rows of "windows x64 ready" cannot use — what tells them apart is which directory each came out of, and nothing stored here can derive that. It is deliberately **not unique**, because the same "Nightly" belongs on the Windows and the Linux build of one version, and empty stays valid, because every build published before migration 0006 has no name and never will. | Publishing as its own verb (`POST /versions/{id}/publish` — a second write path onto one column, and stage and notes stay unreachable); a full PUT (a client that omitted a field would blank it, which is how a fixed typo silently withdraws a release); refusing to withdraw (leaves DELETE as the only way to un-publish a mistake, which takes the builds too); `published_at` moved on every publish (the release date becomes whenever somebody last pressed the button); a unique name per version (the natural label for a cross-platform pair is the same on both); naming builds by generating one (a label nobody chose is a label nobody reads) |
+| D62 | **A build is readable only when its game is out *and* its version is published — and an unreadable *source* costs a full download rather than a refusal** | `mayReadBuild` asked one of the two questions. `BuildOwnership` carried the game's visibility and the build's status and nothing at all about the version, so on a `public` game a version created and never published — the ordinary state of a build being tested before release — handed its builds to anybody who could name one. `CatalogService::gameDetail` had been filtering those versions out of the listing since M4, which is what made it invisible: the id was not *advertised*, and every id in this system is a UUID somebody may still have from before a withdrawal. The struct now carries `versionPublished`, defaulting to **false** so a query that forgets to select it refuses instead of admitting, and the one repository query that fills it selects `(published_at IS NOT NULL)`. It stays a 404 for the reason D41 gives: "there is an unreleased 2.0" is exactly what a refusal must not say. The second half is the case the fix would otherwise have broken. A player who installed a version that was later withdrawn still has it on disk, and `fromBuildId` is a claim about *that disk* — nothing about the source reaches the plan except which bytes may be skipped — so an unreadable source now yields a full download of the target instead of a refusal. Refusing would mean the withdrawal took away not just the old version but the ability to leave it. | Checking the version inside each service (D26's argument again: two copies of one authorization rule); a second repository call from the services to ask about the version (a round trip per check, and a rule that lives in the caller); `versionPublished` defaulting to true (a future query that forgets the column opens the hole again, silently); 403 for an unpublished version (confirms it exists); refusing an unreadable source (a withdrawn version becomes a player who cannot update at all); ignoring *any* absent source id (hides a client bug — a source that simply does not exist is still a 404) |
+| D63 | **A deployment that cannot send mail says so in `/capabilities`, and the way back in is a one-time password an operator hands over — enforced by a flag the access token carries** | `mail.transport = none` already refused the routes that send with a 404 (D55), which left two holes. The client could only *infer* the deployment's nature by pressing a button and reading the failure, so `/capabilities` now carries `mail.enabled` — D40's argument exactly: a limit, or a switch, that a client has to guess is one that breaks the moment somebody reconfigures the deployment. And somebody who forgot their password had no route back at all, because every route back was a link in an inbox. So an operator sets a password on the loopback surface, the server generates it rather than the operator choosing one — 75 bits from an alphabet with `l`, `1`, `o` and `0` removed, because it is read out loud — and it exists **only in the response**, never stored, logged or recoverable. What makes it one-time is `users.password_change_required`, raised by the same statement that stores the hash and revokes the account's sessions and reset links (D36), and honoured by `JwtAuthFilter`, which refuses every route but `POST /api/v1/me/password`. The claim rides **in the token** rather than being read per request: a database round trip on every authenticated call, to catch a state almost no account is ever in, is the cost the permissions already declined to pay — and the price is the same one they pay, a flag as stale as a 15-minute access token, which is why the operator route revokes the refresh tokens rather than pretending it can revoke the access tokens. **An operator cannot do this to their own account**: the console has no password-change route, so they would lock themselves out of the surface they administer. The refusal is its own category, `password_change_required`, and not a `Forbidden` a client would have to tell apart by its prose — there is exactly one thing to do about it, and the category is what says so. | Leaving the client to infer it from a 404 (an offer whose only outcome is a failure, on the one screen somebody is already stuck on); an operator-chosen password (`hunter2`, on a route whose whole purpose is a credential somebody else will hold for a few minutes); mailing it (there is no mail — that is the premise); storing it or putting it in the audit metadata (a credential that outlives the minute it exists for); reading the flag from the database in the filter (a round trip per request for a state almost nobody is in); a `Forbidden` with a distinguishing `detail` (matching on prose, which D60 exists to end); letting an operator set their own (a lockout with no endpoint left to escape it); a table of pending changes instead of a column (an expiry, a cancellation and two places that can disagree, for a property the account simply has) |
+| D64 | **A video is a fifth kind of game media, identified by its container and its brand, measured against a limit of its own, and stored on the same public root the pictures are** | The maintainer asked for a trailer on a game's page and settled both open questions on 2026-08-17: **uploaded files, not external links**, and playback inside the launcher. Uploaded is the half this repository owes, and every part of it falls out of what artwork already decided. It rides on the **media root** (D27) rather than a fourth one, because what makes that root safe is that it is not the *blob* root — one more extension does not touch that, while a trailer is public in exactly the sense a cover is and signing it would mean a URL expiring in the middle of playback. What it is, is decided by the **bytes** (D28), and here that means more than a signature: the ISO base media `ftyp` box says nothing on its own, since HEIC and AVIF are ISO base media files too, so the **major brand** is checked against a list and QuickTime is deliberately not on it. WebM and Matroska share the EBML magic, so the **DocType** inside the header is what separates them — read from the first 64 bytes and nowhere else, because a file that says "webm" a megabyte in is telling you about an attacker's choice of bytes. And the sniff is honest about its reach: it answers *which container this is*, never *whether this plays*, which is the only thing a server deciding a public `Content-Type` needs to answer. The **limit is its own number** (`media.maxVideoBytes`, 64 MiB) and its own **cap** (`MAX_VIDEOS_PER_GAME`, 3, against the gallery's 12) because the two are different orders of magnitude — three videos are 192 MiB where twelve screenshots are 60 — and a deployment raising one has no reason to be made to raise the other. It is also the number that now sets the largest body this server accepts at all, which is the sharp end: Drogon refuses an oversized body itself, before any handler runs, with a **bare 413 carrying no RFC 7807 envelope** — measured, not assumed — so a video the framework rejects is a refusal no client can explain, which is why the limit is published in `/capabilities` for the launcher to enforce first. | A fourth storage root for video (a root's safety comes from what is *not* under it, and this changes nothing about that); accepting the `ftyp` box without its brand (files an HEIC as `video/mp4`); accepting Matroska and QuickTime (playable somewhere, not everywhere, over bytes uploaded once and downloaded by everyone); searching the whole body for the DocType (a container's identity read from bytes an uploader chose the position of); one `maxBytes` for both (a picture limit a trailer is refused by, or a picture limit large enough to be a video one); one `MAX_SCREENSHOTS_PER_GAME` for both galleries (twelve videos is a channel); a resumable upload for video (the whole upload-session protocol for one file that fits in a request); trusting the declared `Content-Type` (D28, and this time the type would be a public URL's *and* a player's instruction) |
+| D65 | **The console shows a credential exactly once, and the row it is in is the only place it exists — so the list is corrected in place rather than reloaded** | D63 built the route and left the operator with `curl`. The button is the rest of it, and the whole design is one constraint: the server never stores the password, so the response is the only copy in existence and anything that rebuilds the DOM destroys it. `loadUsers()` after a successful issue would do exactly that — which is why the status cell is patched through a `data-field` hook instead, and the table refreshes the next time anything else touches it. Two presses, because this is not an edit: it ends every session the account holds and cancels any reset link it was sent, and the sentence between the presses says so with the address in it — the argument the launcher's own destructive prompts make. The password is `user-select: all` at 20px because it is read aloud, and the notice under it says the console cannot show it again, which is the one thing an operator has to understand before they close the row. The status column now carries `passwordChangeRequired` beside `active`, because "deactivated" and "has not chosen a password yet" are both answers to *why can this person do nothing*, and the second one was only visible by opening a row. | Reloading the list after issuing (destroys the one copy of the password, which is the bug this row exists to not have); one press (an irreversible session-killing action on a single click, next to "Save quota"); storing it so the console can show it again (a live credential at rest, for the convenience of an operator who can just issue another); a `prompt()`/`alert()` (unstyled, uncopyable, and the CSP-clean page already has a place to put it); leaving the flag out of the list (an operator has to open every row to find who is still holding one) |
+
+---
+
+## 5. Repository layout
+
+```
+CMakeLists.txt          launcher_core static lib + thin launcher-api executable
+CMakePresets.json       docker-* and windows-msvc presets
+vcpkg.json              pinned dependency manifest
+config/                 config.{development,staging,production}.json — no secrets, ${ENV} interpolation
+migrations/             NNNN_name.sql, applied in order, never edited once merged
+docker/                 api/Dockerfile, fileserver/{Dockerfile,nginx.conf}
+src/
+  main.cpp              entrypoint: `serve` (default) | `--migrate` | `--version`
+  app/                  AppContext (composition root), ConfigLoader, Bootstrap
+  controllers/v1/       HTTP surface, one controller per resource
+  services/             business logic
+  repositories/         I<Name>Repository interface + Pg<Name>Repository
+  domain/               entities, value objects, Actor (who is asking)
+  storage/              BlobStore — the content-addressed filesystem layout
+  filters/              JwtAuthFilter, RateLimitFilter, RequestIdFilter
+  common/               Error, Result<T>, JsonUtils, Logging
+  migrations/           MigrationRunner
+tests/
+  unit/                 services against gmock repositories — no I/O
+  integration/          real Drogon app + throwaway PostgreSQL database
+Documentation/          one detailed document per module
+```
+
+---
+
+## 6. Code conventions
+
+Everything — identifiers, comments, docs, commit messages — is in **English**.
+
+- **C++20**. Warnings are errors (`-Wall -Wextra -Wpedantic -Werror`).
+- **Formatting** is `.clang-format` (LLVM base, 4-space indent, 100 columns). CI fails on any
+  deviation; run `clang-format -i` before committing.
+- **Naming:** `PascalCase` types, `camelCase` functions and variables, `member_` trailing
+  underscore for private data, `SCREAMING_SNAKE_CASE` constants, `snake_case` files matching
+  the primary type (`UserService.h` / `UserService.cpp`).
+- **Interfaces** are prefixed `I` and have a virtual destructor: `IUserRepository`.
+- **No raw `new`/`delete`.** `std::unique_ptr` for ownership, `std::shared_ptr` only where
+  Drogon requires it, references for non-owning parameters.
+- **Errors:** expected failures return `Result<T>` (`common/Result.h`); truly exceptional
+  conditions throw `ApiException`. Both funnel through the single central mapper into an
+  RFC 7807-style envelope — **controllers never format an error response by hand**:
+  ```json
+  { "type": "about:blank", "title": "Validation failed", "status": 422,
+    "code": "invalid_input", "rule": "password_too_short", "ruleArgs": ["8"],
+    "detail": "password must be at least 8 characters", "requestId": "01H..." }
+  ```
+  `rule` and `ruleArgs` are optional and appear only for a refusal about a field somebody
+  types. The names live in `domain/ValidationRules.h` and are **frozen**; `detail` is prose
+  for the log and stays free to be reworded. Adding a rule to a validator means adding its
+  name there and its sentence to the client's three `.resx` files — see D60.
+- **Comments** are sparing and explain *why*, never *what*. Self-explanatory code gets none.
+- **SQL** lives only in `repositories/`, always parameterized — never string-concatenated.
+- **Config and secrets:** every secret arrives via an environment variable. Nothing sensitive
+  is ever committed; `config/*.json` holds only non-secret defaults and `${VAR}` references.
+- **API versioning:** all routes under `/api/v1/`. Breaking changes open `/api/v2/`.
+
+---
+
+## 7. Commands
+
+Docker is the reference path. Start Docker Desktop first.
+
+Two scripts wrap the invocations below so that starting the server and running the suite are
+one command each, with the failures that cost the most time reported as themselves — a stopped
+daemon, a missing `.env`, an unconfigured `build/`, and the password mismatch that makes every
+integration test skip itself while looking like a pass.
+
+```powershell
+./scripts/dev.ps1                    # bring the stack up and wait until /health/ready answers
+./scripts/dev.ps1 -Rebuild -Logs     # rebuild the images, start, then tail the API log
+./scripts/dev.ps1 -Down -Volumes     # tear it down, database and blobs included
+
+./scripts/test.ps1                   # build incrementally, then run the whole suite
+./scripts/test.ps1 -Unit -Filter Media   # only the unit tests whose name matches
+./scripts/test.ps1 -Format           # clang-format src/ and tests/ in place
+```
+
+Do not pipe these through `2>&1` in Windows PowerShell 5.1: `docker compose` writes progress to
+stderr, the shell wraps each line in an ErrorRecord, and the command reports failure on a run
+that succeeded. The underlying commands, for when a script is not what is wanted:
+
+```bash
+# Full stack (api + db + fileserver), dev overrides
+docker compose -f docker-compose.yml -f docker-compose.override.yml up --build -d
+
+docker compose logs -f api
+docker compose down                  # add -v to also drop the database volume
+
+# Migrations (also run automatically on container start)
+docker compose exec api /app/launcher-api --migrate
+
+# psql is not installed on the host — go through the container
+docker compose exec db psql -U launcher -d launcher -c "\dt"
+
+# Grant a role. This is how the first administrator is created, because granting one through
+# the admin surface needs a permission nobody holds yet (D38). It replaces the hand-written
+# INSERT INTO user_roles these notes used to carry, and unlike it leaves an audit row.
+docker compose exec api /app/launcher-api --grant-role you@example.com admin
+docker compose exec api /app/launcher-api --grant-role friend@example.com dev
+
+# Mail. The development stack runs a catcher (docker-compose.override.yml), which accepts
+# every message and delivers none; its inbox is a web page. Nothing in the suite speaks SMTP,
+# so this is where the sender is actually exercised — see the note in §9.
+#   http://localhost:8025
+#
+# Driving a flow by hand: register, then pull the link out of the message.
+curl -s -X POST http://localhost:8080/api/v1/auth/register -H 'Content-Type: application/json' \
+    -d '{"email":"a@b.test","password":"correct horse battery staple","displayName":"Tester"}'
+curl -s "http://localhost:8025/api/v1/messages?limit=1"    # then GET /api/v1/message/<ID>
+
+# The development stack does not require a verified address, so registrations sign straight
+# in. To exercise the deployed shape, restart the API with the flag on:
+REQUIRE_VERIFIED_EMAIL=true docker compose up -d api
+
+# Launcher releases. The document is signed on the machine that cut the release; this server
+# holds no private key and can only verify. Documentation/launcher-releases.md has the whole
+# design, and hardening-and-deployment.md section 6.5 the key custody.
+#
+# Once, offline; the .key never leaves that machine and never enters this repository:
+openssl ecparam -name prime256v1 -genkey -noout -out release-signing.key
+openssl ec -in release-signing.key -pubout -outform DER | openssl base64 -A
+#   -> LAUNCHER_RELEASE_PUBLIC_KEY in .env. Empty (the default) turns the surface off entirely.
+#
+# Per release. The document must have NO trailing newline: the server refuses anything that is
+# not byte-for-byte its canonical form, which is what stops the stored bytes and the columns
+# beside them meaning two different things.
+openssl dgst -sha256 -sign release-signing.key release.json | openssl base64 -A > release.json.sig
+docker compose cp release.json     api:/tmp/release.json
+docker compose cp release.json.sig api:/tmp/release.json.sig
+docker compose cp launcher.zip     api:/tmp/artifact.zip
+docker compose exec api /app/launcher-api \
+    --publish-release /tmp/release.json --signature /tmp/release.json.sig \
+    --artifact /tmp/artifact.zip
+
+# Withdraw one. Clients fall back to the previous release and then decline it for not being
+# newer than what they run: standing still, never rolling backwards.
+docker compose exec api /app/launcher-api --retire-release stable windows x64 0.3.0
+
+# What a launcher asks, with no token at all:
+curl -s "http://localhost:8080/api/v1/launcher/releases/latest?platform=windows&arch=x64"
+
+# The admin console, once ADMIN_ENABLED=true. From anywhere but the server itself it is
+# reached through a tunnel and nothing more.
+ssh -L 9090:127.0.0.1:9090 user@your-vps    # then open http://localhost:9090/admin
+
+# Tests. `api-build` is the toolchain image and sits behind the `tools` profile, so it is
+# not started by `up`; the --profile flag is required.
+docker compose --profile tools run --rm api-build ctest --test-dir build --output-on-failure
+docker compose --profile tools run --rm api-build ctest --test-dir build -L unit --output-on-failure
+
+# Formatting. CI fails on any deviation, so run this before committing.
+docker compose --profile tools run --rm api-build \
+    sh -c "find src tests -name '*.cpp' -o -name '*.h' | xargs clang-format -i"
+```
+
+Fast edit/build/test loop. The image carries the toolchain and `vcpkg_installed`; bind-mounting
+the working tree gives an incremental `build/` on the host instead of recompiling everything
+inside a new image layer on every change. Roughly ten seconds per iteration against several
+minutes for `docker compose build`.
+
+```bash
+# Configure once (from the repository root)
+docker run --rm -v "${PWD}:/work" -w /work custom-game-launcher-api-build \
+    cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+        -DCMAKE_TOOLCHAIN_FILE=/opt/vcpkg/scripts/buildsystems/vcpkg.cmake \
+        -DVCPKG_INSTALLED_DIR=/src/vcpkg_installed \
+        -DVCPKG_MANIFEST_INSTALL=OFF -DVCPKG_MANIFEST_FEATURES=tests -DLAUNCHER_BUILD_TESTS=ON
+
+# Then, per change — integration tests need the compose database on the same network, and
+# LAUNCHER_TEST_DB_PASSWORD must match DB_PASSWORD in .env or every test silently skips.
+docker compose up -d db
+docker run --rm --network custom-game-launcher_default \
+    -e LAUNCHER_TEST_DB_HOST=db -e LAUNCHER_TEST_DB_USER=launcher \
+    -e LAUNCHER_TEST_DB_PASSWORD=change-me -e LAUNCHER_TEST_DB_ADMIN=launcher \
+    -v "${PWD}:/work" -w /work custom-game-launcher-api-build \
+    sh -c "cmake --build build --parallel && ctest --test-dir build --output-on-failure"
+```
+
+Optional local Windows build (CMake and Ninja ship with VS 2022 but are **not on PATH**;
+`CMakePresets.json` encodes their full paths):
+
+```bash
+cmake --preset windows-msvc && cmake --build --preset windows-msvc
+```
+
+Health check:
+
+```bash
+curl -s http://localhost:8080/api/v1/health
+```
+
+---
+
+## 8. Environment gotchas (verified on the maintainer's machine)
+
+| Fact | Consequence |
+|---|---|
+| Docker Desktop is installed but its daemon is often **stopped** | Start it before any compose or integration-test command |
+| CMake 3.31 and Ninja exist only inside the VS 2022 install, not on `PATH` | Use `CMakePresets.json`; do not assume bare `cmake` works |
+| vcpkg is present only as the VS bundle, not bootstrapped | One-time `vcpkg-init` needed for local builds; Docker handles it itself |
+| `psql` is **not installed** | Use `docker compose exec db psql` |
+| `gh` 2.97 is installed at `C:\Program Files\GitHub CLI` and authenticated as `Ruy41321` | Read CI failures with `gh run view <id> --log-failed` instead of guessing. The installer does not add it to an already-open shell's `PATH`; prepend the directory if `gh` is not found |
+| **CI runs on hardware roughly 5x slower than the maintainer's** | ~49ms per integration HTTP request against ~10ms locally. Any assertion whose outcome depends on how many requests fit in a time window will pass locally and fail there — see the rate-limit row below |
+| **A token-bucket assertion must shrink the bucket, not out-run its refill** | The throttle test sent a fixed number of requests against the default 500/60s limit. The bucket refills at 8.3 tokens/s, so the number of requests needed to empty it is a function of request latency: ~546 locally, ~845 in CI. Tests now narrow the limit with `ScopedAuthRateLimit` so the assertion is exact on any machine |
+| MSVC 14.44 / VS 2022 Community is available | A local C++ build is possible but slow on first configure |
+| **Never set `VCPKG_FORCE_SYSTEM_BINARIES=1`** in the build image | It makes vcpkg use the distro's CMake, which is older than the port scripts need; zlib fails to configure with a `string(JSON …)` error |
+| **`vcpkg install` from the CLI writes to the *manifest* directory**, while the CMake toolchain looks in `${CMAKE_BINARY_DIR}/vcpkg_installed` | The Dockerfile must pass `-DVCPKG_INSTALLED_DIR=/src/vcpkg_installed`, or every `find_package` fails despite the dependencies being present |
+| Some vcpkg ports need host tools that appear nowhere in `vcpkg.json` | `bison`/`flex` for libpq, and `autoconf`/`autoconf-archive`/`automake`/`libtool`/`gettext` for libsodium. Keep `docker/api/Dockerfile` and `.github/workflows/ci.yml` in sync |
+| Drogon's batched PG backend rejects multi-statement SQL | See decision D4a; do not "simplify" the migration runner back onto `DbClient` |
+| **A Drogon transaction commits asynchronously when its object is destroyed** | There is no `commitCoro()`. A coroutine that inserts inside a transaction and returns the new row's key can hand that key to the client *before* the commit lands, and the next request then cannot find it. This is exactly how refresh-token rotation broke. Prefer a single statement — data-modifying CTEs (`WITH inserted AS (INSERT … RETURNING …)`) give the same atomicity and are already durable when the query returns |
+| **Do not detect unique violations by exception type** | `dynamic_cast` to `drogon::orm::SqlError` on what the batched backend throws did not match, so a duplicate registration surfaced as a 500. Use `ON CONFLICT … DO NOTHING RETURNING` and treat an empty result as the conflict; it is race-free and driver-independent |
+| **Destroying a Drogon `DbClient` can abort with "Resource deadlock avoided"** | Its destructor joins the connection loop thread, and the last `shared_ptr` reference can end up owned *by* that thread. This showed up as intermittent `Subprocess aborted` failures in integration tests. Test setup/teardown therefore uses libpq directly (`tests/integration/TestDatabase`), and a `DbClient` is only created when a test genuinely exercises one |
+| **Drogon's default request body limit is 1 MB** | Far below one upload chunk, and it rejects the request before the controller ever runs, so the failure looks like a routing problem rather than a size one. `app::configureUploadLimits` raises `setClientMaxBodySize` *and* `setClientMaxMemoryBodySize`; the integration harness calls the same function, so tests never run under limits nobody deploys |
+| **A range-for over `bodyOf(response)["items"]` walks freed memory** | The helper returns a `Json::Value` by value; `["items"]` is a reference into that temporary, and C++20 does not extend its lifetime for the loop (P2718 fixes this in C++23). It cost a debugging cycle presenting as "the endpoint returns nothing" when the endpoint was correct. Bind the body to a named local first |
+| **`.env` sets `DB_PASSWORD=change-me`, not the compose default** | `LAUNCHER_TEST_DB_PASSWORD` must match it, or every integration test *skips itself* with "LAUNCHER_TEST_DB_HOST is not set" — the connection error is printed once, before gtest's output, and is easy to scroll past. `docker compose --profile tools run` reads `.env` for you; a bare `docker run` does not |
+| **Drogon's beginning advice fires before the listeners accept** | `registerBeginningAdvice` means the event loop is running, not that anything is listening. With one listener the gap was lost in the noise; adding the admin listener widened it enough that on CI hardware a test's first request beat the accept loop and burned all three transport retries inside it, surfacing as a SegFault in an unrelated test. `AppHarness::SetUp` now polls `/api/v1/health` on **each** listener until it answers |
+| **`EXPECT_NE(pointer, nullptr)` does not stop the function** | The harness reported a null registration body and then dereferenced it on the next line, turning any transport hiccup into a crash in whichever test happened to hit it — the real failure three lines above, easy to scroll past. A helper that cannot produce what it promised must `ADD_FAILURE` **and return**. This is the second time this exact shape has cost a CI cycle; see the row below |
+| **A failed request in the integration harness used to segfault the test** | `AppHarness::send` returned the null response of a transport failure, and every caller immediately dereferenced it. In CI this presented as `***Exception: SegFault` in two unrelated tests, with the real cause — `Bad server address`, the client never connecting — buried above it. It now retries that one result, fails loudly otherwise, and never returns null. If a test ever crashes in CI again, read the lines *above* the crash first |
+| **Git Bash rewrites container paths in `docker run`** | `-v "$(pwd):/work" -w /work` becomes `C:/Program Files/Git/work` and the run fails. Use `MSYS_NO_PATHCONV=1`, `$(pwd -W)` for the source side and `//work` for `-w`. **It bites `docker compose exec` too**, wherever an argument looks like an absolute path: `docker compose exec api /app/launcher-api --migrate` fails with `stat C:/Program Files/Git/app/launcher-api`, which reads like a broken image rather than a mangled argument. Prefix that with `MSYS_NO_PATHCONV=1` as well. PowerShell is unaffected throughout |
+| **Tampering with `expires` in a signed URL gives 403, not 410** | The expiry is part of what the signature covers, so changing it invalidates the signature and nginx reports "bad signature" before it ever looks at the clock. To see the 410 path, sign a URL whose expiry is already in the past |
+| **MD5 is in OpenSSL 3's *default* provider** | `EVP_md5()` works with no legacy-provider setup, unlike MD4/MD2. `secure_link` needs MD5 and there is nothing to configure |
+| **A fake hash in a test must still be valid hex** | Verification checks the shape of what a client reports before comparing anything, so a filler like `std::string(64, 'x')` is rejected as malformed and the assertion under test never runs. Build test hashes out of `0-9a-f` |
+| **A `CHECK (expires_at > created_at)` on upload sessions blocks force-expiry** | Moving an expiry into the past is a legitimate administrative action, and it is how the expiry path is tested. The constraint was removed from migration 0002 before it was merged |
+| **A `string_view` built from a string literal containing a NUL stops there** | `sniffImageFormat("RIFF\x24\x00\x00\x00WEBP…")` receives five bytes, not sixteen, so the WebP check can never match. The test failed while the production code was correct, which is the confusing direction. Any test body carrying binary has to be a `std::string` with an explicit length |
+| **Do not pipe the dev scripts through `2>&1` in Windows PowerShell 5.1** | `docker compose` writes progress to stderr; under a redirect the shell wraps each line in an ErrorRecord, `$?` becomes false, and a run that succeeded reports `NativeCommandError`. Pipe to `Select-String` without redirecting, which is what the scripts assume |
+| **Drogon routes belong to the application, not to a listener** | A controller registered anywhere answers on *every* port the server binds. The second listener enables nothing on its own and hides nothing on its own; `AdminSurfaceFilter` is what makes it mean something. Any admin route added without that filter is a public route |
+| **GCC 13 crashes on a braced initialiser passed directly as a coroutine argument** | `internal compiler error: in build_special_member_call` — no line of the expression is wrong. Build the value into a named local before the `co_await`, which the by-value rule for coroutine parameters wants anyway |
+| **A data-modifying CTE's effects are invisible to the rest of its own statement** | `WITH updated AS (UPDATE ... RETURNING *) SELECT ... FROM users` returns the row as it was *before* the update, silently. Select from the CTE (`FROM updated u`); a join to a different table is fine, which is why the patch-note insert works the way it does |
+| **`$1::uuid` is evaluated even in a branch that cannot be reached** | `WHERE ($1 = '' OR col = $1::uuid)` raises on an empty parameter rather than short-circuiting. Use `NULLIF($1, '')::uuid IS NULL OR col = NULLIF($1, '')::uuid`, and reject a malformed id above the repository so a typo is a 404 rather than a 500 |
+| **`nameFor(ErrorCode)` spells codes `snake_case`** | The error envelope carries `"code": "not_found"`, not `NotFound`. A test asserting on the enum's C++ spelling fails while the endpoint is correct |
+| **The integration binary shares one database across every test** | `TestDatabase::createOrNull()` runs once in the harness environment, not per test. Any assertion on a global count — total accounts, total downloads, how many operators exist — is affected by every other test in the binary. Assert on rows you seeded, or as a lower bound |
+| **A named volume mounted where the image has no directory is created owned by root** | And the API runs as `launcher`, so it cannot write there. `/data/media` was added to `docker-compose.yml` with the artwork feature and never added to the `mkdir`/`chown` in `docker/api/Dockerfile`, so **every fresh deployment refused artwork uploads** with "cannot create the media directory: Permission denied". Nothing caught it: the suite has no file server and mounts no volumes, and no client uploaded an image until the launcher's dashboard did. Rebuilding the image is not enough on a machine that already has the volume — Docker sets ownership only when it creates an empty one, so the volume has to be removed too. The `docker` CI job now mounts an empty volume at each data path and asserts the owner |
+| **`docker run <image> <cmd>` does not replace an ENTRYPOINT** | The API image's entrypoint runs the migrations, so `docker run launcher-api stat -c '%U' /data` runs the *migrations* with `stat` as an argument and reports a database it cannot reach — which reads like a broken image rather than a misused flag. Use `--entrypoint`. And from Git Bash prefix the whole thing with `MSYS_NO_PATHCONV=1`, or `/data/media` becomes `C:/Program Files/Git/data/media` |
+| **Windows PowerShell 5.1 splits an unquoted `-D<name>=<path>` passed to a native command** | `scripts/test.ps1 -Reconfigure` handed CMake `-DCMAKE_TOOLCHAIN_FILE=/opt/vcpkg/scripts/buildsystems/vcpkg` **and** a separate `.cmake`, and the failure reads as "could not find toolchain file" plus "unable to find a build program corresponding to Ninja" — which looks like a broken image rather than a quoting problem. The script now single-quotes every `-D`. The path had never been exercised, because a configured `build/` skips it; a failed configure also leaves a cache that has to be deleted before the next attempt |
+| **`account_deletion_requests` exists but is never `pending`** | The erasure is immediate (D43), so the table only ever holds `completed` rows and the partial unique index that enforces one open request per account never fires. That is deliberate, not a bug to "fix" by writing a pending row somewhere |
+| **A game's detail response nests the game under `game`** | `gameDetailToJson` returns `{ "game": {...}, "versions": [...], "builds": [...], "media": [...], "inLibrary": bool }`, and the publisher is `game.publisher.displayName`. A test reading `body["id"]` gets an empty string against a perfectly correct 200 |
+| **Negotiating an upload for content the server already holds is a 409, not a session** | It is the deduplication working, and it is what makes a second build carrying the same file cost nothing. A test helper that publishes twice has to expect it rather than trying to `PATCH` a session that was never created |
+| **A response a filter rejects with never reaches post-handling advice** | So an advice registered with `registerPostHandlingAdvice` sees successes and misses every 401, 403 and throttle — which on this server is every response a filter produces. It cost one red test rather than a debugging cycle only because the test asked for the headers on a 401 specifically. Anything that must be true of *every* response has to be written where the response is built, which for errors is `makeErrorResponse` |
+| **A body cap keyed on size can shadow a field cap keyed on meaning** | `RefusesAStackTraceTooLargeToStore` sent a 64 KiB stack trace and started failing with 413 instead of 422 the moment the anonymous body limit landed: the request never reached the field check. The refusal is still correct, but the test had stopped exercising its own rule. A test for a field limit sends a body just over *that* limit, not an obviously enormous one |
+| **Adding a line to `vcpkg.json` means rebuilding the toolchain image, not just reconfiguring** | The fast loop builds against `/src/vcpkg_installed` *inside* `custom-game-launcher-api-build`, so a new dependency is invisible until `docker compose --profile tools build api-build` has run — and the failure is `find_package` not finding a package that is sitting in the manifest, which reads like a broken CMake file. With vcpkg's binary cache warm it is about half a minute; from cold it is the first-build story again |
+| **vcpkg's `curl` port only speaks SMTP with its `non-http` feature** | It is in the port's default features, so a bare `"curl"` works today — but a dependency written as `default-features: false` with only `ssl` would build a libcurl that refuses `smtp://` at runtime with "unsupported protocol", which reads as a configuration problem at the relay. The manifest names `non-http` explicitly for that reason. Nothing new is needed in the runtime image: vcpkg links it statically, and `ca-certificates` was already there |
+| **A token-bucket check against the running server needs the bucket narrowed too** | Six hundred requests against a 600/60s limit all returned 200, because the bucket refilled faster than PowerShell emptied it — the same shape as the CI rate-limit row above, met again by hand. Set the limit low in `.env` and restart the API rather than trying to out-run the refill |
+| **`Out-File -Encoding utf8` writes a BOM in Windows PowerShell 5.1** | Which is the documented way round the *other* quoting trap in this table — a `git commit -m` message containing double quotes gets split into pathspecs — so the two traps chain: the message file is written correctly and the commit subject then begins with an invisible `ï»¿`, visible only in `git log --format=%s | xxd`. Write it with `[System.IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding $false))`, which is what the client repository already says for source files, or strip the three bytes and `git commit --amend -F`. |
+| **A control character written into a source file is invisible and tests the wrong thing** | A raw string literal in `LauncherReleaseDomainTest` ended up holding an actual `0x01` byte instead of the six characters ``, so the assertion compared against a raw control character while the serialiser correctly emitted the escape. It reads as the production code being wrong, and neither the diff nor the editor shows anything. This is the same trap the client's `CLAUDE.md` already records, met here for the first time. Build such a value from its code point (`+ ''`), and when a literal really has to carry one, check with a byte dump — `python -c "print([b for b in open(f,'rb').read() if b<0x20 and b not in (9,10,13)])"` |
+| **`sh` in the toolchain image has no process substitution** | It is BusyBox, not bash, so `openssl dgst -verify <(openssl pkey ...)` fails with `Syntax error: "(" unexpected` — which reads like a broken openssl invocation. Write the intermediate to a file. Worth knowing because verifying a release signature by hand is the one check that has no automated equivalent against the running stack |
+| **A signed document must not have a trailing newline** | `openssl dgst -sign` signs whatever bytes it is given, so a `release.json` saved by a text editor is signed correctly *and* refused by `--publish-release`, because it is not the canonical form. The refusal prints the exact expected bytes; use `printf`, never `echo`, to write one |
+| **`docker compose cp` and `exec` both need `MSYS_NO_PATHCONV=1` from Git Bash** | Already recorded for `exec`; `cp` has it too, and publishing a release uses three of them in a row. PowerShell is unaffected, which is what the release commands in §7 assume |
+| **`src/auth/ui/password-reset.html` is a second copy of `MIN_PASSWORD_LENGTH`, and nothing tests it** | The page is embedded in the binary and `/capabilities` does not publish the limit, so the bound is a JavaScript constant. Changing the C++ one alone leaves the page refusing what the API accepts — a refusal that never reaches the server, so no integration test can see it, and `AuthPageEndpointTest` only asserts the page is served. It is now one `MIN_PASSWORD_LENGTH` at the top of the script that the two `minLength` attributes, the hint and the check all read; keep it that way and change it in the same commit as the constant |
+| **Changing a validation constant needs the API image rebuilt, not just the suite re-run** | `./scripts/dev.ps1 -Rebuild`. A running stack keeps enforcing the old bound, and the first thing that looks wrong is the *client*, which is showing exactly what the server told it — it cost a round trip on the 12→8 change |
+| **`JwtTokenServiceTest.RejectsAnExpiredToken` is a wall-clock race and it does flake** | It mints a token with a one-second lifetime and sleeps 1500 ms. On a loaded machine — the whole suite running in a container while a client build runs on the host — the sleep can be served late enough that the assertions before it have already moved past, and it failed once on 2026-08-18 and passed on the next two runs with nothing changed. Re-run before believing it. Fixing it properly means an injectable clock in `JwtTokenService`, which jwt-cpp's `verify` does not take, so it has been left as a known flake rather than papered over with a longer sleep |
+| **`tests/CMakeLists.txt` lists every test source by hand, so a new file that is not added runs zero tests and fails nothing** | A new `MediaVideoDomainTest.cpp` built, formatted and passed the suite — because it was never compiled. The suite went green with ten tests that did not exist, and the only visible sign was a total ten lower than it should have been. It also hid a **compile error** the file contained. Either add the file to the executable's source list in the same commit, or put the tests in the existing file for that module, which is what happened here. When a suite total does not move by as much as you added, that is the reason |
+| **A hex escape in a C++ string literal is greedy: `"\x20ftyp"` is one character, not five** | `\x` consumes every hex digit that follows, so `20f` overflows and the compiler says "hex escape sequence out of range" — an error only because `-Werror` is on, and a silently wrong string otherwise. Split the literal (`"\x20" "ftyp"`) or use an octal escape. The same trap in a different costume as the control-character row below: the bytes a test compares against are not always the bytes you typed |
+| **A CHECK constraint on the storage key spelled the extension `[a-z]{3,4}`, and "mp4" has a digit in it** | Migration 0003 wrote that regex when the only extensions were `png`, `jpg` and `webp`, and it was right about all three. The first video upload came back **500** with `game_media_storage_key_shape` in the log — a constraint violation reported as an internal error, because a check nothing can reach from outside is not a validation failure. Migration 0008 widens it to `[a-z0-9]{3,4}`. Worth keeping in mind for the next format: the constraint is not what decides which formats exist — `domain::extensionOf` is — so it will silently be the last thing anybody thinks to change |
+| **`ALTER TYPE … ADD VALUE` runs inside a transaction on PostgreSQL 12+, but the value it adds cannot be *used* until that transaction commits** | And `MigrationRunner` wraps every migration file in one, so a single file that adds an enum value and then writes an index predicate, a constraint or a row mentioning it fails with "unsafe use of new value". Migration 0008 therefore names only the four kinds that already existed — which is why its partial unique index became an allow-list (`kind IN ('cover','banner','logo')`) rather than the deny-list it was. Verified against the real development database, not only the throwaway one: the migration applied to a database that already had seven, which is the case a deployment actually meets |
+| **Drogon refuses an oversized body itself, with a bare 413 and no envelope — and a body that spills to disk is still readable** | Both measured against the running stack on 2026-08-18, because the video limit depends on both. A 20 MiB POST against a 16 MiB `client_max_body_size` returns `413` with an **empty body**: no `code`, no `detail`, no request id, nothing a launcher can turn into a sentence — which is the whole argument for publishing `media.maxVideoBytes` in `/capabilities` so the client refuses first. And a 10 MiB body under an 8 MiB `client_max_memory_body_size` reached the handler with its length intact, so `request->getBody()` reads back through the framework's cache file: uploading a 60 MiB video works and does not hold 60 MiB of request in RAM |
+| **`docker run` from Git Bash rewrites a container path unless `MSYS_NO_PATHCONV=1` is set** | `-w /work` becomes `-w C:/Program Files/Git/work` and the daemon refuses it as "not an absolute path", which reads like a Docker bug. `MSYS_NO_PATHCONV=1 docker run … -w //work` works, and the doubled slash is the other half of the same trick. Worth knowing because `scripts/test.ps1` swallows the compiler's output when it fails, so driving the toolchain image by hand is how a build error actually gets read |
+
+---
+
+## 9. Testing policy (non-negotiable)
+
+1. Every feature ships with its tests in the **same commit** — unit tests for business logic,
+   integration tests for API endpoints.
+2. **The entire existing suite is re-run on every change.** A feature is not done until the
+   full suite is green; a regression blocks the commit.
+3. Unit tests (`tests/unit`, CTest label `unit`) do no I/O: services are constructed with
+   gmock repositories.
+4. Integration tests (`tests/integration`, label `integration`) boot the real Drogon app on
+   an ephemeral port against a throwaway database that is migrated and dropped per run.
+5. Security-relevant behaviour (authz, quotas, rate limits) is tested for the **denial** path,
+   not just the happy path.
+
+---
+
+## 10. Git workflow
+
+- All work happens on **`dev`**. Never commit to `main`.
+- `main` is merged **manually by the repository owner** once work is validated — never
+  propose or perform that merge.
+- Atomic, well-described commits. Conventional-commit prefixes: `feat:`, `fix:`, `refactor:`,
+  `test:`, `docs:`, `chore:`, `ci:`.
+- Optional feature branches off `dev`, merged back into `dev` via pull request.
+- **CI runs on `main`**, not on `dev`. Since `main` is merged by hand by the repository owner,
+  no run is triggered by anything this repository's work does — which makes the local check the
+  real gate.
+
+### The gate before a push is local, and it is not optional
+
+Nothing on GitHub will catch a red suite on `dev` any more, so **both of these have to pass
+before `git push`**, every time:
+
+```powershell
+./scripts/test.ps1            # builds incrementally, then runs the whole suite
+./scripts/test.ps1 -Format    # and check `git diff` is empty afterwards
+```
+
+A push made without running them is a push made on hope. What they cannot cover is the `docker`
+job — a clean image build and the ownership guard on the data volumes — so a change touching
+`docker/`, `vcpkg.json` or the compose files is worth saying out loud as unverified rather than
+quietly assuming.
+
+### Finishing a milestone
+
+Pushing `dev` at the end of a milestone is **not** something to ask permission for — run the two
+commands above, then push. Mid-milestone pushes are still the maintainer's call.
+
+```bash
+git push origin dev
+# gh lives in "C:\Program Files\GitHub CLI" and is not on an already-open shell's PATH
+gh run list --branch main --limit 3         # only after the owner has merged into main
+gh run view <id> --log-failed               # only what failed, not the whole log
+```
+
+---
+
+## 11. Progress
+
+Legend: ✅ done · 🚧 in progress · ⬜ not started
+
+### Milestone 1 — Repository scaffolding ✅
+- ✅ MIT `LICENSE`, `README.md`, `.gitignore`, `.editorconfig`
+- ✅ CMake build (`launcher_core` + `launcher-api`), presets, `vcpkg.json`
+- ✅ `.clang-format` / `.clang-tidy`
+- ✅ Config loader with per-environment JSON and `${ENV}` interpolation
+- ✅ Structured JSON logging, `Result<T>`, central error envelope
+- ✅ `/api/v1/health`
+- ✅ `docker-compose.yml` (api + postgres + nginx fileserver) and Dockerfiles
+- ✅ GoogleTest wiring, CTest labels, GitHub Actions CI (on `dev` then; on `main` since 2026-08-07)
+
+### Milestone 2 — Database schema ✅
+- ✅ `0001_initial_schema.sql`: identity/RBAC, catalog, CAS blobs, analytics, GDPR — 19 tables
+- ✅ Role and permission seed (`player` 4, `dev` 7, `admin` 11 permissions)
+- ✅ `MigrationRunner` over libpq with checksum verification, exposed as `--migrate`
+- ✅ Migration tests: fresh apply, idempotent re-run, checksum-mismatch abort, rollback of a
+  failing migration, path-traversal rejection in `build_files`
+
+### Verified on 2026-08-02
+- 66/66 tests green (53 unit, 13 integration against a real PostgreSQL)
+- `docker compose up` brings all three services to healthy; migrations apply at boot
+- `/api/v1/health` 200, `/api/v1/health/ready` reports the database up, unknown routes
+  return the JSON error envelope, and the file server rejects an unsigned URL with 403
+- `clang-format` clean across `src/` and `tests/`
+- ⚠️ The GitHub Actions workflow has **not** run yet; it is verified locally only
+
+### Milestone 3 — Authentication ✅
+- ✅ Argon2id password hashing with transparent rehash on parameter upgrade
+- ✅ JWT access tokens (HS256, jsoncpp traits), permissions embedded in the claims
+- ✅ Refresh tokens: hashed at rest, rotated on every use, family revoked on reuse
+- ✅ Register, email verification, login, logout, password reset
+- ✅ Repository layer over Drogon coroutines; `JwtAuthFilter` + `requirePermission`
+- ✅ Per-address token-bucket rate limiting on the unauthenticated endpoints
+- ✅ [Documentation/authentication.md](Documentation/authentication.md)
+- ✅ ~~No mail transport yet~~ — **closed on 2026-08-06**, see below. The dev token fields are
+  gone from the response in every environment.
+
+### GitHub Actions, first real runs (2026-08-03)
+The workflow finally ran. Three runs, and what each taught:
+
+- Run 1 was cancelled by the concurrency group.
+- Run 2 (`d100e28`, pre-auth): `clang-format` failed, everything else green.
+- Run 3 (`65bcd98`, auth): formatting green, `Build and test` failed on exactly one test,
+  `AuthEndpointTest.ThrottlesRepeatedLoginAttempts`. Not flaky — deterministically broken on
+  any machine slower than the maintainer's; see the rate-limit row in §8. Fixed by narrowing
+  the bucket instead of raising the attempt cap.
+
+- Run 4 (`3e5cbb0`) is green end to end: 131 unit + 31 integration, and the throttle test now
+  takes 0.53s there instead of failing after 30.
+
+The `docker` job has been green from the start. The vcpkg host packages the workflow installs
+turned out to be correct, so that standing suspicion is closed.
+
+Run 5 (`6853d7f`, milestone 4) is green on all three jobs: `clang-format` 15s, `Build and test`
+2m57s for 277 tests, `Docker image builds` 12m6s. Every run since has warned that
+`actions/checkout@v4`, `actions/cache@v4` and the docker actions target Node.js 20, which the
+runners now force onto Node 24 — harmless today, a hard failure whenever GitHub drops the
+shim. Worth a `ci:` bump before it becomes urgent.
+
+Milestone 5 pushed two commits close together, and the concurrency group cancelled the first
+run two minutes in — the same behaviour as run 1, and not a failure: the surviving run covers
+the same tree plus the later commit. Run 7 (`4d42e12`) is green on all three jobs, 322 tests.
+When two pushes land back to back, watch the *newest* run and ignore the cancelled one.
+
+### Milestone 4 — Catalog, Explore and build upload ✅
+- ✅ Catalog API: create and patch games, versions, builds; slug derivation and validation
+- ✅ Explore with title search, three sort orders and paging; drafts never listed
+- ✅ Visibility rules (`draft` / `unlisted` / `public`), enforced in `CatalogService`; a game
+  the caller may not see is a 404, never a 403
+- ✅ Server-side library: idempotent add, remove, list
+- ✅ Content-addressed `BlobStore` with staging, hash verification and atomic publish
+- ✅ Blob negotiation, resumable tus-style upload sessions, offset reservation in the database
+- ✅ Manifest ingestion in one statement; byte-exact canonical document served by `GET .../manifest`
+- ✅ Cumulative upload quotas charged race-free at completion, refunded on dedup and failure
+- ✅ Abandoned-session sweeper on a timer
+- ✅ `0002_upload_sessions.sql`: `upload_sessions`, `blobs.uploaded_by_user_id`
+- ✅ [Documentation/catalog.md](Documentation/catalog.md),
+  [Documentation/builds-and-uploads.md](Documentation/builds-and-uploads.md)
+
+### Verified on 2026-08-03
+- 277/277 tests green (209 unit, 68 integration against a real PostgreSQL)
+- `docker compose up -d --build` brings api, db and fileserver to healthy; `0001` and `0002`
+  both applied at boot
+- End-to-end against the running stack: register → devlist grant → game → version → build →
+  blob negotiation → two-chunk resumable upload → manifest. The blob landed at
+  `/data/blobs/66/91/6691…` owned by `launcher`, staging was empty afterwards, and the served
+  manifest hashed to the recorded `manifestSha256`
+- `clang-format` clean across `src/` and `tests/`
+
+### Milestone 5 — Delta updates, signed downloads, integrity ✅
+- ✅ `POST /api/v1/builds/{id}/download`: the plan to reach a build, from any older one or from
+  nothing, with the delta computed over the two manifests on demand
+- ✅ Signed download URLs (`secure_link`: `base64url(md5("<expires><uri> <secret>"))`), signing
+  the path only so a hostname change invalidates nothing
+- ✅ Full-download fallback past `updates.fullDownloadThresholdRatio`
+- ✅ `copyFrom` hints for content that only moved, restricted to paths the update keeps, so a
+  plan is order-independent
+- ✅ `POST /api/v1/builds/{id}/verify`: missing / corrupt / unexpected, plus signed URLs that
+  repair the difference
+- ✅ `download_events` recorded per plan, with the version the client came from
+- ✅ Build authorization rules moved into `domain/` and shared with the upload side
+- ✅ [Documentation/downloads-and-deltas.md](Documentation/downloads-and-deltas.md)
+
+### Verified on 2026-08-03
+- 322/322 tests green (243 unit, 79 integration against a real PostgreSQL)
+- End-to-end against `docker compose up -d --build`: two builds of one game published, the
+  delta plan carried only the changed executable (21 of 77 bytes) and listed the shared asset
+  as unchanged
+- **The signed URL was fetched through nginx**: 200 with the right bytes, 206 for a `Range`
+  request, 403 without a token and with a wrong one, 410 for a correctly signed but expired
+  URL. This is the part no automated test can reach, since the suite has no file server
+- `verify` confirmed an intact install and, for a tampered one, named the corrupt and missing
+  files and handed back repair URLs
+- `download_events` held one `full` (77 bytes, no source version) and one `delta` (21 bytes,
+  from the previous version)
+- `clang-format` clean across `src/` and `tests/`
+
+Milestones 6, 7 and 8 belong to the client and are recorded in the frontend repository's own
+`CLAUDE.md`; the numbering is shared between the two.
+
+### Paying off the open debts — verified on 2026-08-04
+
+Not a milestone: three debts §11 had been carrying since milestone 4, closed before starting
+the admin GUI.
+
+- ✅ **Game artwork** (`game_media`, declared in migration 0001 and never written to): upload,
+  list, edit and remove, content-addressed on its own public root (D27-D29). `coverUrl` rides
+  on the game itself so Explore gets one picture per card without a second request per result;
+  the full list is on the detail page. `0003_game_media.sql` completes the table
+- ✅ **Devlog** (`patch_notes`, same story): its own paged surface, with a publication state
+  independent of any version (D32)
+- ✅ **Deleting builds and versions**, and a collector that reclaims the blobs nothing
+  references any more — with a grace period, a quota refund, and an order that cannot strand a
+  live manifest (D31). Debts 2 and 15 of `HANDOFF.md`, closed
+- ✅ **CI actions off Node 20** in both repositories: `checkout` v4→v7, `cache` v4→v6,
+  `setup-dotnet` v4→v6, `setup-buildx` v3→v4, `build-push` v6→v7, all on the Node 24 runtime
+- ✅ `scripts/dev.ps1` and `scripts/test.ps1` (see §7)
+- ✅ 425/425 tests green (285 unit, 140 integration against a real PostgreSQL), `clang-format`
+  clean
+
+### Milestone 9 — Localhost admin GUI ✅
+- ✅ `AdminSurfaceFilter`: routes answer on the admin listener and nowhere else, as a 404 that
+  is word for word the ordinary one. `AdminOperatorFilter` requires an `admin.*` permission, as
+  a filter so no route added later can forget it
+- ✅ Its own sign-in on the admin listener, because a tunnel forwards one port; the operator
+  check runs on rotation too, so a revoked role ends the session
+- ✅ Users, roles and quotas, with every change and its audit entry written by one statement —
+  `audit_log` had been in the schema since 0001 and read by nothing
+- ✅ Two rules that keep the surface reachable: no self-deactivation, and the last active
+  administrator is frozen
+- ✅ Download analytics over `download_events`, which the planner had been filling since M5 and
+  nothing had ever read
+- ✅ `launcher-api --grant-role <email> <role>`, the only way to create the first administrator,
+  and the retirement of the hand-written devlist INSERT
+- ✅ The console itself: one self-contained page, embedded in the binary from
+  `src/admin/ui/index.html`
+- ✅ [Documentation/administration.md](Documentation/administration.md)
+
+### Verified on 2026-08-04
+- 507/507 tests green (340 unit, 167 integration against a real PostgreSQL)
+- `clang-format` clean across `src/` and `tests/`
+- End to end against `docker compose up -d --build` with `ADMIN_ENABLED=true`: the console is
+  200 on `:9090/admin` and 404 on `:8080/admin`, and `/admin/api/users` on the public listener
+  returns the ordinary not-found envelope. `--grant-role` refused an unknown role, reported an
+  already-held one without failing, and turned a 403 sign-in into a 200
+- **Loaded in a real browser**, which no test reaches: the login form, the user table, the
+  daily chart and the audit trail all render, with **no console errors** — so the
+  `default-src 'none'` policy does not block the page's own `fetch`. The trail showed the
+  command-line grant with no actor, rendered as "command line", alongside the two changes made
+  through the console by a named operator
+
+### Documentation for artwork, the devlog and storage — 2026-08-05
+
+Open debt 4 of `HANDOFF.md`. Artwork, the devlog and the storage lifecycle had only ever been
+described in this file; they now have pages of their own, and the README carries an index of
+all eight documents.
+
+- ✅ [Documentation/artwork-and-devlog.md](Documentation/artwork-and-devlog.md): both media
+  and patch-note surfaces, why artwork is public while blobs are not, and why the format is
+  decided by the leading bytes
+- ✅ [Documentation/storage-lifecycle.md](Documentation/storage-lifecycle.md): deleting builds
+  and versions, the collector's four load-bearing properties, quota refunds, and the shape the
+  absent retention policy should take when it is written
+
+### Capabilities — 2026-08-05
+
+Open debt 9 of `HANDOFF.md`, the server half. `GET /api/v1/capabilities` publishes the limits a
+client cannot work without (D40); the launcher reads it at startup and stops guessing.
+
+- ✅ `app::capabilitiesDocument`, a pure function of `AppConfig`, and a controller that only
+  serialises it
+- ✅ Unauthenticated and briefly cacheable, carrying nothing about any caller — asserted,
+  including that no configured secret can reach the document
+- ✅ [Documentation/architecture.md](Documentation/architecture.md) §Configuration
+- ✅ 518/518 tests green (347 unit, 171 integration)
+
+### The artwork routes, exercised by a real client for the first time — 2026-08-05
+
+The launcher's developer dashboard started calling the media and patch-note write routes, and
+driving them against this stack found a bug **no test here could have caught**.
+
+- ✅ **`/data/media` was never created or chowned in `docker/api/Dockerfile`.** Docker creates a
+  missing mount point as root, the API runs as `launcher`, and so *every fresh deployment
+  refused artwork uploads* — since the feature shipped on 2026-08-04. The suite has no file
+  server and mounts no volumes, and until now no client uploaded an image, so nothing looked
+- ✅ The `docker` CI job now mounts an empty volume at `/data/blobs`, `/data/media` and
+  `/var/log/launcher` and asserts each is owned by `launcher`. Verified in both directions: it
+  reports `root` on the pre-fix image and `launcher` on the fixed one
+- ✅ Everything else on those routes behaved: the raw body sniffed as PNG, a content-addressed
+  URL with its extension, **nginx serving it byte for byte to a tokenless client**, gallery
+  ordering and reordering, SVG refused with 422, deleting one row leaving a shared file alone,
+  re-publishing a patch note keeping its original date, and a second delete answering 404
+
+### Milestone 10 — GDPR erasure, deleting a game, crash reports and hardening ✅
+
+The first two below went together, because deleting a game and erasing an account are one
+question — what survives whom — and the second of them was open debt 15 of `HANDOFF.md`. Then
+the receiving side of the crash reports the launcher had been writing to disk since milestone 1,
+its console screen, and finally the hardening, which is the part that had to be scoped before it
+could be written.
+
+- ✅ `DELETE /api/v1/games/{idOrSlug}`: the game and, by cascade, its versions, builds, manifest
+  rows, artwork rows, patch notes, library entries and download history. Allowed while other
+  accounts hold it; what stops working answers 404, never 403 (D41)
+- ✅ `services::MediaReclaimer`, the one place that decides whether an artwork file may leave the
+  disk, now shared by `MediaService` and `CatalogService`; the storage keys come out of the same
+  statement that deletes the game (D42)
+- ✅ `POST /api/v1/me/deletion`: erasure, immediate, anonymising the account and leaving the
+  published games standing (D43). Sessions, reset links and the library go; `download_events`
+  keeps its rows and loses its subject
+- ✅ Re-authentication, the last-operator refusal, and the audit entry written by the erasing
+  statement itself (D44). `account_deletion_requests`, in the schema since 0001 and written to by
+  nothing, finally has a writer
+- ✅ [Documentation/authentication.md](Documentation/authentication.md) §Erasing an account,
+  [Documentation/storage-lifecycle.md](Documentation/storage-lifecycle.md) §Deleting a game
+- ✅ 552/552 tests green (366 unit, 186 integration against a real PostgreSQL), `clang-format`
+  clean
+
+#### Crash reports — 2026-08-06
+
+The last third of M10 that is a feature. `crash_reports` is new in migration 0004, and with it
+the first permission seeded outside 0001.
+
+- ✅ `POST /api/v1/crash-reports`, **unauthenticated** (D46), behind its own rate-limit bucket
+  and a field-by-field size cap; `enabled: false` answers 404 rather than a refusal
+- ✅ **No account is recorded, and there is no column for one** (D45). The launcher strips its
+  own directories out of the text before writing the file, so the copy on disk is the copy
+  that travels
+- ✅ A server-computed fingerprint over the exception type and the *shape* of the stack, so a
+  rebuild is the same bug and two machines failing on two paths are one (D47)
+- ✅ Three operator routes behind `admin.crashes.read`: the distinct bugs, the reports behind
+  one of them, and one report in full
+- ✅ A retention sweep on the existing timer machinery — nobody deletes these by hand
+- ✅ [Documentation/crash-reports.md](Documentation/crash-reports.md)
+- ✅ 589/589 tests green (390 unit, 199 integration), `clang-format` clean
+
+#### The console screen for them — 2026-08-06
+
+The three routes had answered nobody since the day they shipped.
+
+- ✅ A **Crashes** tab in `src/admin/ui/index.html`, built on the audit screen's shape: same
+  `api()` helper, same error envelope handling, same tables, no dependency and nothing the
+  `default-src 'none'` policy has to be relaxed for
+- ✅ Two lists, because the routes answer two questions: one row per bug above, the reports
+  behind one of them below, and the full report — stack trace included — under both. They page
+  independently, and a page number is only remembered once its request came back
+- ✅ Four integration tests over the served bytes, the shape this page's assertions already
+  took: the tab is reachable, all three routes are called, and the reports are narrowed by
+  fingerprint rather than by an account there is no column for
+- ✅ 592/592 tests green (390 unit, 202 integration), `clang-format` clean
+
+#### Hardening — 2026-08-06, and with it M10 ✅
+
+Split before it was written, into code with tests behind it and configuration a machine this
+repository has never seen has to do. The second half is written down rather than left implicit:
+[Documentation/hardening-and-deployment.md](Documentation/hardening-and-deployment.md) §6.
+
+- ✅ **Security headers on every response**, including the ones filters refuse with, which are
+  the ones an advice-only implementation would have missed (D49)
+- ✅ **A per-account ceiling on every authenticated route**, inside `JwtAuthFilter` so no route
+  can be added without one; tested on behaviour — the refusal, the `Retry-After`, one account's
+  exhausted allowance not touching another's, and an unauthenticated route unaffected (D48)
+- ✅ **`server.maxDocumentBytes` and `server.maxAnonymousBodyBytes`**: the manifest ceiling stops
+  being a silent consequence of the upload chunk size, and a caller with no token cannot have a
+  document parsed. The memory limit stays at the chunk size
+- ✅ **`X-Forwarded-For` honoured only from configured proxies, and read from the right** (D51) —
+  the code half of the TLS work, without which every per-address bucket collapses into one the
+  day a terminator goes in front
+- ✅ **The placeholder secrets are refused by name outside development** (D52), which the length
+  check alone let through
+- ✅ HSTS configurable, off by default, no `includeSubDomains` and no `preload` (D50)
+- ✅ 626/626 tests green (412 unit, 214 integration), `clang-format` clean
+
+### Mail delivery — 2026-08-06
+
+Open debt 1 of `HANDOFF.md`, and the one that kept this server from receiving its first real
+user: `requireVerifiedEmail` was true in production, the verification token came back in the
+response body in development **only**, and nothing anywhere sent a message — so on a real
+deployment nobody could finish registering and nobody could recover a password.
+
+- ✅ `services::IMailSender` beside the service that decides *when* something is due, with
+  `SmtpMailSender` over libcurl, `LoggingMailSender` for development and `DisabledMailSender`
+  for a deployment that sends nothing. One new dependency, `curl[non-http,openssl]`
+- ✅ The `dev*` token fields are **gone from both repositories**. The raw token now lives for
+  the length of one function inside `AuthService` and is never returned to anybody
+- ✅ A send that fails does not undo a registration; the answer says `verificationEmailSent`
+  and `POST /auth/verify-email/resend` is the recovery (D53)
+- ✅ `GET /verify-email` and `GET /password-reset`: two embedded pages, because a link in a
+  message is opened by a browser and every route here is a JSON POST. Neither consumes
+  anything on the `GET` (D54)
+- ✅ Its own rate-limit bucket for the routes that send, and three start-up refusals for the
+  configurations that cannot deliver (D55)
+- ✅ [Documentation/authentication.md](Documentation/authentication.md) §Delivering the two
+  links, rewritten over the old "development affordances"
+- ✅ 656/656 tests green (434 unit, 222 integration), `clang-format` clean
+
+**Verified by hand against a real relay**, because the suite has no mail server — Mailpit in
+`docker-compose.override.yml`, which stays out of the production compose on purpose. Registered
+with `REQUIRE_VERIFIED_EMAIL=true`, read the message in the catcher, opened the link **in a
+browser** and pressed the button, then signed in; requested a reset, mistyped the confirmation
+and was told, changed the password, and watched the old one stop working and the used link
+answer 422. Then stopped the relay: the registration still succeeded in two seconds with
+`verificationEmailSent: false` and one error line naming only the account id, and the resend
+recovered the account once the relay was back.
+
+### Launcher releases — the server half of self-update, 2026-08-07
+
+Not a milestone, and the first of the three pieces self-update needs. The launcher could not
+update itself because there was nothing to update *from*: no table, no route, no signature, no
+notion of a release at all. That surface exists now; the client half does not.
+
+- ✅ `GET /api/v1/launcher/releases/latest?channel=&platform=&arch=`, **unauthenticated** — the
+  launcher that most needs an update is the one that cannot sign in, so a route behind a token
+  would miss exactly the installations this exists for. Its own table and its own route rather
+  than a row in the catalog, which would have meant an unauthenticated path inside
+  `CatalogService` (D56)
+- ✅ **The signature covers a canonical release document, not the artifact** (D57), so version,
+  channel, platform, architecture and content address are all inside what the key vouches for.
+  `parseReleaseDocument` refuses anything that is not byte-for-byte the form it would have
+  written, which is what keeps the stored bytes and the columns beside them from meaning two
+  different things. `domain/CanonicalJson.h` is now shared with the build manifest
+- ✅ **ECDSA P-256 with SHA-256, pinned** (D58). Ed25519 was the obvious choice and lost on the
+  *client* side: .NET 9 has none in its BCL. No new vcpkg port, no new NuGet package
+- ✅ `launcher-api --publish-release` and `--retire-release`, over libpq like `--grant-role`.
+  **This server holds no private key** (D59): an attacker who takes it can stop updates and
+  cannot forge one. Retiring stands a fleet still rather than rolling it backwards
+- ✅ A third data root, `/data/launcher`, public and unsigned like the artwork — plus the volume,
+  the nginx location, the `mkdir`/`chown` in the API image and the CI ownership guard, which is
+  the line that cost a whole bug the last time a root was added
+- ✅ `launcherReleases.publicKey` empty turns the surface off, and a key that is not a P-256 key
+  is a start-up refusal. There is no setting that serves a release without checking it
+- ✅ [Documentation/launcher-releases.md](Documentation/launcher-releases.md) (tenth page) and
+  [hardening-and-deployment.md](Documentation/hardening-and-deployment.md) §6.5 on key custody
+- ✅ 718/718 tests green (474 unit, 244 integration), `clang-format` clean
+
+**Verified by hand against the real stack**, because the suite has no file server and cannot
+hold a private key the way a person does: a key pair generated offline, an artifact signed with
+it, published through `docker compose exec`, fetched from the route **with no token**, and the
+artifact pulled **through nginx** and hash-checked. Then the refusals: an attacker's own key, a
+document with a trailing newline, an artifact that is not the one the document names, and a row
+edited directly in the database — which the server refuses to serve, with one log line naming
+the release, rather than letting every client reject it.
+
+### Validation rules a client can translate — 2026-08-17
+
+The first of the maintainer's nine remaining notes (`ClaudeContent/appunti.txt`, outside version
+control): registering with a short password read *"Some of what you entered was not accepted
+(reference 7fd59c6d…)"*, because every `invalid_input` was one sentence and the reference was
+appended to it. The server always knew which rule refused; it just had no way to say so that a
+client could act on. D60 has the reasoning.
+
+- ✅ `Error` carries an optional `rule` and `ruleArgs`, and `makeErrorResponse` writes them when
+  there are any — **omitted, never empty**, so a server too old to send one reads the same as a
+  refusal that names none
+- ✅ `src/domain/ValidationRules.h`, 29 frozen names covering every field a person types into
+  the launcher: the account fields, a game's title, summary, description, slug and release date,
+  a version and its release notes, a devlog entry, and artwork alt text
+- ✅ The required-field refusals name a rule too, which is where this nearly stopped one field
+  short. `requireString` runs *before* the domain validator, so a blank password was refused by
+  the body reader and was the one 422 on the registration form with no rule on it — **found by
+  driving the running server, not by reading the code**. Absent, wrong type and blank are one
+  rule, because to whoever is looking at the form they are one thing
+- ✅ Deliberately unnamed: manifest paths, blob hashes, upload offsets, crash reports, release
+  documents and admin console fields. A refusal there is a client's bug, not a person's mistake
+- ✅ 739/739 tests green (497 unit, 242 integration), `clang-format` clean
+
+**Verified by hand against the running stack** with the client's own dependency-injection graph
+driving real registrations: **7 of 7**, each printing the sentence in English, Italian and
+French. The note's exact case now reads *"La password deve contenere almeno 8 caratteri."*, and
+a failure that is **not** a validation failure still carries its reference, which was the other
+half of the ask.
+
+### Publishing a version afterwards, and naming a build — 2026-08-17
+
+The maintainer's notes 13 and 18. D61 has the reasoning; the shape is in
+[Documentation/catalog.md](Documentation/catalog.md) §PATCH semantics.
+
+- ✅ `PATCH /api/v1/games/{id}/versions/{versionId}` — stage, release notes and `published`,
+  with absent meaning "leave alone". **A version created without "publish now" could not be
+  published by any route**, which is the thing the maintainer went looking for and did not find
+- ✅ `IGameVersionRepository::publish` is gone, replaced by `update`. It had been there since
+  migration 0001 and **nothing had ever called it**: the ability was in the repository the whole
+  time and no route reached it
+- ✅ Publishing twice keeps the original `published_at`; withdrawing sets it back to NULL and its
+  cost is written down rather than left to be discovered
+- ✅ Migration **0006** adds `builds.name`, 100 characters, not unique, empty by default —
+  because a build's identity is (version, platform, architecture), which is exactly what a
+  publisher looking at four identical rows cannot use
+- ✅ 752/752 tests green (505 unit, 247 integration), `clang-format` clean
+
+**Verified against the running stack** with the client's dependency-injection graph driving a
+real publisher session: **15 of 15**. Migration 0006 applied to the *existing* development
+database rather than a fresh one, which is the case that actually happens on a deployment.
+
+#### The minimum password length is 8 — 2026-08-17
+
+The maintainer's call, and the constant was the smallest part of it. `MIN_PASSWORD_LENGTH` is
+now 8, which is where NIST 800-63B actually puts the floor for a secret somebody chooses; the
+comment above it used to argue for "a long minimum", which would have sat there contradicting
+the number.
+
+- ✅ `domain::MIN_PASSWORD_LENGTH` 12 → 8, and `Documentation/authentication.md`,
+  `Documentation/architecture.md` and the envelope example in §6 brought with it
+- ✅ **`src/auth/ui/password-reset.html` was a second copy of the rule that nothing tests** —
+  `minlength="12"` twice and one hand-written English sentence. Left alone it would have gone on
+  refusing 8-to-11 characters that the API accepts, entirely client-side, where no integration
+  test can see it. It is now one JavaScript constant the two `minLength` attributes, the hint and
+  the check all read, with a comment saying what it shadows; §8 carries the row
+- ✅ **Existing accounts are untouched.** Lowering a minimum invalidates nothing: `validatePassword`
+  only ever runs on a plaintext password arriving on a request, never against a stored hash
+- ✅ One integration assertion was pinned to the literal `"12"` and now reads the constant. The
+  `"12"` left in `ErrorTest` and `ValidationRulesTest` is a hand-built envelope asserting on
+  serialisation, and stays
+- ✅ 752/752 tests green (505 unit, 247 integration), `clang-format` clean
+
+**Verified against the running stack** after `./scripts/dev.ps1 -Rebuild`, which is the step that
+is easy to skip: 7 characters refused with `rule: password_too_short` and `ruleArgs: ["8"]`, 8
+accepted with a 201, blank still refused by the body reader. And the reset page **opened in a
+browser**, since it is the half no test reaches: it reads "At least 8 characters", refuses 7
+locally, and lets 8 through to the server.
+
+### A build under an unpublished version was downloadable — 2026-08-17
+
+Found by the maintainer testing the launcher, and more serious than it sounds: a version
+created and never published was reachable by anybody who could name one of its builds, on any
+game that was not itself a draft. D62 has the reasoning; the shape is in
+[Documentation/downloads-and-deltas.md](Documentation/downloads-and-deltas.md) §Endpoints.
+
+- ✅ `BuildOwnership::versionPublished`, defaulting to **false**, and the single query that
+  fills it — `PgBuildRepository::findOwnership` — selecting `(v.published_at IS NOT NULL)`
+- ✅ `domain::mayReadBuild` requires both halves. Every route that asks it inherits the fix:
+  the download plan, `verify`, the manifest, and `deleteBuild`. Uploading is unaffected, since
+  a build is uploaded to a version precisely *before* it is published
+- ✅ **404, never 403**, consistent with the rest of the catalog: a refusal must not confirm
+  there is an unreleased version
+- ✅ An unreadable **source** in a delta plan now costs a full download instead of a refusal,
+  which is the case the fix would otherwise have broken — a player who installed a version that
+  was later withdrawn
+- ✅ Denial tests on every route that asks, a unit test on `mayReadBuild` itself where the rule
+  lives, and one integration test that publishes the version afterwards to show the flag is
+  what was gating it. All of them **fail against the old rule**, checked by reverting it
+- ✅ 762/762 tests green (513 unit, 249 integration), `clang-format` clean
+
+### Every write route of a game, tried by somebody who does not own it — 2026-08-18
+
+No behaviour changed here, and that is the finding. The maintainer saw one account's dashboard
+still showing the previous account's game (the client's D70) and asked, reasonably, that the
+*server* be what stops the buttons on it from working. That was already true by reading —
+`mayEditGame` is `owns || managesAnyGame()`, and `dev` has no `admin.games.manage` — but
+reading is what missed D62 for two milestones, so it was **driven** instead.
+
+- ✅ Two publishers against the running stack, sixteen write routes tried from the account that
+  owns none of them: the game (patch, delete), its versions (create, patch, delete), its builds
+  (create, missing blobs, begin upload, finalize, delete), its artwork (upload, patch, delete)
+  and its devlog (create, patch, delete). **All sixteen refused**, and the victim's game came
+  out of it with its title, version, build, picture and devlog entry unchanged
+- ✅ The codes are the two the catalog is supposed to use: **403** where the intruder can see
+  the game and is refused by `mayEditGame` (D30), **404** for anything reached through a build
+  id, whose existence is not confirmed (D26)
+- ✅ **Nine of those refusals had no test.** Creating a version and creating a build
+  (`CatalogEndpointTest`), the three artwork routes (`MediaEndpointTest`), writing and removing
+  a devlog entry (`PatchNoteEndpointTest`), and asking which blobs are missing and finalizing a
+  manifest (`UploadEndpointTest`). §9.5 asks for exactly these
+- ✅ The tests use a **public** game on purpose: on a draft the intruder cannot see the game at
+  all and every answer is 404 through `mayViewGame`, which proves nothing about ownership
+- ✅ What was already covered, found while writing these: editing a game, patching a version,
+  beginning an upload, editing a note, and the three deletes — the last three in
+  `RetentionEndpointTest`, which is where a delete belongs, so no copy was added
+- ✅ 771/771 tests green (513 unit, 258 integration), `clang-format` clean
+
+### Mail as an option, and the way back in without it — 2026-08-18
+
+The maintainer's note 14, and the last of the eight findings but one. Most of the server half
+already existed — `mail.transport = none`, `DisabledMailSender`, and the filter that answers 404
+on the routes that send (D55) — and what it left was a deployment nobody could get back into.
+D63 has the reasoning.
+
+- ✅ **`/capabilities` declares it**: `mail.enabled`, so the launcher hides "forgotten your
+  password?" instead of offering a button whose only outcome is a 404. D40's argument on a
+  switch rather than a limit
+- ✅ **`POST /admin/api/users/{id}/temporary-password`** on the loopback surface. The server
+  generates the password — 15 symbols over a 32-character alphabet with `l`, `1`, `o` and `0`
+  removed, because somebody reads it out — and it appears **only in the response**: the hash is
+  what is stored, and the audit entry records that it happened and to whom, never what it was.
+  One statement raises the flag, stores the hash, revokes the account's sessions and burns its
+  outstanding reset links, with the audit arm inside it (D36)
+- ✅ **`users.password_change_required`**, migration **0007**, and `JwtAuthFilter` honouring it:
+  a flagged session reaches `POST /api/v1/me/password` and nothing else, at no database round
+  trip, because the claim rides in the token. `password_change_required` is its own error
+  category, so a client branches on the code rather than on English prose
+- ✅ **`POST /api/v1/me/password`**, which is also the ordinary way to change a password. It
+  re-asks for the current one (D44), refuses a new one equal to the old — the rule that makes a
+  one-time password one-time, and the 30th name in `ValidationRules.h` — revokes every other
+  session, and answers with a **whole session**, because a 204 would leave the caller holding a
+  refresh token the same request had just revoked
+- ✅ **An operator cannot do this to their own account.** The console has no password-change
+  route, so they would lock themselves out of the surface they administer; refused with the
+  same shape as the deactivation rule
+- ✅ The denial path is covered for each piece (§9.5): a non-operator, the public listener, an
+  account that does not exist, a malformed id, and the operator's own account
+- ✅ **802/802 tests green** (531 unit, 271 integration), `clang-format` clean
+
+**Driven against the running stack**, not only asserted. `MAIL_TRANSPORT=none` and a restart:
+`/capabilities` answered `"mail":{"enabled":false}` and the reset route answered 404. An operator
+on `:9090` issued `w5txe-gmzg9-neb6p` for a victim account — the same route answered **404 on
+`:8080`** — the victim's refresh token died at once, the old password stopped signing in, the
+temporary one signed in with `passwordChangeRequired: true`, and `/library`, `/auth/me`, `/games`
+and `/me/games` all answered **403 `password_change_required`**. Re-entering the temporary
+password was refused with `rule: password_unchanged`; a wrong current password was 401; choosing
+one returned a session with the flag cleared and every route answered again.
+
+**One thing worth knowing and not fixed**: the account's **access token stays valid for its
+remaining minutes** after an operator sets a temporary password. The refresh token is revoked
+immediately, so the session cannot be renewed, but a token already in somebody's hands keeps
+working for up to fifteen minutes. That is the same staleness the permissions have carried since
+M3 and that the erasure documents about itself — the price of authorizing with no database round
+trip — and it is stated here rather than left to be discovered.
+
+### Videos as uploaded files — 2026-08-18
+
+The maintainer's note 11, and the last of the eight findings. The reasoning is **D64**; the
+contract is in [Documentation/artwork-and-devlog.md](Documentation/artwork-and-devlog.md).
+
+- ✅ **Migration 0008** adds `video` to `game_media_kind`, widens the content-type allow-list to
+  `video/mp4` and `video/webm`, turns the singleton unique index into an allow-list of the three
+  kinds that *are* singular, widens the storage-key shape to admit a digit in an extension, and
+  adds a constraint pairing kind with content type so no route can store a PNG as a video
+- ✅ **`domain::sniffVideoFormat`**: the ISO base media brand, not just the `ftyp` box, and the
+  EBML DocType read from the first 64 bytes so Matroska is refused where WebM is not
+- ✅ **`media.maxVideoBytes` (64 MiB) and `MAX_VIDEOS_PER_GAME` (3)**, both published by
+  `/capabilities` beside `media.videoContentTypes`, and the first of them folded into
+  `configureBodyLimits` — a video arrives whole in one POST, so it is now the number that sets
+  the largest body this server accepts
+- ✅ The file server routes `mp4` and `webm` on the media location and bounds `max_ranges`,
+  because seeking in a video is a Range request
+- ✅ **20 new tests** — ten on the sniffer and the kinds, five on the service's two budgets and
+  two caps, one on the capabilities document, four end to end. Backend **822/822** (547 unit,
+  275 integration)
+
+**Driven against the running stack, not asserted.** Migration 0008 applied to the **existing**
+development database (seven already there, one applied), which is the case a deployment meets. A
+real `ffmpeg`-produced MP4 and WebM uploaded 201 and came back from nginx as `video/mp4` and
+`video/webm` with `Accept-Ranges: bytes`, and a byte range answered **206**. An `.mkv` was
+refused with "the body is not an MP4 or WebM video", the MP4 posted as a screenshot with "the
+body is not a PNG, JPEG or WebP image", the fourth video on one game with **409**, and a 70 MiB
+one with Drogon's **bare 413** — while a 60 MiB one was accepted, which is what proves the body
+limit moved. See §8 for the two traps that cost a cycle each.
+
+### The console can hand out a password, and the guide says a server needs no relay — 2026-08-18
+
+The maintainer asked for two things after D63 landed: the deployment guide to say that a server
+without SMTP is a supported shape, and the operator console to grow the button the route had
+been waiting for. The launcher's own half — the screen that forces the change — already existed
+from D63 and was re-driven rather than rebuilt.
+
+- ✅ **`Set a temporary password…` in the user editor** (D65). Two presses, with a sentence
+  between them naming the account and what it costs; the password is shown **once**, at 20px and
+  selectable, under a notice saying the console cannot show it again. The list is deliberately
+  **not** reloaded afterwards — the response is the only copy that exists — so the status cell is
+  patched in place through a `data-field` hook
+- ✅ **The status column carries `passwordChangeRequired`**, so "who is still sitting on one they
+  never replaced" is visible without opening every row
+- ✅ `AdminUiEndpointTest.OffersTheOneTimePasswordAgainstTheRouteThatServesIt` — the console is
+  embedded at build time, so asserting on the served bytes is the cheapest way to catch a control
+  wired to the wrong path
+- ✅ **823/823 tests green** (547 unit, 276 integration), `clang-format` clean
+
+**Driven in a real browser**, because a console nobody looked at is a console nobody has checked.
+Signed in as an operator on `:9090`, opened an account, pressed the button: the confirmation
+named the address, the password appeared once (`pwxze-…`), and the row's status changed to
+*must change password* **without the table reloading**. Against the API the old password was
+then 401, the new one signed in with `passwordChangeRequired: true`, and the audit row was
+`user.password.temporary_set` with `{}` for metadata — it happened, not what it was. Closing the
+row and reopening it showed the button again and no password, which is the promise the notice
+makes. Then the same password was typed into the **launcher**, which landed on the forced-change
+screen with no tabs and no cancel, and choosing a new one brought the tabs back.
+
+The guide half is in the client repository:
+[DISTRIBUTING.md](https://github.com/Ruy41321/Custom-Game-Launcher/blob/main/DISTRIBUTING.md)
+§1.5, which now has two supported answers rather than one, a table of what changes, and the
+recovery procedure written out.
+
+### Next up
+- ✅ ~~**Mail as an option** (note 14)~~ — done on 2026-08-18, above, D63. `/capabilities`
+  declares it, an operator hands out a one-time password on the loopback surface, and
+  `JwtAuthFilter` refuses everything but `POST /api/v1/me/password` until it is replaced.
+- ✅ ~~**Self-update, the client half**~~ — done in the launcher repository on 2026-08-07, check
+  and swap both, and verified on real Windows. This entry was stale for ten days; the contract
+  it codes against is still
+  [Documentation/launcher-releases.md](Documentation/launcher-releases.md).
+- ⬜ **TLS in the stack.** Deliberately not code, and written out in
+  [Documentation/hardening-and-deployment.md](Documentation/hardening-and-deployment.md) §6
+  rather than left implicit: a terminator in front of the API, the two published ports moved to
+  loopback, `https://` base URLs, and the two settings — `HSTS_ENABLED` and `TRUSTED_PROXIES` —
+  that only mean something once it exists.
+
+Still deliberately absent, and worth stating so a later session does not assume otherwise:
+there is no automatic retention policy — nothing deletes an *old* build on its own, only what a
+publisher deletes by hand. The admin surface has no content-moderation screen and no settings
+screen; an operator can delete any publisher's game through the public API, but there is no
+button for it on the console.
+
+---
+
+## Session protocol
+
+### Every finished task ends with a recap of what is left
+
+**Not optional, and not only at the end of a milestone.** Whenever a task is finished — a
+feature, a fix, a piece of documentation — the last thing said is a short written recap of
+**what remains to be done**, in the conversation itself rather than only in a file.
+
+It says three things and stops:
+
+1. what was delivered, in a line;
+2. **what is left in the piece just touched**, including anything deliberately left out and why;
+3. what is next, and anything that is now blocked or newly known — a bug found in passing, a
+   claim elsewhere that this work has just made false.
+
+The reason is that this repository's memory lives in files a later session has to *choose* to
+read, while the person deciding what to do next is reading the conversation. A task that ends
+with "done" leaves them to reconstruct the remainder from a diff. It is also the moment a
+half-finished thing is most honestly describable: an hour later it looks finished.
+
+Keep it short. If the recap needs more than a screen, the work needed a `HANDOFF.md` entry too.
+
+### At the end of every working session, update:
+
+1. **§11 Progress** — move items between ✅/🚧/⬜, add what is genuinely next.
+2. **§4 Technical decisions** — append any new decision *with its rationale and the
+   alternatives rejected*. Never delete a row; if a decision is reversed, add a new row that
+   supersedes it and say why.
+3. **§7 Commands** — add any command a future session would otherwise have to rediscover.
+4. **§8 Environment gotchas** — record anything that cost time to figure out.
+
+Keep it accurate over optimistic: a wrong progress table is worse than no progress table.
+
+### At the end of a milestone, additionally
+
+5. **Run the suite and the formatter locally, then push `dev`** — see §10. Not something to ask
+   about. CI runs on `main`, which only the owner merges, so there is no run to watch.
+6. **Update `HANDOFF.md`**, which lives one directory above both repositories
+   (`C:\Users\Luigi\Developing\Personal\GameLauncher\HANDOFF.md`) and is deliberately outside
+   version control, so it never lands in a commit. It is the first thing the next session
+   reads, before either `CLAUDE.md`. Bring these up to date:
+   - **Stato** — which milestones are done, the current test count, what is pushed;
+   - **Prossimo** — the next milestone, in enough detail to start without re-deriving it;
+   - **Cosa esiste già lato server** — the endpoint sketch and the invariants a new surface
+     must not break, so the next session inherits the contract rather than rediscovering it;
+   - **Debiti aperti** — anything deferred, added or paid off.
+
+   `HANDOFF.md` is a briefing, not a changelog: it says what is true now and what to do next,
+   and everything already captured by `CLAUDE.md` or the `Documentation/` files belongs there
+   instead, referenced by name.
