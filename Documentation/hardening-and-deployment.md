@@ -183,6 +183,29 @@ header is whatever the original caller chose to send, so an implementation takin
 entry would let anybody hand themselves a fresh bucket per request. With no proxies configured
 the header is ignored outright, which is the right answer for a server clients reach directly.
 
+**Prove it, because nothing else will.** No header carries this, no log line reports it, and a
+deployment with it wrong looks exactly like one with it right until the day somebody is locked
+out. The only evidence is the limiter's own behaviour, and it takes a minute to produce.
+
+Exhaust the login bucket from one machine — a wrong password against an address that does not
+exist, so no real account is touched:
+
+```bash
+for i in $(seq 1 12); do curl -s -o /dev/null -w "%{http_code} " -X POST https://api.example.com/api/v1/auth/login -H "Content-Type: application/json" -d '{"email":"nobody@example.invalid","password":"wrong"}'; done; echo
+```
+
+You should see `auth.rateLimit.attempts` refusals — ten by default — and then `429`. Now, **within
+the same window**, make the same request from a *second* address; the server itself, calling its
+own public name, will do:
+
+- **`401`** — the two addresses hold separate buckets. This is configured correctly.
+- **`429`** — the second machine inherited the first one's block, so every client in the world
+  shares one bucket. That is the failure this setting exists to prevent, and it is the state a
+  deployment is in whenever the proxy goes in and this does not.
+
+Worth re-running whenever anything in front of this server changes: a proxy added or moved, a
+new bridge network, a CDN put in front of the terminator.
+
 ### 6.3 A relay to send from, and the address the links point at
 
 This is the other half of §6.1 and easy to meet late, because the server tells you: outside
